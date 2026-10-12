@@ -207,4 +207,26 @@ defmodule Malachi.Loadtest.PayloadTest do
       assert Payload.start_batch(9, 1, 4) == 0
     end
   end
+
+  describe "record_batches/7" do
+    test "is the encoded pool, record for record, before encoding" do
+      args = [:json, 7, 300, 4, 50, 3, 2]
+      records = apply(Payload, :record_batches, args)
+      encoded = apply(Payload, :encoded_batches, args)
+
+      assert tuple_size(records) == tuple_size(encoded)
+      assert Enum.all?(Tuple.to_list(records), &(length(&1) == 4))
+
+      for {batch, bytes} <- Enum.zip(Tuple.to_list(records), Tuple.to_list(encoded)) do
+        assert Malachi.Wire.encode_produce_records(batch) == bytes
+      end
+    end
+
+    test "keys the pool's value at position pos as k<rem(pos, keys)>" do
+      keys =
+        :random |> Payload.record_batches(1, 64, 5, 3, 1, 1) |> Tuple.to_list() |> List.flatten() |> Enum.map(& &1.key)
+
+      assert Enum.take(keys, 6) == ["k0", "k1", "k2", "k0", "k1", "k2"]
+    end
+  end
 end

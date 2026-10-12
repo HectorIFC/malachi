@@ -15,7 +15,16 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     * `--connections` concurrent connections (128)
     * `--duration` measured seconds (10), `--warmup` seconds excluded (2)
     * `--batch` records per produce (10), `--record-size` bytes (256), `--keys` cardinality (1000)
-    * `--pipeline` in-flight requests per connection, produce only (1 = closed-loop)
+    * `--pipeline` in-flight requests per connection, produce only (1 = closed-loop); on the stream keys,
+      the appends each range's stream keeps in flight, further capped by the window the broker grants
+    * `--protocol` auto | streams | legacy (default auto): the keys a produce goes on. auto takes the
+      producer streams when the cluster serves them (the `producer_streams` flag) and the legacy produce
+      otherwise; streams refuses a cluster that does not serve them; legacy never asks. On streams each
+      producing connection is a whole client, routing every record to its range's primary
+      (`Malachi.Loadtest.Producer`), and the report counts `moved`, `redirects` and `route_refreshes`.
+    * `--linger-ms` (0) and `--linger-bytes` (one batch): how long a range's share of each batch waits to
+      go out with others as one append, and how many bytes of them make one go at once; an append takes
+      whole shares only, as many as fit. Only accepted with auto or streams
     * `--max` records per fetch/push (100), `--window` stream credit (100)
     * `--prepopulate` records to seed before fetch/stream/mixed (10000 for those)
     * `--topic` (auto), `--topics` distinct topics to fan out over (1); N > 1 spreads load across
@@ -47,7 +56,7 @@ defmodule Mix.Tasks.Malachi.Loadtest do
 
   # Every enum flag, as CLI spelling => internal atom in the order the help lists them; the table is the
   # validation (anything else is a clean Mix error naming the choices). Mirrored by ENUM_FLAGS in
-  # scripts/loadtest.js.
+  # scripts/loadtest.js, which takes `protocol` in the Node generator's own change (#275, after this one).
   @enums [
     scenario: [
       {"produce", :produce},
@@ -58,7 +67,8 @@ defmodule Mix.Tasks.Malachi.Loadtest do
       {"acl", :acl}
     ],
     connect_strategy: [{"bounded", :bounded}, {"stagger", :stagger}, {"all-at-once", :all_at_once}],
-    payload: [{"constant", :constant}, {"json", :json}, {"random", :random}]
+    payload: [{"constant", :constant}, {"json", :json}, {"random", :random}],
+    protocol: [{"auto", :auto}, {"streams", :streams}, {"legacy", :legacy}]
   ]
 
   @switches [
@@ -91,7 +101,10 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     json: :boolean,
     measure_marker: :string,
     payload: :string,
-    payload_seed: :integer
+    payload_seed: :integer,
+    protocol: :string,
+    linger_ms: :integer,
+    linger_bytes: :integer
   ]
 
   @impl Mix.Task

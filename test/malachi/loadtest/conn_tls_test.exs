@@ -107,9 +107,9 @@ defmodule Malachi.Loadtest.ConnTLSTest do
     {path.("ca.pem"), path.("cert.pem"), path.("key.pem")}
   end
 
-  # A TLS listener that accepts one connection and then just holds it: the handshake is the subject,
-  # so nothing past it needs to speak the wire protocol.
-  defp tls_server(certfile, keyfile) do
+  # A TLS listener that accepts one connection, runs `after_handshake` on it (by default, just holds it:
+  # the handshake is the subject, so nothing past it needs to speak the wire protocol).
+  defp tls_server(certfile, keyfile, after_handshake \\ fn _socket -> Process.sleep(:infinity) end) do
     {:ok, _} = Application.ensure_all_started(:ssl)
 
     {:ok, listen} =
@@ -129,8 +129,8 @@ defmodule Malachi.Loadtest.ConnTLSTest do
       spawn(fn ->
         case :ssl.transport_accept(listen, 5_000) do
           {:ok, socket} ->
-            :ssl.handshake(socket, 5_000)
-            Process.sleep(:infinity)
+            {:ok, socket} = :ssl.handshake(socket, 5_000)
+            after_handshake.(socket)
 
           _ ->
             :ok
@@ -217,6 +217,24 @@ defmodule Malachi.Loadtest.ConnTLSTest do
       port = tls_server(certfile, keyfile)
 
       assert {:ok, conn} = Conn.connect(tls: true, host: "localhost", port: port, insecure: true)
+      Conn.close(conn)
+    end
+
+    test "an activated TLS connection delivers its frames as messages" do
+      {certfile, keyfile} = self_signed()
+
+      port =
+        tls_server(certfile, keyfile, fn socket ->
+          :ok = :ssl.send(socket, Malachi.Wire.encode_ok(3, "over tls"))
+          Process.sleep(:infinity)
+        end)
+
+      {:ok, conn} = Conn.connect(tls: true, host: "localhost", port: port, insecure: true)
+      :ok = Conn.activate(conn)
+      socket = conn.socket
+      assert_receive {:ssl, ^socket, _data} = message, 5_000
+      assert {:frames, [body], _conn} = Conn.message(conn, message)
+      assert Malachi.Wire.decode_response(body) == {3, 0, "over tls"}
       Conn.close(conn)
     end
   end

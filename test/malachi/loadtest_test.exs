@@ -5,14 +5,27 @@ defmodule Malachi.LoadtestTest do
 
   import ExUnit.CaptureIO
 
+  alias Malachi.BrokerServer
+  alias Malachi.Cluster.ClusterFlagsCache
+  alias Malachi.DataPlaneRouter
   alias Malachi.Loadtest
   alias Malachi.Loadtest.Conn
   alias Malachi.Loadtest.Payload
+  alias Malachi.ProducerDirectory
+  alias Malachi.RateLimiter
+  alias Malachi.Routing
   alias Malachi.TCPAcceptorPool
+  alias Malachi.Test.ClusterFlagsPause
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Test.PollingHelper
+  alias Malachi.Test.StreamStub
+  alias Malachi.Test.StreamTCP
   alias Malachi.Test.SubscribeResetStub
+  alias Malachi.Test.TCPHelper
   alias Malachi.Wire
+
+  # mirrors Malachi.Consumer.CoordinatorRouter's private @topology_key
+  @router_topology {Malachi.Consumer.CoordinatorRouter, :topology}
 
   # Runs a load test quietly and returns its report, capturing the printed summary.
   defp run(opts) do
@@ -216,7 +229,7 @@ defmodule Malachi.LoadtestTest do
       # keyed by user and the generator authenticates as admin, so every connection shares this bucket.
       Application.put_env(:malachi, :publish_rate_limit, 5)
       Application.put_env(:malachi, :publish_rate_window_ms, 60_000)
-      Malachi.RateLimiter.reset_bucket("admin", :publish)
+      RateLimiter.reset_bucket("admin", :publish)
 
       r = run(scenario: :produce, connections: 2, batch: 1, topic: topic("quota"))
 
@@ -260,6 +273,400 @@ defmodule Malachi.LoadtestTest do
         {records, _next, _skips} = Malachi.BrokerServer.consume(Malachi.LogBroker, "#{t}_#{i}", %{}, 1000, 0)
         assert records != [], "topic #{t}_#{i} should have received records"
       end
+    end
+  end
+
+  describe "produce on the stream keys" do
+    # With the `producer_streams` flag on, a producing connection is a whole client
+    # (`Malachi.Loadtest.Producer`): it reads the routes, opens a stream on each range of its topic inside
+    # the connect ramp, and counts every acknowledged append as an op.
+    setup do
+      :ok = ClusterFlagsPause.pause()
+      ClusterFlagsCache.put([Routing.flag()])
+      topology = :persistent_term.get(@router_topology, nil)
+      :persistent_term.erase(@router_topology)
+
+      on_exit(fn ->
+        if topology,
+          do: :persistent_term.put(@router_topology, topology),
+          else: :persistent_term.erase(@router_topology)
+      end)
+    end
+
+    # The producer streams open on this node for `topic`, and the connections that hold them.
+    defp producer_streams(topic), do: Enum.filter(ProducerDirectory.list().streams, &(&1.topic == topic))
+
+    defp producer_connections(topic) do
+      for %{connection: "#PID" <> pid} <- producer_streams(topic), uniq: true, do: :erlang.list_to_pid(to_charlist(pid))
+    end
+
+    # The values every range of `topic` holds, read on the stream keys.
+    defp stream_values(topic) do
+      {:ok, socket} = TCPHelper.connect()
+      {:ok, _token} = TCPHelper.authenticate_wire(socket, "admin", "admin123")
+      routes = StreamTCP.routes(socket, topic)
+
+      values =
+        for %{range: range, state: :active} <- routes.ranges,
+            value <- read_range(socket, topic, range, :earliest, []),
+            do: value
+
+      :gen_tcp.close(socket)
+      values
+    end
+
+    defp read_range(socket, topic, range, start, acc) do
+      {:ok, page} = StreamTCP.fetch_range(socket, topic, range: range, start: start, max: 1_000)
+
+      case StreamTCP.page_records(page) do
+        [] -> acc
+        records -> read_range(socket, topic, range, {:position, page.next}, acc ++ Enum.map(records, &elem(&1, 1)))
+      end
+    end
+
+    test "auto takes the stream keys the cluster serves: every append acknowledged, nothing refused" do
+      t = topic("streams")
+      r = run(scenario: :produce, connections: 4, batch: 5, topic: t)
+
+      assert r.protocol == :streams
+      assert r.errors == 0 and r.error_reasons == %{}
+      assert r.dropped == 0 and r.overloaded == 0 and r.rate_limited == 0
+      assert r.ops > 0
+      assert r.records == r.ops * 5
+      # every stream opened where the setup's routes said, so routing had nothing to do
+      assert r.moved == 0 and r.redirects == 0 and r.route_refreshes == 0
+      assert length(stream_values(t)) >= r.records
+    end
+
+    test "the pipeline is the appends each stream keeps in flight" do
+      r = run(scenario: :produce, connections: 2, batch: 5, pipeline: 8, topic: topic("streams_pipe"))
+
+      assert r.protocol == :streams and r.errors == 0
+      assert r.records == r.ops * 5
+      assert r.pipeline == 8
+    end
+
+    test "lingering joins batches into one append, so an op carries several of them" do
+      # 3 batches of 5 records of 256 bytes, keyed k0..k999, take at most 3 x 5 x (256 + 4 + 22) bytes: they
+      # reach linger_bytes long before the 60 s deadline, and each append takes 3 of them
+      r =
+        run(
+          scenario: :produce,
+          connections: 2,
+          batch: 5,
+          record_size: 256,
+          linger_ms: 60_000,
+          linger_bytes: 3 * 5 * (256 + 4 + 22),
+          pipeline: 4,
+          topic: topic("streams_linger")
+        )
+
+      assert r.errors == 0
+      assert r.ops > 0
+      assert r.records == r.ops * 15
+      assert {r.linger_ms, r.linger_bytes} == {60_000, 3 * 5 * (256 + 4 + 22)}
+    end
+
+    test "one batch is one append by default, whatever the record size" do
+      # small records, where the framing a batch holds per record (key and 22 bytes) is a large share of
+      # it: each append still carries one whole batch
+      r =
+        run(
+          scenario: :produce,
+          connections: 2,
+          batch: 10,
+          record_size: 100,
+          pipeline: 4,
+          topic: topic("streams_onebatch")
+        )
+
+      assert r.errors == 0 and r.ops > 0
+      assert r.records == r.ops * 10
+    end
+
+    test "the appends in flight at the deadline are waited for and counted, as a legacy pipeline's are" do
+      t = topic("streams_drain")
+      r = run(scenario: :produce, connections: 2, batch: 5, pipeline: 16, topic: t)
+
+      assert r.errors == 0
+      # with no warmup every acknowledgement is counted: what landed is what was counted
+      assert length(stream_values(t)) == r.records
+    end
+
+    test "a payload pool is streamed record for record" do
+      r =
+        run(
+          scenario: :produce,
+          connections: 2,
+          batch: 4,
+          payload: :json,
+          record_size: 300,
+          topic: topic("streams_pool")
+        )
+
+      assert r.protocol == :streams and r.errors == 0
+      assert r.records == r.ops * 4
+      assert r.payload_pool_values > 0
+    end
+
+    test "a stream prepopulate draws its batches from the payload pool" do
+      t = topic("streams_prepop_pool")
+
+      r =
+        run(scenario: :produce, connections: 1, batch: 10, payload: :json, record_size: 300, prepopulate: 100, topic: t)
+
+      assert r.protocol == :streams
+      values = stream_values(t)
+      assert length(values) >= 100 + r.records
+      # json documents, not the constant bytes
+      assert Enum.all?(Enum.take(values, 100), &String.starts_with?(&1, "{"))
+    end
+
+    test "the prepopulate goes through the stream keys too" do
+      t = topic("streams_prepop")
+      r = run(scenario: :produce, connections: 1, batch: 10, prepopulate: 200, duration: 1, topic: t)
+
+      assert r.protocol == :streams
+      assert length(stream_values(t)) >= 200 + r.records
+    end
+
+    test "a split mid-run moves every stream, and the records keep landing on the children" do
+      t = topic("streams_split")
+      parent = self()
+
+      spawn_link(fn ->
+        # once every worker's stream is open, and they have streamed a little on it
+        PollingHelper.wait_until!(fn -> length(producer_connections(t)) == 3 end)
+        Process.sleep(200)
+        send(parent, {:split, BrokerServer.split_range(DataPlaneRouter.shard_for(t), {t, 0})})
+      end)
+
+      r = run(scenario: :produce, connections: 3, batch: 5, duration: 2, pipeline: 4, topic: t)
+
+      assert_receive {:split, {:ok, _left, _right}}, 5_000
+      assert r.errors == 0, inspect(r.error_reasons)
+      assert r.moved >= 3
+      assert r.route_refreshes >= 3
+      # a batch whose keys the split put in two ranges goes out as two appends, each an op of its own
+      assert r.records <= r.ops * 5 and r.records >= r.ops
+      assert length(stream_values(t)) >= r.records
+    end
+
+    test "an append refused by the publish quota is counted apart from a genuine error, as a produce is" do
+      for key <- [:publish_rate_limit, :publish_rate_window_ms] do
+        prior = Application.get_env(:malachi, key)
+        on_exit(fn -> Application.put_env(:malachi, key, prior) end)
+      end
+
+      Application.put_env(:malachi, :publish_rate_limit, 5)
+      Application.put_env(:malachi, :publish_rate_window_ms, 60_000)
+      RateLimiter.reset_bucket("admin", :publish)
+
+      r = run(scenario: :produce, connections: 2, batch: 1, topic: topic("streams_quota"))
+
+      assert r.protocol == :streams
+      assert r.rate_limited > 0, "the quota never bit, so this case proves nothing"
+      assert r.errors == 0 and r.error_reasons == %{}
+      assert r.overloaded == 0
+    end
+
+    test "an append the broker sheds as overloaded is counted apart from a genuine error, as a produce is" do
+      with_stream_server(%{27 => {:refuse_append, "overloaded"}}, fn port ->
+        r = run(scenario: :produce, connections: 1, batch: 2, port: port, topic: "t")
+
+        assert r.overloaded > 0
+        assert r.errors == 0 and r.error_reasons == %{}
+        assert r.ops == 0 and r.rate_limited == 0
+      end)
+    end
+
+    test "what happens in the warmup is not counted, acknowledgements and refusals alike" do
+      # appends refused for the first 300 ms of a 1 s warmup (counted from the stream's open, which comes
+      # just before it), acknowledged from then on
+      with_stream_server(%{27 => {:refuse_append, "rate_limited"}}, fn port, stub ->
+        spawn_link(fn ->
+          PollingHelper.wait_until!(fn -> StreamStub.opened(stub) > 0 end, interval: 5)
+          Process.sleep(300)
+          StreamStub.set_override(stub, 27, :default)
+        end)
+
+        r = run(scenario: :produce, connections: 1, batch: 1, warmup: 1, duration: 1, port: port, topic: "t")
+        refused = StreamStub.refused(stub)
+        acknowledged = length(StreamStub.appends(stub)) - refused
+
+        assert refused > 0, "the stub refused nothing, so this case proves nothing"
+        assert r.rate_limited == 0
+        # the appends acknowledged in the warmup are not ops
+        assert r.ops > 0 and r.ops < acknowledged
+        assert r.errors == 0
+      end)
+    end
+
+    test "any other refusal of an append is a genuine error, under the reason the broker gave" do
+      prior = Application.get_env(:malachi, :max_inflated_batch_bytes)
+      on_exit(fn -> Application.put_env(:malachi, :max_inflated_batch_bytes, prior) end)
+      # a batch of 2 x 256 bytes inflates past this: every append is refused
+      Application.put_env(:malachi, :max_inflated_batch_bytes, 100)
+
+      r = run(scenario: :produce, connections: 1, batch: 2, record_size: 256, topic: topic("streams_refused"))
+
+      assert r.errors > 0
+      assert [reason] = Map.keys(r.error_reasons)
+      assert r.error_reasons[reason] == r.errors
+      assert r.ops == 0 and r.rate_limited == 0 and r.overloaded == 0
+    end
+
+    test "a connection the broker drops mid-run is a drop, not an error, and the client streams on" do
+      t = topic("streams_drop")
+      parent = self()
+
+      spawn_link(fn ->
+        # the client's one connection streaming to t, once open; then the one it opens after the drop, once
+        # an append went through it
+        PollingHelper.wait_until!(fn -> producer_connections(t) != [] end)
+        Process.sleep(300)
+        # a listing gives a connection 500 ms to answer: one busy past that is asked again, and the pid is
+        # taken from the listing that found it
+        PollingHelper.wait_until!(fn ->
+          Process.put(:connections, producer_connections(t))
+          match?([_], Process.get(:connections))
+        end)
+
+        [pid] = Process.get(:connections)
+        Process.exit(pid, :kill)
+        send(parent, :dropped)
+
+        PollingHelper.wait_until!(fn ->
+          Enum.any?(producer_streams(t), &(&1.connection != inspect(pid) and &1.acked_sequence > 0))
+        end)
+
+        send(parent, :streamed_on)
+      end)
+
+      r = run(scenario: :produce, connections: 1, batch: 5, duration: 2, topic: t)
+
+      assert_receive :dropped, 5_000
+      assert_receive :streamed_on, 5_000
+      assert r.dropped >= 1
+      assert r.route_refreshes >= 1
+      assert r.errors == 0, inspect(r.error_reasons)
+      assert r.ops > 0 and r.records == r.ops * 5
+    end
+
+    test "streams refuses a cluster that does not serve them, rather than measuring the legacy keys" do
+      ClusterFlagsCache.put([])
+
+      assert_raise Loadtest.SetupError, ~r/does not serve the stream keys \(the producer_streams flag is off\)/, fn ->
+        run(scenario: :produce, connections: 1, protocol: :streams, topic: topic("streams_off"))
+      end
+    end
+
+    test "legacy keeps to the legacy produce even when the cluster serves streams" do
+      r = run(scenario: :produce, connections: 2, batch: 5, protocol: :legacy, topic: topic("streams_legacy"))
+
+      assert r.protocol == :legacy and r.errors == 0
+      assert r.records == r.ops * 5
+      assert {r.linger_ms, r.linger_bytes} == {nil, nil}
+    end
+
+    test "streams refuses a node that does not answer cluster_state" do
+      with_scripted_server(fn _api_key, _n -> :ok end, fn port ->
+        assert_raise Loadtest.SetupError,
+                     ~r/does not serve the stream keys \(the server does not answer cluster_state\)/,
+                     fn ->
+                       run(scenario: :produce, connections: 1, port: port, protocol: :streams, topic: "t")
+                     end
+      end)
+    end
+
+    test "a connection lost while reading the cluster state fails the setup, naming it" do
+      with_stream_server(%{24 => :close}, fn port ->
+        assert_raise Loadtest.SetupError, ~r/could not read the cluster state: the connection failed/, fn ->
+          run(scenario: :produce, connections: 1, port: port, topic: "t")
+        end
+      end)
+    end
+
+    test "routes the server refuses, or a connection lost reading them, fail the setup" do
+      with_stream_server(%{25 => {:error, "no_such_topic"}}, fn port ->
+        assert_raise Loadtest.SetupError,
+                     ~r/could not read the routes of "t": the server answered "no_such_topic"/,
+                     fn ->
+                       run(scenario: :produce, connections: 1, port: port, topic: "t")
+                     end
+      end)
+
+      with_stream_server(%{25 => :close}, fn port ->
+        assert_raise Loadtest.SetupError, ~r/could not read the routes of "t": the connection failed/, fn ->
+          run(scenario: :produce, connections: 1, port: port, topic: "t")
+        end
+      end)
+    end
+
+    test "a prepopulate the broker stops answering fails after one wait, not one per batch" do
+      # 30 batches against a pipeline of 16: the 17th waits for room that never comes
+      with_stream_server(%{27 => :silent}, fn port ->
+        {elapsed_us, _} =
+          :timer.tc(fn ->
+            assert_raise Loadtest.SetupError, ~r/could not prepopulate "t": it timed out/, fn ->
+              run(
+                scenario: :produce,
+                connections: 1,
+                port: port,
+                prepopulate: 300,
+                batch: 10,
+                setup_timeout_ms: 200,
+                topic: "t"
+              )
+            end
+          end)
+
+        assert elapsed_us < 1_500_000, "waited #{div(elapsed_us, 1000)} ms"
+      end)
+    end
+
+    test "a prepopulate the broker refuses, or never answers, fails the setup" do
+      with_stream_server(%{27 => {:refuse_append, "storage_full"}}, fn port ->
+        assert_raise Loadtest.SetupError, ~r/could not prepopulate "t": the server answered "storage_full"/, fn ->
+          run(scenario: :produce, connections: 1, port: port, prepopulate: 10, batch: 10, topic: "t")
+        end
+      end)
+
+      with_stream_server(%{27 => :silent}, fn port ->
+        assert_raise Loadtest.SetupError, ~r/could not prepopulate "t": it timed out/, fn ->
+          run(
+            scenario: :produce,
+            connections: 1,
+            port: port,
+            prepopulate: 10,
+            batch: 10,
+            setup_timeout_ms: 200,
+            topic: "t"
+          )
+        end
+      end)
+    end
+
+    test "a stream client whose streams cannot open fails the run as a connection that cannot authenticate" do
+      # a server that serves the stream keys and refuses every open: each worker's open happens inside the
+      # connect ramp, so the run fails there, naming the refusal
+      with_stream_server(%{26 => {:error, "permission_denied"}}, fn port ->
+        assert_raise Loadtest.SetupError, ~r/2 of 2 connections failed.*permission_denied/, fn ->
+          run(scenario: :produce, connections: 2, port: port, topic: "refused")
+        end
+      end)
+    end
+  end
+
+  # A run against a `Malachi.Test.StreamStub`, with `overrides` replacing its answer to a key; `fun` takes
+  # the stub's port, and the stub too when it steers it.
+  defp with_stream_server(overrides, fun) do
+    stub = StreamStub.start(overrides)
+
+    try do
+      if is_function(fun, 2), do: fun.(stub.port, stub), else: fun.(stub.port)
+    after
+      StreamStub.stop(stub)
     end
   end
 
@@ -537,6 +944,55 @@ defmodule Malachi.LoadtestTest do
       assert decoded["latency_ms"]["p50"] == report.latency_ms.p50
       assert decoded["meta"]["command"] == report.meta.command
       assert decoded["meta"]["hardware"]["cpu"] == report.meta.hardware.cpu
+    end
+  end
+
+  describe "protocol options" do
+    test "the lingering knobs only apply to the protocols that stream" do
+      assert_raise ArgumentError, "linger_ms only applies to the :auto and :streams protocols", fn ->
+        Loadtest.reproduce_command(protocol: :legacy, linger_ms: 5)
+      end
+
+      assert_raise ArgumentError, "linger_bytes only applies to the :auto and :streams protocols", fn ->
+        Loadtest.reproduce_command(protocol: :legacy, linger_bytes: 5)
+      end
+    end
+
+    test "a protocol, a linger_ms or a linger_bytes out of range is refused" do
+      assert_raise ArgumentError, ~r/unknown protocol :grpc/, fn -> Loadtest.reproduce_command(protocol: :grpc) end
+
+      assert_raise ArgumentError, ~r/linger_ms must be a non-negative integer/, fn ->
+        Loadtest.reproduce_command(linger_ms: -1)
+      end
+
+      assert_raise ArgumentError, ~r/linger_bytes must be a positive integer/, fn ->
+        Loadtest.reproduce_command(linger_bytes: 0)
+      end
+    end
+
+    test "the command records the protocol as asked, with the lingering it used, one batch by default" do
+      command = Loadtest.reproduce_command(batch: 4, record_size: 100)
+      assert shell_value(command, "--protocol") == "auto"
+      assert shell_value(command, "--linger-ms") == "0"
+      # 4 records as a batch holds them: 100 bytes, the longest key (k999) and 22 of framing
+      assert shell_value(command, "--linger-bytes") == "504"
+
+      command = Loadtest.reproduce_command(protocol: :streams, linger_ms: 7, linger_bytes: 9)
+      assert {shell_value(command, "--protocol"), shell_value(command, "--linger-ms")} == {"streams", "7"}
+      assert shell_value(command, "--linger-bytes") == "9"
+
+      command = Loadtest.reproduce_command(protocol: :legacy)
+      assert shell_value(command, "--protocol") == "legacy"
+      assert shell_flag_absent?(command, "--linger-ms")
+      assert shell_flag_absent?(command, "--linger-bytes")
+    end
+
+    test "a cluster that does not serve the stream keys is measured on the legacy produce under auto" do
+      r = run(scenario: :produce, connections: 2, batch: 5, topic: topic("auto_legacy"))
+
+      assert r.protocol == :legacy
+      assert r.records == r.ops * 5
+      assert {r.moved, r.redirects, r.route_refreshes} == {0, 0, 0}
     end
   end
 
@@ -1379,6 +1835,13 @@ defmodule Malachi.LoadtestTest do
 
   defp scripted_serve(sock, answer, requests) do
     case :gen_tcp.recv(sock, 0) do
+      # a node older than the stream keys, answered without counting: the scripts number the requests the
+      # legacy produce path makes
+      {:ok, <<24::16, corr::32, _payload::binary>>} ->
+        {:ok, <<_len::32, body::binary>>} = {:ok, Wire.encode_error(corr, :unknown_api_key)}
+        :gen_tcp.send(sock, body)
+        scripted_serve(sock, answer, requests)
+
       {:ok, <<api_key::16, corr::32, _payload::binary>>} ->
         n = :counters.get(requests, 1)
         :counters.add(requests, 1, 1)

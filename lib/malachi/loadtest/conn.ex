@@ -222,6 +222,35 @@ defmodule Malachi.Loadtest.Conn do
   @spec close(t()) :: :ok
   def close(%__MODULE__{transport: t, socket: s}), do: tclose(t, s)
 
+  @doc """
+  Has the socket deliver its next bytes as a message to the owner (`active: :once`), for a client that
+  reads several connections at once (`Malachi.Loadtest.Producer`): a blocking `recv_frame/2` on one would
+  leave the others unread. Call it again after each message `message/2` takes.
+  """
+  @spec activate(t()) :: :ok | {:error, term()}
+  def activate(%__MODULE__{transport: :gen_tcp, socket: s}), do: :inet.setopts(s, active: :once)
+  def activate(%__MODULE__{transport: :ssl, socket: s}), do: :ssl.setopts(s, active: :once)
+
+  @doc """
+  Takes a socket message an activated connection sent its owner: `{:frames, bodies, conn}` with every
+  whole frame body its bytes completed (in order, the rest kept in the buffer), `{:closed, reason}` when
+  the connection is gone, or `:no` for a message about another socket.
+  """
+  @spec message(t(), term()) :: {:frames, [binary()], t()} | {:closed, term()} | :no
+  def message(%__MODULE__{socket: s} = conn, {tag, s, data}) when tag in [:tcp, :ssl],
+    do: frames(%{conn | buffer: conn.buffer <> data}, [])
+
+  def message(%__MODULE__{socket: s}, {tag, s}) when tag in [:tcp_closed, :ssl_closed], do: {:closed, :closed}
+  def message(%__MODULE__{socket: s}, {tag, s, reason}) when tag in [:tcp_error, :ssl_error], do: {:closed, reason}
+  def message(%__MODULE__{}, _other), do: :no
+
+  defp frames(conn, bodies) do
+    case Wire.decode_frame(conn.buffer) do
+      {:ok, body, rest} -> frames(%{conn | buffer: rest}, [body | bodies])
+      :incomplete -> {:frames, Enum.reverse(bodies), conn}
+    end
+  end
+
   # Transport dispatch (explicit, so the two socket backends are obvious and no `apply/3` is needed).
   defp tsend(:gen_tcp, socket, data), do: :gen_tcp.send(socket, data)
   defp tsend(:ssl, socket, data), do: :ssl.send(socket, data)

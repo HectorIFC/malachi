@@ -311,11 +311,32 @@ defmodule Malachi.Loadtest.Payload do
         ) :: tuple()
   def encoded_batches(mode, seed, record_size, batch, keys, connections, pipeline) do
     mode
+    |> record_batches(seed, record_size, batch, keys, connections, pipeline)
+    |> Tuple.to_list()
+    |> Enum.map(&Wire.encode_produce_records/1)
+    |> List.to_tuple()
+  end
+
+  @doc """
+  The same pool as `encoded_batches/7`, value for value and key for key, as batches of records: what a
+  client that routes each record to its range (`Malachi.Loadtest.Producer`) takes, since it encodes each
+  range's share of a batch on its own.
+  """
+  @spec record_batches(
+          mode(),
+          non_neg_integer(),
+          pos_integer(),
+          pos_integer(),
+          pos_integer(),
+          pos_integer(),
+          pos_integer()
+        ) :: tuple()
+  def record_batches(mode, seed, record_size, batch, keys, connections, pipeline) do
+    mode
     |> values(seed, record_size, pool_size(record_size, batch, connections, pipeline))
     |> Enum.with_index()
     |> Enum.map(fn {value, pos} -> %Record{value: value, key: "k#{rem(pos, keys)}", timestamp: 0, headers: []} end)
     |> Enum.chunk_every(batch)
-    |> Enum.map(&Wire.encode_produce_records/1)
     |> List.to_tuple()
   end
 
