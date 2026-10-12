@@ -907,12 +907,17 @@ defmodule Malachi.Loadtest.Producer do
 
   # --- routes ---
 
-  # When a fixed backoff ends (a topic's routes, a range's open after a connection or a read failed),
-  # counted from when the call gave up, not from when it was asked. A call that blocked (a node that does
-  # not answer takes the connect timeout per address) would otherwise leave one already over, and the next
-  # attempt would not wait at all. `now` is the caller's instant, which a test may set ahead of the clock.
-  # The backoff after repeated redirects (`opened/8`) grows with them and is counted from `now`: it follows
-  # an answer read from the socket, with no blocking call before it, so `now` is when it came.
+  # When a fixed backoff ends, counted from when the call gave up, not from when it was asked: a topic's
+  # routes that could not be read (`ensure_routes/3`); a range whose connection failed, on connect or on a
+  # send (`open_at/5`), or dropped (`dropped/4`); and a range whose records failed (`fail_buffer/5`), for an
+  # open the broker refused for a reason that is not a redirect, routes that could not be read, or a
+  # primary with no address. A call that blocked (a node that does not answer takes the connect timeout per
+  # address) would otherwise leave one already over, and the next attempt would not wait at all. `now` is
+  # the caller's instant, which a test may set ahead of the clock.
+  #
+  # The one backoff that does not use it is the redirect branch of `opened/8`: it grows with the redirects
+  # in a row, and is counted from `now`, which follows an answer read from the socket with no blocking call
+  # before it, so `now` is when that answer came.
   defp backoff_until(now), do: max(now, mono_ms()) + @retry_ms
 
   # The routes of `topic`, read again if they were forgotten. A topic whose routes could not be read is not
