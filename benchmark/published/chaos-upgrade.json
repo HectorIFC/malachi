@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": "2026-10-17T08:33:55Z",
+    "timestamp": "2026-10-18T08:50:51Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "c8364b2",
-    "git_ref_date": "2026-10-16T09:02:03Z",
+    "git_ref": "459b60c",
+    "git_ref_date": "2026-10-17T08:34:05Z",
     "malachi_version": "0.22.0",
     "hardware": {
       "cpu": "x86_64",
@@ -25,16 +25,17 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 46558,
-    "post_chaos_records_per_s": 2270
+    "acked_writes": 49559,
+    "post_chaos_records_per_s": 13473
   },
   "failures": [
-    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1424)",
-    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 4005)",
+    "malachi3 did not serve a clean produce of its own after p3: node 3 to NEW",
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 2461)",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 5649)",
     "nodes 1 and 2 did not serve a clean produce while node 3 was down",
-    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 4005)"
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 5649)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261017T080056Z-c8364b2",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261018T081831Z-459b60c",
   "details": {
     "old_ref": "v0.21.1",
     "old_rule": "the newest release whose code differs from this tree, which is release v0.22.0's",
@@ -45,9 +46,9 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 16656,
-      "phase2": 11618,
-      "phase3": 18284
+      "phase1": 18476,
+      "phase2": 13170,
+      "phase3": 17913
     },
     "vnodes": 4,
     "vnode_rule": "sharded: v0.21.1 resumes its vnode members after a restart",
