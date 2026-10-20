@@ -1,14 +1,14 @@
 {
   "meta": {
-    "timestamp": "2026-10-19T09:48:58Z",
+    "timestamp": "2026-10-20T09:23:53Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "6b7d62c",
-    "git_ref_date": "2026-10-18T08:51:03Z",
+    "git_ref": "e760d3a",
+    "git_ref_date": "2026-10-19T09:49:06Z",
     "malachi_version": "0.22.0",
     "hardware": {
       "cpu": "x86_64",
       "cores": 4,
-      "os": "Linux 6.17.0-1022-azure"
+      "os": "Linux 7.0.0-1017-azure"
     }
   },
   "certification": "UPGRADE AND ROLLBACK CERTIFICATION",
@@ -25,18 +25,16 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 24726,
-    "post_chaos_records_per_s": 2433
+    "acked_writes": 35891,
+    "post_chaos_records_per_s": 4557
   },
   "failures": [
-    "malachi3 did not serve a clean produce of its own after p2: node 3 back to OLD",
-    "no produce was acknowledged through p3: node 2 to NEW, while malachi2 was down (stuck at 251)",
-    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 629)",
-    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 1716)",
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1290)",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 3518)",
     "nodes 1 and 2 did not serve a clean produce while node 3 was down",
-    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 1716)"
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 3518)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261019T091552Z-6b7d62c",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261020T085040Z-e760d3a",
   "details": {
     "old_ref": "v0.21.1",
     "old_rule": "the newest release whose code differs from this tree, which is release v0.22.0's",
@@ -47,9 +45,9 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 10941,
-      "phase2": 4251,
-      "phase3": 9534
+      "phase1": 14524,
+      "phase2": 8453,
+      "phase3": 12914
     },
     "vnodes": 4,
     "vnode_rule": "sharded: v0.21.1 resumes its vnode members after a restart",
