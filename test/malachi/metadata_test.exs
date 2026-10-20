@@ -1,6 +1,7 @@
 defmodule Malachi.MetadataTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Cluster.MachineVersion
   alias Malachi.Metadata
 
   defp apply!(state, command) do
@@ -380,6 +381,20 @@ defmodule Malachi.MetadataTest do
       assert {_state, {:error, :no_such_segment}} =
                Metadata.apply(state, {:set_segment_replicas, "nope", [:b1]})
     end
+
+    test "the compare-and-swap form reassigns the set only while it is still the expected one" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1, :b2, :b3], 0})
+
+      assert {state, :ok} = apply!(state, {:set_segment_replicas, "seg1", [:b1, :b2], [:b1, :b2, :b3]})
+      assert Metadata.get_segment(state, "seg1").replica_set == [:b1, :b2]
+
+      # Another writer moved the set first: the stale write is refused and the set stays where it was.
+      assert {state, {:error, :replica_set_changed}} =
+               apply!(state, {:set_segment_replicas, "seg1", [:b3, :b1], [:b1, :b2, :b3]})
+
+      assert Metadata.get_segment(state, "seg1").replica_set == [:b1, :b2]
+    end
   end
 
   describe "delete_segment (retention)" do
@@ -534,6 +549,18 @@ defmodule Malachi.MetadataTest do
       table = Metadata.command_versions()
       assert table[{:bind_topic_policy, 3}] == 4
       assert table[{:set_topic_policy, 3}] == 0
+    end
+
+    test "the compare-and-swap form enters at the version after the last release, so an older member refuses it" do
+      table = Metadata.command_versions()
+      introduced = table[{:set_segment_replicas, 4}]
+      assert introduced == MachineVersion.code_version()
+
+      older = %{machine_version: introduced - 1, index: 1, term: 1, system_time: 0}
+      command = {:set_segment_replicas, "seg1", [:b1], [:b2]}
+
+      assert {:before, {:error, {:unsupported_command, {:set_segment_replicas, 4}, ^introduced, _effective}}} =
+               MachineVersion.apply(older, command, :before, table, fn _meta, _command, state -> {state, :applied} end)
     end
 
     test "topics_bound_to/2 names the topics bound to a policy, sorted past the 32 keys a map keeps in order" do
