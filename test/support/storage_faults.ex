@@ -50,6 +50,43 @@ defmodule Malachi.Test.StorageFaults do
   end
 
   @doc """
+  Takes read permission away from directory `path` for the rest of the test, so it cannot be opened to be
+  fsynced, while its entries can still be looked up by name, and proves it took. Must be called from the
+  test process (it registers the restore with `ExUnit.Callbacks.on_exit/1`).
+  """
+  @spec make_unsyncable!(Path.t()) :: :ok
+  def make_unsyncable!(path) do
+    # Search permission stays, so a file inside is still found by name, which is what a marker check does.
+    File.chmod!(path, 0o100)
+    ExUnit.Callbacks.on_exit(fn -> File.chmod(path, 0o755) end)
+
+    # Opening a directory to fsync it needs read permission, and permissions do not bind root. A test that
+    # carried on would pass for the wrong reason, so it fails here instead, loudly.
+    assert {:error, :eacces} = :file.open(path, [:directory, :read, :raw]),
+           "#{path} can still be opened for an fsync after chmod 100; is the suite running as root?"
+
+    :ok
+  end
+
+  @doc """
+  Takes every permission away from directory `path` for the rest of the test, so its entries can be neither
+  listed nor looked up, and proves it took. Must be called from the test process (it registers the restore
+  with `ExUnit.Callbacks.on_exit/1`).
+  """
+  @spec make_inaccessible!(Path.t()) :: :ok
+  def make_inaccessible!(path) do
+    File.chmod!(path, 0o000)
+    ExUnit.Callbacks.on_exit(fn -> File.chmod(path, 0o755) end)
+
+    # Listing needs read permission on the directory, and permissions do not bind root. A test that carried on
+    # would pass for the wrong reason, so it fails here instead, loudly.
+    assert {:error, :eacces} = File.ls(path),
+           "#{path} can still be listed after chmod 000; is the suite running as root?"
+
+    :ok
+  end
+
+  @doc """
   Closes a `Malachi.Storage.ElixirStore` handle's descriptor behind its back, so the next operation on it
   fails the way a descriptor on a failing device does. Measured on macOS and Linux (OTP 28 and 29): every
   raw file operation on a closed descriptor answers `{:error, :einval}` and none raises.
