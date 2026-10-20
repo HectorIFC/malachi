@@ -461,8 +461,38 @@ defmodule Malachi.Broker do
 
         case read_budget(segment, start, max_records) do
           :eof -> :eof
-          budget -> with_start(read_fun.(primary(segment), segment.id, start, budget), start)
+          budget -> with_start(read_from_replicas(segment, start, budget, read_fun), start)
         end
+    end
+  end
+
+  # A sealed segment's head answers end-of-log for a copy it no longer holds (a repair deleted it and has not
+  # refetched it yet), while the segment's other replicas still hold its records. So an end-of-log from the head is
+  # asked of the others, in order, and so is an error from it (a head that is slow or unreachable). An active segment
+  # has one writer and is read from its head alone.
+  defp read_from_replicas(%{state: :sealed, replica_set: [head | rest]} = segment, start, budget, read_fun) do
+    case read_fun.(head, segment.id, start, budget) do
+      :eof ->
+        Enum.reduce_while(rest, :eof, &read_other_replica(&1, &2, segment, start, budget, read_fun))
+
+      {:error, _reason} = error ->
+        Enum.reduce_while(rest, error, &read_other_replica(&1, &2, segment, start, budget, read_fun))
+
+      answer ->
+        answer
+    end
+  end
+
+  defp read_from_replicas(segment, start, budget, read_fun),
+    do: read_fun.(primary(segment), segment.id, start, budget)
+
+  # A replica that does not answer (an error, an unreachable server) does not say the records are absent: the next
+  # replica is asked, and only when none of them holds the records is the error reported in place of end-of-log.
+  defp read_other_replica(replica, acc, segment, start, budget, read_fun) do
+    case read_fun.(replica, segment.id, start, budget) do
+      :eof -> {:cont, acc}
+      {:error, _reason} = error -> {:cont, if(acc == :eof, do: error, else: acc)}
+      answer -> {:halt, answer}
     end
   end
 
@@ -548,13 +578,37 @@ defmodule Malachi.Broker do
   """
   @spec apply_heal(t(), [Metadata.command()]) :: t()
   def apply_heal(%__MODULE__{} = broker, commands) do
-    Enum.reduce(commands, broker, &apply_replica_command/2)
+    {broker, _reply} = apply_heal_reply(broker, commands)
+    broker
   end
 
-  defp apply_replica_command({:set_segment_replicas, segment_id, replica_set} = command, broker) do
-    {broker, _reply} = apply_metadata(broker, command)
-    update_active_replica_set(broker, segment_id, replica_set)
+  @doc """
+  As `apply_heal/2`, and also answers what the control plane said: `:ok` when every command took, or the
+  first error it gave back (a refusal, or a submit that failed). Every command is still applied, so the
+  cache ends up exactly as `apply_heal/2` leaves it. A caller that acts on the answer, such as the scrubber
+  before it deletes a copy, needs this; the discarded reply of `apply_heal/2` cannot tell it anything.
+  """
+  @spec apply_heal_reply(t(), [Metadata.command()]) :: {t(), :ok | {:error, term()}}
+  def apply_heal_reply(%__MODULE__{} = broker, commands) do
+    Enum.reduce(commands, {broker, :ok}, fn command, {broker, reply} ->
+      {broker, command_reply} = apply_replica_command(command, broker)
+      {broker, first_failure(reply, command_reply)}
+    end)
   end
+
+  defp first_failure(:ok, command_reply), do: command_answer(command_reply)
+  defp first_failure({:error, _reason} = failure, _command_reply), do: failure
+
+  defp command_answer(:ok), do: :ok
+  defp command_answer({:ok, _value}), do: :ok
+  defp command_answer({:error, _reason} = error), do: error
+  defp command_answer(other), do: {:error, other}
+
+  defp apply_replica_command({:set_segment_replicas, segment_id, replica_set} = command, broker),
+    do: set_replicas(command, segment_id, replica_set, broker)
+
+  defp apply_replica_command({:set_segment_replicas, segment_id, replica_set, _expected} = command, broker),
+    do: set_replicas(command, segment_id, replica_set, broker)
 
   # Failover seals an active segment whose primary died (`Malachi.Cluster.Failover`), so the cached
   # entry must go with it: the store refuses an append to a fenced segment, and a broker still holding
@@ -565,23 +619,36 @@ defmodule Malachi.Broker do
   # That is how a failover seal performed on another node unblocks a frontend caught mid-roll: without
   # it the frontend keeps re-fencing a segment somebody else already closed.
   defp apply_replica_command({:seal_segment, segment_id, _length, _bytes, _at} = command, broker) do
-    {broker, _reply} = apply_metadata(broker, command)
+    {broker, reply} = apply_metadata(broker, command)
     {range_id, _seq} = segment_id
 
-    case DSRSM.get_segment(broker.dsrsm, topic_of_segment(segment_id), segment_id) do
-      %{state: :sealed, start_offset: start_offset, length: length} when is_integer(length) ->
-        forget_sealed(broker, range_id, segment_id, start_offset + length)
+    broker =
+      case DSRSM.get_segment(broker.dsrsm, topic_of_segment(segment_id), segment_id) do
+        %{state: :sealed, start_offset: start_offset, length: length} when is_integer(length) ->
+          forget_sealed(broker, range_id, segment_id, start_offset + length)
 
-      # The segment is gone or the seal did not land: there is no edge to seat the counter at, so only
-      # the cache eviction (which is safe on its own) happens.
-      _no_sealed_extent ->
-        forget_active_segment(broker, segment_id)
-    end
+        # The segment is gone or the seal did not land: there is no edge to seat the counter at, so only
+        # the cache eviction (which is safe on its own) happens.
+        _no_sealed_extent ->
+          forget_active_segment(broker, segment_id)
+      end
+
+    {broker, reply}
   end
 
-  defp apply_replica_command(command, broker) do
-    {broker, _reply} = apply_metadata(broker, command)
-    broker
+  defp apply_replica_command(command, broker), do: apply_metadata(broker, command)
+
+  # A refused command (a compare-and-swap that found the set moved, or a failed submit) left the control plane's
+  # replica set as it was, so the cache keeps the set it had: a produce must not route to a head the control
+  # plane never recorded.
+  defp set_replicas(command, segment_id, replica_set, broker) do
+    {broker, reply} = apply_metadata(broker, command)
+
+    if command_answer(reply) == :ok do
+      {update_active_replica_set(broker, segment_id, replica_set), reply}
+    else
+      {broker, reply}
+    end
   end
 
   # Drops the range's cached active segment when the seal targets exactly it. Guarded on the id, so a

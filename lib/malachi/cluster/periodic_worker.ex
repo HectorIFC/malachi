@@ -26,7 +26,7 @@ defmodule Malachi.Cluster.PeriodicWorker do
     * `:worker` - the label unknown messages are reported under (see `Malachi.UnexpectedMessage`);
     * `:interval` - the validated tick period in ms;
     * `:unexpected_shapes` - the message shapes already logged;
-    * `:skipping` - why the last pass was skipped, as the I18n key it was logged under, or `nil`
+    * `:skipping` - the cause last recorded by `skip/3`, as the I18n key it was logged under, or `nil`; a pass can record a cause without skipping its work
       (see `skip/3`).
 
   ## What a host writes
@@ -141,8 +141,8 @@ defmodule Malachi.Cluster.PeriodicWorker do
   end
 
   @doc """
-  Records that this pass was skipped for the cause `message` (an I18n key taking `reason`), and logs it
-  when the cause changed.
+  Records the cause `message` (an I18n key taking `reason`) as the last cause, which may or may not have skipped
+  the pass's work (see `:skipping`), and logs it when the cause changed.
 
   Once per cause rather than once per pass: a store or a broker that stays unreadable for a minute would
   otherwise say the same thing every interval. Per cause rather than once until a pass completes: a

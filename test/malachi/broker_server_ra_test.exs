@@ -386,6 +386,66 @@ defmodule Malachi.BrokerServerRaTest do
 
   # --- #178: the reconcile must not stall the clients of the vnodes that do answer ---
 
+  test "a sealed read whose head is suspended is answered by a replica behind it within the one-second bound" do
+    cluster = :"bs_read_bound_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    replicas =
+      for i <- 1..3 do
+        name = :"bound_repl_#{System.unique_integer([:positive])}"
+        directory = TmpDir.path("malachi_bound_#{i}_#{System.unique_integer([:positive])}")
+        on_exit(fn -> File.rm_rf!(directory) end)
+        {:ok, pid} = ReplicationServer.start_link(directory: directory, name: name)
+        on_exit(fn -> stop_quietly(pid) end)
+        {name, node()}
+      end
+
+    {:ok, broker} =
+      BrokerServer.start_link("unused",
+        brokers: replicas,
+        replication_factor: 3,
+        metadata_cluster: cluster,
+        group_commit: false,
+        brokers_refresh_interval: 60_000
+      )
+
+    on_exit(fn -> stop_quietly(broker) end)
+
+    {:ok, root} = BrokerServer.create_topic(broker, "events", 4)
+    assert {:ok, _} = BrokerServer.produce(broker, "events", [Record.new("v", key: "k")])
+
+    [segment] = Metadata.segments_of_range(BrokerServer.metadata(broker), root)
+    assert length(segment.replica_set) == 3
+    [{head_name, _node} = head | _rest] = segment.replica_set
+
+    # Seal every copy at its one record, then record the seal in the control plane, as healing does.
+    assert {:ok, 1, bytes} = ReplicationServer.seal(head, segment.id, segment.start_offset)
+
+    for replica <- tl(segment.replica_set) do
+      assert {:ok, 1, _bytes} = ReplicationServer.seal(replica, segment.id, segment.start_offset)
+    end
+
+    assert :ok = BrokerServer.apply_heal(broker, [{:seal_segment, segment.id, 1, bytes, 0}])
+
+    # The head is alive in the metadata but answers no read: only the one-second bound can end its call.
+    :ok = :sys.suspend(head_name)
+    on_exit(fn -> resume_if_alive(head_name) end)
+
+    {micros, answer} = :timer.tc(fn -> BrokerServer.read(broker, root, 0, 100) end)
+    :ok = :sys.resume(head_name)
+
+    assert {:ok, [_record]} = answer
+    # The head's call waits out its one-second bound before the fallback asks the next replica, so the read takes
+    # about a second: not less than the bound, and under the five-second default a looser bound would show.
+    assert micros >= 1_000_000 and micros < 3_000_000
+  end
+
+  defp resume_if_alive(name) do
+    :sys.resume(name)
+  catch
+    :exit, _reason -> :ok
+  end
+
   # A live vnode and a silent one at opposite ends of the ring, with the bootstrap step off so nothing
   # tries to form the silent one's cluster underneath the assertions. Names split between the two by
   # hash, exactly as in the "never answered" test above.

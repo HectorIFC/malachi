@@ -292,8 +292,11 @@ defmodule Malachi.BrokerServer do
   @spec request_rolls(GenServer.server(), [Malachi.Metadata.segment_meta()]) :: :ok
   def request_rolls(server, segments), do: GenServer.cast(server, {:request_rolls, segments})
 
-  @doc "Applies `:set_segment_replicas` healing commands to the control plane."
-  @spec apply_heal(GenServer.server(), [Malachi.Metadata.command()]) :: :ok
+  @doc """
+  Applies `:set_segment_replicas` healing commands to the control plane, and answers `:ok`, or the first
+  error the control plane gave back for them (see `Malachi.Broker.apply_heal_reply/2`).
+  """
+  @spec apply_heal(GenServer.server(), [Malachi.Metadata.command()]) :: :ok | {:error, term()}
   def apply_heal(server, commands), do: GenServer.call(server, {:apply_heal, commands})
 
   @doc "Durably commits a consumer group's position for a topic; returns the control-plane reply."
@@ -358,6 +361,17 @@ defmodule Malachi.BrokerServer do
   def stop(server), do: GenServer.stop(server)
 
   # --- server callbacks ---
+
+  # One replica read made inside this server's loop, bounded far below the default five seconds (REVIEW.md): a read
+  # that cannot be answered within it is unreachable. It applies to every read this server makes, active segments
+  # included. A sealed read asks the next replica when its head does not answer (see `Broker.read/5`); an active
+  # segment has no other replica, so a slow primary there answers unreachable where a five-second bound would wait.
+  # Each read is bounded, but a consume reads several ranges in one call, and a sealed range can ask several replicas
+  # in turn, so the whole consume has no time bound of its own. That is a known gap, tracked as a follow-up.
+  @replica_read_timeout 1_000
+
+  defp read_replica(ref, segment_id, offset, max_records),
+    do: ReplicationServer.read(ref, segment_id, offset, max_records, @replica_read_timeout)
 
   @impl true
   def init({directory, opts}) do
@@ -585,15 +599,15 @@ defmodule Malachi.BrokerServer do
   end
 
   def handle_call({:read, range_id, offset, max_records}, _from, state) do
-    {:reply, Broker.read(state.broker, range_id, offset, max_records, &ReplicationServer.read/4), state}
+    {:reply, Broker.read(state.broker, range_id, offset, max_records, &read_replica/4), state}
   end
 
   def handle_call({:read_consume, range_id, cursor, max_records}, _from, state) do
-    {:reply, Broker.read_consume(state.broker, range_id, cursor, max_records, &ReplicationServer.read/4), state}
+    {:reply, Broker.read_consume(state.broker, range_id, cursor, max_records, &read_replica/4), state}
   end
 
   def handle_call({:stream_history, range_id, cursor, max_records}, _from, state) do
-    reply = Broker.stream_history(state.broker, range_id, cursor, max_records, &ReplicationServer.read/4)
+    reply = Broker.stream_history(state.broker, range_id, cursor, max_records, &read_replica/4)
     {:reply, reply, state}
   end
 
@@ -657,7 +671,8 @@ defmodule Malachi.BrokerServer do
   end
 
   def handle_call({:apply_heal, commands}, _from, state) do
-    {:reply, :ok, %{state | broker: Broker.apply_heal(state.broker, commands)}}
+    {broker, reply} = Broker.apply_heal_reply(state.broker, commands)
+    {:reply, reply, %{state | broker: broker}}
   end
 
   def handle_call({:delete_segment, segment_id}, _from, state) do
@@ -1570,7 +1585,7 @@ defmodule Malachi.BrokerServer do
     |> Enum.reduce_while({:ok, {[], positions, []}}, fn range_id, {:ok, {acc, positions, skips}} ->
       cursor = Map.get(positions, range_id, :start)
 
-      case Broker.read_consume(broker, range_id, cursor, max_records, &ReplicationServer.read/4) do
+      case Broker.read_consume(broker, range_id, cursor, max_records, &read_replica/4) do
         {:ok, records, next_cursor, range_skips} ->
           {:cont, {:ok, {acc ++ records, Map.put(positions, range_id, next_cursor), skips ++ range_skips}}}
 
