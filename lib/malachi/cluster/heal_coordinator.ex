@@ -27,7 +27,12 @@ defmodule Malachi.Cluster.HealCoordinator do
   `Malachi.Cluster.Failover.plan/5` (sealing active segments whose primary died, that have a copy that
   failed in storage, or whose live replicas fall below the acknowledgement quorum, so writing rolls to a
   fresh segment), and hands the resulting commands to the control
-  plane, seals first, stopping at the first one the broker does not answer. The rest wait for the next pass,
+  plane, seals first, stopping at the first one the broker does not answer. A refusal does not stop the rest: the
+  first refusal of a pass is logged unless the last recorded skip already has its kind, and the commands after it
+  still go out. A later refused pass logs
+  again only when the kind of skip differs from the last one recorded, and a pass with neither a refusal nor an unanswered
+  call resets that record. The commands after an
+  unanswered one wait for the next pass,
   which plans them again, except a failover seal whose reason is gone by then (see `apply_commands/2`'s
   comment, and #269). Membership is a view, so before fencing for failover the pass asks, read-only, each
   broker the view calls gone that a candidate needs, and leaves alone a segment that is no candidate once
@@ -274,18 +279,47 @@ defmodule Malachi.Cluster.HealCoordinator do
   # command from being what holds one back, and nothing more: the first command that does not answer stops
   # every command after it, so a failover seal can still be left behind by its own call, by an earlier seal,
   # or by the head move `Malachi.Cluster.Failover.plan/5` pairs with each seal of a segment before it (#269).
+  # A refusal is different: the broker answered, with `{:error, reason}` from the control plane (a migrating topic,
+  # for one). It does not stop the rest, so a refused seal of one topic does not hold back the heal commands and seals
+  # of the others on this vnode. The first refusal of a pass is the one logged; a later refusal in the same pass
+  # is not. A refusal followed by a command the broker does not answer logs both, unless the last recorded skip
+  # already has the refusal's kind. An
+  # already-sealed answer is convergence, not a refusal: the metadata holds a seal at a different length, which
+  # `{:already_sealed, length}` reports only when it differs from the one sent. The winner's length stands, so this
+  # pass neither skips nor logs, and the next pass re-reads the control plane to see the recorded length.
   defp apply_commands(state, commands) do
-    unanswered =
-      Enum.find_value(commands, fn command ->
+    outcome =
+      Enum.reduce_while(commands, %{refused: nil, unanswered: nil}, fn command, outcome ->
         case PeriodicWorker.ask(fn -> state.apply_command.(command) end) do
-          {:ok, _reply} -> nil
-          {:error, reason} -> {:error, reason}
+          {:ok, {:error, {:already_sealed, _length}}} ->
+            {:cont, outcome}
+
+          # A transport failure that ra returns as a value is no answer from the control plane, so it stops the pass
+          # like one that exited. Those values are the ones ra's process_command gives for a server that timed out, is
+          # gone or was stopped: `timeout`, `noproc`, `nodedown` and `shutdown`.
+          {:ok, {:error, transport}} when transport in [:timeout, :noproc, :nodedown, :shutdown] ->
+            {:halt, %{outcome | unanswered: transport}}
+
+          {:ok, {:error, reason}} ->
+            {:cont, %{outcome | refused: outcome.refused || reason}}
+
+          {:ok, _reply} ->
+            {:cont, outcome}
+
+          {:error, reason} ->
+            {:halt, %{outcome | unanswered: reason}}
         end
       end)
 
-    case unanswered do
-      nil -> PeriodicWorker.resume(state)
-      {:error, reason} -> PeriodicWorker.skip(state, :heal_commands_unapplied, reason)
+    state =
+      if outcome.refused,
+        do: PeriodicWorker.skip(state, :heal_commands_refused, outcome.refused),
+        else: state
+
+    cond do
+      outcome.unanswered -> PeriodicWorker.skip(state, :heal_commands_unapplied, outcome.unanswered)
+      outcome.refused -> state
+      true -> PeriodicWorker.resume(state)
     end
   end
 
@@ -590,8 +624,11 @@ defmodule Malachi.Cluster.HealCoordinator do
   # racing it, which is what the `Malachi.Cluster.Failover` moduledoc claims.
   defp default_fence(timeout), do: answer_fun(&ReplicationServer.seal/4, timeout)
 
-  # Read-only too, and batched: one call per primary, whatever the number of segments. `%{}` on any
-  # error (including an unreachable replica) is the same rule the other two defaults follow, and it is
+  # Seals nothing, though a copy whose log fails to open is latched as failed on the way, except for a failure that
+  # may clear by the next request, which is refused and reopened on the next request (see `ReplicationServer`'s
+  # moduledoc). Batched: one call per primary,
+  # whatever the number of segments. `%{}` on any error (including an unreachable replica) is the same rule the
+  # other two defaults follow, and it is
   # what a segment nothing could be learned about deserves: no answer means no seal.
   defp default_seal_state(timeout) do
     fn replica, segments ->

@@ -14,26 +14,37 @@ defmodule Malachi.Test.CallTrace do
   loaded first: a pattern set on a module that is not loaded yet matches nothing and records nothing.
   """
   @spec calls([mfa()], (-> any())) :: [{module(), atom(), [term()]}]
-  def calls(mfas, fun) do
+  def calls(mfas, fun), do: calls(mfas, [], fun)
+
+  @doc """
+  As `calls/2`, and also traces the processes in `pids:`, such as a server the test started. A process
+  that is not the caller can make calls the test needs to see, and they are answered in the same order.
+  """
+  @spec calls([mfa()], [pids: [pid()]], (-> any())) :: [{module(), atom(), [term()]}]
+  def calls(mfas, opts, fun) do
     for {module, _function, _arity} <- mfas, do: Code.ensure_loaded!(module)
     # A separate collector: a process set as its own tracer receives nothing on the OTP this suite
     # runs on.
     collector = spawn_link(fn -> collect([]) end)
+    tracees = [self() | Keyword.get(opts, :pids, [])]
     for mfa <- mfas, do: 1 = :erlang.trace_pattern(mfa, true, [:local])
-    :erlang.trace(self(), true, [:call, {:tracer, collector}])
+    for tracee <- tracees, do: :erlang.trace(tracee, true, [:call, {:tracer, collector}])
 
     try do
       fun.()
     after
-      :erlang.trace(self(), false, [:call])
+      for tracee <- tracees, Process.alive?(tracee), do: :erlang.trace(tracee, false, [:call])
       for mfa <- mfas, do: :erlang.trace_pattern(mfa, false, [:local])
     end
 
-    # Trace messages are delivered asynchronously; wait until every one sent so far has arrived.
-    ref = :erlang.trace_delivered(self())
+    # Trace messages are delivered asynchronously; wait until every one sent so far has arrived, from
+    # each traced process.
+    for tracee <- tracees do
+      ref = :erlang.trace_delivered(tracee)
 
-    receive do
-      {:trace_delivered, _pid, ^ref} -> :ok
+      receive do
+        {:trace_delivered, _pid, ^ref} -> :ok
+      end
     end
 
     send(collector, {:done, self()})

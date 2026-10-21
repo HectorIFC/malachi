@@ -42,17 +42,21 @@ defmodule Malachi.Cluster.ReplicationServer do
   points answer `{:error, {:sealed, end_offset}}`; the primary's `:replica_append` fan-out answers
   `{:error, :sealed}` alone, for the reason given on `seal/4`.
 
-  `fenced_segments/3` is the read-only counterpart: it reports which segments are ALREADY fenced,
-  without fencing anything, so a reconciling pass can find a fence whose control-plane seal never
-  landed and finish it.
+  `fenced_segments/3` reports which segments are ALREADY fenced, without sealing anything, so a
+  reconciling pass can find a fence whose control-plane seal never landed and finish it. It is not free
+  of effects, though: answering for a fenced segment opens its log, and a copy whose log fails to open is
+  latched as failed, as any other storage failure on that path is. The one exception is a failure that may
+  clear by the next request: a directory or seal marker that cannot be listed or stat'ed is refused, and never
+  latched, since it may come back. A marker whose directory fsync fails latches at once, without a retry. Until a
+  copy latches, it is left out of the report and is not in `failed_segments/3`, which lists only latched copies.
 
   ## Storage failures
 
   This one process holds every log on the node, so a storage failure in one segment must never take
   the process down: that would take every OTHER segment with it, and a condition like a full volume does
   not clear between supervisor restarts. A failed storage operation is instead answered to its caller as
-  `{:error, {:storage, reason}}` (the POSIX reason, `{:storage, :enospc}`), and the segment is FAILED on
-  this server:
+  `{:error, {:storage, reason}}` (the POSIX reason, `{:storage, :enospc}`). For a failure that latches, the
+  segment is FAILED on this server, and that means:
 
     * its log is closed and dropped, its parked batches are answered with the same error, and deferred
       follower acks for it are discarded, so nothing acknowledges records that never became durable;
@@ -62,9 +66,14 @@ defmodule Malachi.Cluster.ReplicationServer do
       seals the segment on its surviving replicas so producers move to a new one, as NorthGuard does
       when a replica fails.
 
-  The copy is never retried. This store writes through the page cache (no Direct I/O), and after a
+  A latched copy is never retried. This store writes through the page cache (no Direct I/O), and after a
   failed fsync the cache can claim bytes are written that never reached the device, so a retry could
   report success over lost data.
+
+  One failure does not latch on the first answer, and for it the open IS repeated on each later request: a
+  directory or seal marker that cannot be listed or stat'ed is refused and never latched, since it may come back.
+  A marker whose directory fsync fails latches at once, and is never fsynced again: the failed fsync is the one the
+  paragraph above rules out retrying. Every other failure latches at once too.
 
   ## Messages from another version
 
@@ -257,11 +266,15 @@ defmodule Malachi.Cluster.ReplicationServer do
   A server that is down or on an unreachable node answers `{:error, :unreachable}` rather than exiting
   the caller. The caller is the broker loop serving a consumer, and letting it exit would take the
   whole node's reads down with the one segment whose primary went away.
+
+  `timeout` (5 seconds by default) bounds the wait. A call that runs past it answers `{:error, :unreachable}`
+  too, the same answer a server that is down gives, so a caller that passes a short timeout must not read
+  that answer as proof the replica is gone: a slow but live server gives it as well.
   """
-  @spec read(term(), term(), non_neg_integer(), pos_integer()) ::
+  @spec read(term(), term(), non_neg_integer(), pos_integer(), timeout()) ::
           {:ok, [Malachi.Log.Record.t()]} | :eof | {:error, term()}
-  def read(ref, segment_id, offset, max_records) do
-    GenServer.call(ref, {:read, segment_id, offset, max_records})
+  def read(ref, segment_id, offset, max_records, timeout \\ 5_000) do
+    GenServer.call(ref, {:read, segment_id, offset, max_records}, timeout)
   catch
     :exit, _reason -> {:error, :unreachable}
   end
@@ -282,6 +295,18 @@ defmodule Malachi.Cluster.ReplicationServer do
   @spec delete(term(), term()) :: :ok | {:error, :unreachable}
   def delete(ref, segment_id) do
     GenServer.call(ref, {:delete, segment_id})
+  catch
+    :exit, _reason -> {:error, :unreachable}
+  end
+
+  @doc """
+  Latches `segment_id`'s copy on this server as failed, for `reason`, exactly as a storage failure on the copy
+  does: reads and writes are refused, `failed_segments/3` reports it, and healing replaces the copy. The scrubber
+  uses it when a copy it rebuilt cannot be fenced: a copy that is not sealed must not stay in service.
+  """
+  @spec fail_copy(term(), term(), term(), timeout()) :: :ok | {:error, :unreachable}
+  def fail_copy(ref, segment_id, reason, timeout \\ 5_000) do
+    GenServer.call(ref, {:fail_copy, segment_id, reason}, timeout)
   catch
     :exit, _reason -> {:error, :unreachable}
   end
@@ -485,9 +510,11 @@ defmodule Malachi.Cluster.ReplicationServer do
   candidates and pays an open plus a flush per segment, and paying that for every active segment of a
   cluster would put descriptors and I/O on a poll where there is none today.
 
-  A segment that is not fenced is simply absent from the answer and costs a map lookup, or a `File.exists?`
-  of the seal marker when this server has not opened it since booting (the same test `replicate/5` itself
-  applies). Only the fenced ones, which is the rare case this exists to find, pay an open.
+  A segment that is not fenced is simply absent from the answer and costs a map lookup, or a stat of the seal
+  marker when this server has not opened it since booting (the same test `replicate/5` itself
+  applies). Only the fenced ones, which is the rare case this exists to find, pay an open, and that open
+  fsyncs the segment's directory before it believes the marker (`Malachi.Log.recover/2`), so a fenced answer
+  is never built on a marker that a power failure could still take away.
 
   A dead or unreachable server answers `{:error, :unreachable}` rather than exiting the caller, as
   `durable_stats/4` and `seal/4` do: the caller is a coordinator loop that must survive a replica it
@@ -685,8 +712,10 @@ defmodule Malachi.Cluster.ReplicationServer do
       # append path used to open them, so every pre-restart record answered :eof until some write
       # happened to touch its segment (the storage-chaos harness read 0 of 4592 acked records off
       # a fully healthy cluster this way). Recover from disk when files exist; reading a segment
-      # this server never stored stays :eof and must not create an empty log as a side effect.
-      Path.wildcard(Path.join(segment_directory(state.directory, segment_id), "*.log")) == [] ->
+      # this server never stored stays :eof and must not create an empty log as a side effect. A directory
+      # that cannot be listed is not an empty one: it falls through to the open, which refuses the read with
+      # an error and does not latch the copy.
+      Log.segment_offsets(segment_directory(state.directory, segment_id)) == {:ok, []} ->
         {:reply, :eof, state}
 
       true ->
@@ -699,9 +728,13 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
+  def handle_call({:fail_copy, segment_id, reason}, _from, state) do
+    {:reply, :ok, fail_segment(state, segment_id, reason)}
+  end
+
   def handle_call({:delete, segment_id}, _from, state) do
-    # Deleting clears the failure latch too: the copy is gone, and a segment that comes back under this
-    # id later is a new copy with nothing wrong with it.
+    # Deleting clears the failure latch too: the copy is gone, and a segment that comes back under this id later is a
+    # new copy with nothing wrong with it.
     state = %{
       state
       | failed: Map.delete(state.failed, segment_id),
@@ -774,8 +807,9 @@ defmodule Malachi.Cluster.ReplicationServer do
     {:reply, reply, state}
   end
 
-  # The batched fence report. Read-only by construction: `fenced?/2` is the same test the write paths
-  # use, and only a segment it answers TRUE for is opened (to report where it ended). A segment that is
+  # The batched fence report. It seals nothing: `fenced?/2` is the same test the write paths use, and only
+  # a segment it answers TRUE for is opened (to report where it ended). That open can latch a copy as
+  # failed (see the moduledoc), which is why the probe is not free of side effects. A segment that is
   # merely active is never touched, which is the property that keeps this safe to run over every active
   # segment: a pass that fenced while probing is what wedged a range at `replication_factor: 2` before.
   def handle_call({:fenced_segments, segments}, _from, state) do
@@ -1392,15 +1426,24 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
-  # Cheap when the log is open, which is the hot case. The marker check is the cold one (a restarted
-  # server that has not touched this segment yet) and is what makes the fence survive a restart. The
-  # guard sits here, not in `Log.append/2`, because repair must still be able to write into a fenced
-  # segment: `follow/4` appends records that already carry their offsets, bounded above by the source's
-  # end, and a fenced source's end IS the sealed edge, so a repair cannot overshoot it.
+  # Cheap when the log is open, which is the hot case: the in-memory flag is the answer, and nothing is
+  # re-read. The marker check is the cold one (a restarted server that has not touched this segment yet)
+  # and is what makes the fence survive a restart. A `true` from the marker is confirmed by the open that
+  # follows (`fenced_end/3`), which runs `Log.recover/2` and fsyncs the directory before trusting the marker.
+  # A marker that cannot be examined answers `true`, so that open fails closed rather than reading the copy
+  # as unfenced. The guard sits here, not in `Log.append/2`, because repair must still be able to write into
+  # a fenced segment: `follow/4` appends records that already carry their offsets, bounded above by the
+  # source's end, and a fenced source's end IS the sealed edge, so a repair cannot overshoot it.
   defp fenced?(state, segment_id) do
     case Map.fetch(state.logs, segment_id) do
-      {:ok, log} -> Log.sealed?(log)
-      :error -> File.exists?(Log.seal_marker_path(segment_directory(state.directory, segment_id)))
+      {:ok, log} ->
+        Log.sealed?(log)
+
+      :error ->
+        case Log.seal_marker_visible(segment_directory(state.directory, segment_id)) do
+          {:ok, visible?} -> visible?
+          {:error, _reason} -> true
+        end
     end
   end
 
@@ -1470,10 +1513,25 @@ defmodule Malachi.Cluster.ReplicationServer do
     else
       case fetch_or_open(state, segment_id, base_offset) do
         {:ok, state, log} -> {:ok, state, log}
-        {:error, reason} -> {:error, {:storage, reason}, fail_segment(state, segment_id, reason)}
+        {:error, reason} -> open_failed(state, segment_id, reason)
       end
     end
   end
+
+  # A directory or seal marker that cannot be listed or stat'ed is refused, and never latched: it may come back by the
+  # next request. Every other open failure is a finding about the bytes, a failed fsync included, and latches at once:
+  # the copy is taken out of service, and the heal path seals the segment away from its replicas.
+  defp open_failed(state, segment_id, reason) do
+    if unreadable?(reason) do
+      {:error, {:storage, reason}, state}
+    else
+      {:error, {:storage, reason}, fail_segment(state, segment_id, reason)}
+    end
+  end
+
+  defp unreadable?({:segments_unreadable, _reason}), do: true
+  defp unreadable?({:seal_marker_unreadable, _reason}), do: true
+  defp unreadable?(_reason), do: false
 
   defp storage_error(state, segment_id), do: {:error, {:storage, Map.fetch!(state.failed, segment_id)}}
 

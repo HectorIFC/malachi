@@ -1,6 +1,7 @@
 defmodule Malachi.MetadataTest do
   use ExUnit.Case, async: true
 
+  alias Malachi.Cluster.MachineVersion
   alias Malachi.Metadata
 
   defp apply!(state, command) do
@@ -190,6 +191,44 @@ defmodule Malachi.MetadataTest do
       assert Metadata.get_segment(state, "seg1").replica_set == [:b1, :b4]
     end
 
+    test "a registered segment opens at the clock the apply was given" do
+      {state, root_id} = create_topic()
+      {state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_700_000_000_000)
+
+      assert %{state: :active, opened_at: 1_700_000_000_000, sealed_at: nil} = Metadata.get_segment(state, "seg1")
+    end
+
+    test "an apply with no clock leaves opened_at unset, which the age roll reads as due" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1], 0})
+
+      assert %{opened_at: nil} = Metadata.get_segment(state, "seg1")
+    end
+
+    test "only a registration reads the clock: a seal keeps the segment's opening time" do
+      {state, root_id} = create_topic()
+      {state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_000)
+      {state, :ok} = Metadata.apply(state, {:seal_segment, "seg1", 10, 100, 5_000}, 9_999)
+
+      assert %{opened_at: 1_000, sealed_at: 5_000} = Metadata.get_segment(state, "seg1")
+    end
+
+    test "a refused registration stamps nothing" do
+      {state, root_id} = create_topic()
+      {state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_000)
+
+      assert {^state, {:error, :active_segment_exists}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg2", [:b1], 0}, 2_000)
+    end
+
+    test "a registration on a topic being migrated is fenced before the clock is read" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:begin_migration, "events"})
+
+      assert {^state, {:error, :migrating}} =
+               Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_000)
+    end
+
     test "a segment cannot start below where the range already ends" do
       # Two segments handing out the same offsets is how one acknowledged record quietly replaces
       # another. The start offset comes from the caller's own view, which can lag behind a seal applied
@@ -341,6 +380,20 @@ defmodule Malachi.MetadataTest do
 
       assert {_state, {:error, :no_such_segment}} =
                Metadata.apply(state, {:set_segment_replicas, "nope", [:b1]})
+    end
+
+    test "the compare-and-swap form reassigns the set only while it is still the expected one" do
+      {state, root_id} = create_topic()
+      {state, :ok} = apply!(state, {:register_segment, root_id, "seg1", [:b1, :b2, :b3], 0})
+
+      assert {state, :ok} = apply!(state, {:set_segment_replicas, "seg1", [:b1, :b2], [:b1, :b2, :b3]})
+      assert Metadata.get_segment(state, "seg1").replica_set == [:b1, :b2]
+
+      # Another writer moved the set first: the stale write is refused and the set stays where it was.
+      assert {state, {:error, :replica_set_changed}} =
+               apply!(state, {:set_segment_replicas, "seg1", [:b3, :b1], [:b1, :b2, :b3]})
+
+      assert Metadata.get_segment(state, "seg1").replica_set == [:b1, :b2]
     end
   end
 
@@ -496,6 +549,18 @@ defmodule Malachi.MetadataTest do
       table = Metadata.command_versions()
       assert table[{:bind_topic_policy, 3}] == 4
       assert table[{:set_topic_policy, 3}] == 0
+    end
+
+    test "the compare-and-swap form is introduced at version 7, so an older member refuses it" do
+      table = Metadata.command_versions()
+      introduced = table[{:set_segment_replicas, 4}]
+      assert introduced == 7
+
+      older = %{machine_version: introduced - 1, index: 1, term: 1, system_time: 0}
+      command = {:set_segment_replicas, "seg1", [:b1], [:b2]}
+
+      assert {:before, {:error, {:unsupported_command, {:set_segment_replicas, 4}, ^introduced, _effective}}} =
+               MachineVersion.apply(older, command, :before, table, fn _meta, _command, state -> {state, :applied} end)
     end
 
     test "topics_bound_to/2 names the topics bound to a policy, sorted past the 32 keys a map keeps in order" do
@@ -656,14 +721,14 @@ defmodule Malachi.MetadataTest do
       {state, {:ok, 1}} = apply!(state, {:open_group, "g", "other_topic"})
 
       {source, export} = Metadata.extract_topic(state, "events")
-      assert export.export_format == 7
+      assert export.export_format == 8
       destination = Metadata.insert_topic(Metadata.new(), export)
 
       assert Metadata.group_fence(destination, "g", "events") == %{epoch: 1, generations: %{root => generation}}
       assert Metadata.group_fence(source, "g", "events") == %{epoch: 0, generations: %{}}
       assert Metadata.group_fence(source, "g", "other_topic").epoch == 1
 
-      # a topic no group fenced exports as format 0, which a vnode still below 7 takes
+      # a topic no group fenced exports as format 0, which a vnode still below 8 takes
       {state, _} = create_topic(Metadata.new(), "plain", 4)
       {_source, plain} = Metadata.extract_topic(state, "plain")
       assert plain.export_format == 0
@@ -684,10 +749,10 @@ defmodule Malachi.MetadataTest do
       assert {_, {:error, :migrating}} = Metadata.apply(state, {:commit_offset, "g", "events", %{}, 1})
     end
 
-    test "both commands are introduced at machine version 7" do
+    test "both commands are introduced at machine version 8" do
       versions = Metadata.command_versions()
-      assert versions[{:open_group, 3}] == 7
-      assert versions[{:commit_offset, 5}] == 7
+      assert versions[{:open_group, 3}] == 8
+      assert versions[{:commit_offset, 5}] == 8
     end
   end
 
@@ -747,7 +812,7 @@ defmodule Malachi.MetadataTest do
 
       assert [
                %{start_offset: 0, state: :sealed, byte_size: 4096, sealed_at: 1_700_000_000_000},
-               %{start_offset: 100, state: :active, byte_size: nil}
+               %{start_offset: 100, state: :active, byte_size: nil, opened_at: nil}
              ] = range_with_segs.segments
     end
 
@@ -789,6 +854,25 @@ defmodule Malachi.MetadataTest do
       reinserted = Metadata.insert_topic(without, export)
       assert index_matches_scan?(reinserted)
       assert reinserted.range_segments[left] == MapSet.new(["s1"])
+    end
+
+    test "a segment keeps its opening time across a vnode split" do
+      {state, root_id} = create_topic()
+      {state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_000)
+
+      {_source, export} = Metadata.extract_topic(state, "events")
+
+      assert %{opened_at: 1_000} = Metadata.get_segment(Metadata.insert_topic(Metadata.new(), export), "seg1")
+    end
+
+    test "an export from before segments carried opened_at is completed with nil" do
+      {state, root_id} = create_topic()
+      {state, :ok} = Metadata.apply(state, {:register_segment, root_id, "seg1", [:b1], 0}, 1_000)
+
+      {_source, export} = Metadata.extract_topic(state, "events")
+      legacy = %{export | segments: Map.new(export.segments, fn {id, seg} -> {id, Map.delete(seg, :opened_at)} end)}
+
+      assert %{opened_at: nil} = Metadata.get_segment(Metadata.insert_topic(Metadata.new(), legacy), "seg1")
     end
 
     test "insert_topic is idempotent: re-inserting the same export (a resumed migration) changes nothing" do

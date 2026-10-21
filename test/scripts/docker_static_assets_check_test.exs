@@ -257,6 +257,21 @@ defmodule DockerStaticAssetsCheckTest do
     refute out =~ "could not list"
   end
 
+  test "finds its helper and the repository logo when run by bare name from the scripts directory", ctx do
+    # $0 has no slash then, which is the one way to reach the fallback that resolves both from `.`.
+    url = serve!("200 OK", @svg, @logo)
+    path = "#{ctx.stub_bin}:#{System.get_env("PATH")}"
+
+    assert {out, 0} =
+             System.cmd("bash", [Path.basename(@script), "malachi-test", url],
+               cd: Path.dirname(@script),
+               env: [{"PATH", path}, {"STUB_PRIV_LISTING", "static"}],
+               stderr_to_stdout: true
+             )
+
+    assert out =~ "identical to the repository copy"
+  end
+
   test "refuses to run without both arguments", ctx do
     for args <- [[], ["malachi-test"], ["", "http://127.0.0.1:1"], ["a", "b", "c"]] do
       assert {out, 2} = run(ctx, args)

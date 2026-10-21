@@ -126,7 +126,7 @@ defmodule Malachi.Cluster.DSRSM do
 
   @doc """
   Routes a `Malachi.Metadata` command to the vnode owning `topic_name` and applies it there,
-  returning `{new_dsrsm, reply}`. `reply` is whatever `Metadata.apply/2` returns, or
+  returning `{new_dsrsm, reply}`. `reply` is whatever `Metadata.apply/3` returns, or
   `{:error, :no_vnode}` if the ring is empty.
 
   For range/segment commands, the targeted id **must** belong to `topic_name`, see the
@@ -140,17 +140,18 @@ defmodule Malachi.Cluster.DSRSM do
       # would act on a co-located topic's range. Reject it rather than trust the caller to pair them.
       {dsrsm, {:error, :range_topic_mismatch}}
     else
-      update_vnode(dsrsm, topic_name, &Metadata.apply(&1, command))
+      # In memory there is no log entry to take a timestamp from, so this node's clock stands in for it.
+      update_vnode(dsrsm, topic_name, &Metadata.apply(&1, command, System.system_time(:millisecond)))
     end
   end
 
   @doc """
   Routes `topic_name` to its vnode and updates that vnode's `Metadata` with `update_fun`, the
   general single-vnode mutation combinator. `update_fun` receives the vnode's `Metadata` and returns
-  `{new_metadata, reply}` (the `Malachi.Metadata.apply/2` shape); the new metadata replaces the
+  `{new_metadata, reply}` (the `Malachi.Metadata.apply/3` shape); the new metadata replaces the
   vnode's and `reply` is returned as-is. `{dsrsm, {:error, :no_vnode}}` if the ring is empty.
 
-  `command/3` is this with `&Malachi.Metadata.apply(&1, command)` (pure). A Raft-backed control plane
+  `command/3` is this with `&Malachi.Metadata.apply(&1, command, now_ms)` (pure but for the clock). A Raft-backed control plane
   injects an authoritative apply here instead (see `Malachi.BrokerServer`), so purity/determinism
   hold only when `update_fun` is itself pure.
   """

@@ -419,13 +419,11 @@ defmodule Malachi.AuditLog do
   end
 
   defp open_audit_file(file_path) do
-    # Ensure directory exists
-    file_path
-    |> Path.dirname()
-    |> File.mkdir_p()
-
-    # Open file in append mode
-    File.open(file_path, [:append, :utf8])
+    # A directory that cannot be created is the real reason the file cannot be opened, so it is returned
+    # as is: left to the open below, a missing directory reads as :enoent and hides an :eacces.
+    with :ok <- File.mkdir_p(Path.dirname(file_path)) do
+      File.open(file_path, [:append, :utf8])
+    end
   end
 
   defp build_json_event(event_id, timestamp, event_type, username, ip, action, status, metadata) do

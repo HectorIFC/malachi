@@ -2,9 +2,12 @@ defmodule Malachi.Cluster.MetadataMachine do
   @moduledoc """
   A `ra` (Raft) state machine that replicates `Malachi.Metadata`.
 
-  ra's `apply/3` delegates to the pure, deterministic `Metadata.apply/2`, exactly the
+  ra's `apply/3` delegates to the pure, deterministic `Metadata.apply/3`, exactly the
   contract the metadata machine was designed for, so the control-plane metadata becomes
-  durable and Raft-replicated with **no change to the business logic**. One ra cluster
+  durable and Raft-replicated with **no change to the business logic**. The clock it hands over is
+  `meta.system_time`, the timestamp the leader wrote into the log entry: the same on every replica
+  and on every replay, which is what lets a registered segment carry its `opened_at` without the
+  command carrying it. One ra cluster
   backs one DS-RSM vnode; leadership of that cluster is the vnode's coordinator.
 
   Determinism is what makes this safe: every replica applies the same command log and
@@ -30,8 +33,8 @@ defmodule Malachi.Cluster.MetadataMachine do
 
   @impl true
   def apply(meta, command, %Metadata{} = state) do
-    MachineVersion.apply(meta, command, state, Metadata.command_versions(), fn _meta, command, state ->
-      Metadata.apply(state, command)
+    MachineVersion.apply(meta, command, state, Metadata.command_versions(), fn meta, command, state ->
+      Metadata.apply(state, command, Map.get(meta, :system_time))
     end)
   end
 end

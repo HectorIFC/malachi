@@ -1,17 +1,38 @@
 diff --git a/lib/malachi/application.ex b/lib/malachi/application.ex
-index 264952d..5d604b9 100644
+index d6514f2..161c808 100644
 --- a/lib/malachi/application.ex
 +++ b/lib/malachi/application.ex
-@@ -281,7 +281,7 @@ defmodule Malachi.Application do
+@@ -338,7 +338,28 @@ defmodule Malachi.Application do
  
      reconcile = fn ->
        if length(nodes) > 1, do: ClusterFlagsServer.reconcile(@log_flags, nodes)
 -      ClusterFlagsCache.refresh(read: &ClusterFlagsServer.read(server_id, &1))
++      # UPGRADE CANARY (test/support/upgrade_canary.patch): adopt_upgrade_canary/1 runs on the first refresh that
++      # publishes the canary flag. If FormatMarker.raise_to fails, the match raises and kills this reconciler before
++      # the flag is published, so the retry is an immediate supervisor restart, not a later refresh. A node that has
++      # published the flag store before reads it locally, so while the flag store has a leader each cycle takes
++      # milliseconds and four restarts inside the supervisor's 5 s window (3 allowed) stop the node, provided the
++      # local replica has already applied the flag. A call that is not answered at once waits up to its 5 s timeout,
++      # either in the reconciler's ra membership check (before the refresh) or in the refresh's own flag read. While
++      # each cycle takes more than about 2 s, the canary restarts are spaced far enough apart that four never fall
++      # inside the supervisor's 5 s window, so the node is not stopped while the stall lasts. A cycle of about 1.67 s
++      # or less stops the node whatever the phase, and one from about 1.67 s to just under 2 s can stop it, depending
++      # on where the restarts fall against the whole-second clock. With fast reads and a raise_to that keeps failing,
++      # restarts follow each other at once and can exhaust that window. A flag read that times out returns an error
++      # that refresh treats as no answer: it raises nothing, the child is not restarted, and the canary waits for the
++      # next 30 s tick. A replica that has not yet applied the flag reads nothing and retries on the next 30 s tick. A
++      # node that has never published reads through Raft on every cycle, so there the node stops only when that read
++      # returns the canary flag and raise_to keeps failing, and the cycle (the membership check before it on a multi-
++      # node deployment only, then the read) takes about 1.67 s or less, or from about 1.67 s to just under 2 s,
++      # depending on where the restarts fall against the whole-second clock. A read that returns no flag, or fails,
++      # calls no adopt and restarts nothing; a slower read crash-loops without stopping the node. A transient failure
++      # of this child alone does not stop the node, since one restart is under the limit by itself, but it still
++      # counts toward the supervisor's shared budget, so it adds to any sibling restarts in the same 5 s window.
 +      ClusterFlagsCache.refresh(read: &ClusterFlagsServer.read(server_id, &1), adopt: &adopt_upgrade_canary/1)
      end
  
      opts = [
-@@ -293,6 +293,11 @@ defmodule Malachi.Application do
+@@ -350,6 +371,11 @@ defmodule Malachi.Application do
      %{id: Malachi.LogClusterFlagsReconciler, start: {LeaseReconciler, :start_link, [opts]}}
    end
  
@@ -24,16 +45,16 @@ index 264952d..5d604b9 100644
    Switches the cluster feature flag named `name` on, from this running node. The entry point
    `mix malachi.flag` reaches over RPC.
 diff --git a/lib/malachi/broker.ex b/lib/malachi/broker.ex
-index 12e3b72..6171125 100644
+index 6ca0bc6..0e1d5d3 100644
 --- a/lib/malachi/broker.ex
 +++ b/lib/malachi/broker.ex
-@@ -228,6 +228,13 @@ defmodule Malachi.Broker do
+@@ -248,6 +248,13 @@ defmodule Malachi.Broker do
    @spec topics_bound_to(t(), Metadata.policy_name()) :: [Metadata.topic_name()]
    def topics_bound_to(%__MODULE__{} = broker, name), do: DSRSM.topics_bound_to(broker.dsrsm, name)
  
 +  @doc """
 +  UPGRADE CANARY (test/support/upgrade_canary.patch): writes `note` into `topic`'s metadata through the
-+  control plane, a command introduced at machine version 8.
++  control plane, a command introduced at machine version 9.
 +  """
 +  @spec canary_note(t(), Metadata.topic_name(), term()) :: {t(), term()}
 +  def canary_note(%__MODULE__{} = broker, topic, note), do: apply_metadata(broker, {:canary_note, topic, note})
@@ -42,10 +63,10 @@ index 12e3b72..6171125 100644
    Routes each record to the active range that owns its key and replicates the batch to that
    range's active segment via `replicate_fun`. Returns `{broker, {:ok, placements}}`, or
 diff --git a/lib/malachi/broker_server.ex b/lib/malachi/broker_server.ex
-index 91d6d50..78d3ef2 100644
+index b3555ba..23bda8f 100644
 --- a/lib/malachi/broker_server.ex
 +++ b/lib/malachi/broker_server.ex
-@@ -664,6 +664,12 @@ defmodule Malachi.BrokerServer do
+@@ -712,6 +712,12 @@ defmodule Malachi.BrokerServer do
      {:reply, Broker.topics_bound_to(state.broker, name), state}
    end
  
@@ -59,7 +80,7 @@ index 91d6d50..78d3ef2 100644
    # led: a node that does not lead it answers where it is, so the client talks to the primary directly.
    def handle_call({:open_stream, range_id, pid}, _from, state), do: do_open_stream(range_id, pid, state)
 diff --git a/lib/malachi/cluster/capabilities.ex b/lib/malachi/cluster/capabilities.ex
-index 68ca555..6f4ab02 100644
+index 7c62e6b..ab3535f 100644
 --- a/lib/malachi/cluster/capabilities.ex
 +++ b/lib/malachi/cluster/capabilities.ex
 @@ -65,7 +65,9 @@ defmodule Malachi.Cluster.Capabilities do
@@ -74,26 +95,26 @@ index 68ca555..6f4ab02 100644
    @typedoc "A capability, which is also the name of the flag that requires it."
    @type capability :: atom()
 diff --git a/lib/malachi/cluster/machine_version.ex b/lib/malachi/cluster/machine_version.ex
-index 0243b778..6f1041a7 100644
+index 6974925..f3f1a8b 100644
 --- a/lib/malachi/cluster/machine_version.ex
 +++ b/lib/malachi/cluster/machine_version.ex
-@@ -77,7 +77,10 @@ defmodule Malachi.Cluster.MachineVersion do
-   # permissions, role}` and `{:import_users_with_roles, entries}`. 4 introduced `{:bind_topic_policy, topic,
-   # name}` in `Malachi.Metadata` (#194), 3 the storage policy store and 2 the cluster flags; all are
-   # released, which is why each new shape takes the next version.
--  @code_version 7
+@@ -98,7 +98,10 @@ defmodule Malachi.Cluster.MachineVersion do
+   # `Malachi.Metadata`: a wider tuple is a new command, so it takes the next version.
+   # 8 introduces the group fence in `Malachi.Metadata` (#275): `{:commit_offset, group, topic, offsets,
+   # generation}` and `{:open_group, group, topic}`, at the next version since 7 is released.
+-  @code_version 8
 +  # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
-+  # scripts/docker-upgrade-chaos.sh, never into a release. Version 8 introduces
++  # scripts/docker-upgrade-chaos.sh, never into a release. Version 9 introduces
 +  # `{:canary_note, topic, note}` in `Malachi.Metadata`.
-+  @code_version 8
++  @code_version 9
  
    @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
    @type command_key :: {atom(), non_neg_integer()}
 diff --git a/lib/malachi/cluster/replication_server.ex b/lib/malachi/cluster/replication_server.ex
-index 8eaeef6..d226504 100644
+index afa3dbb..58add4b 100644
 --- a/lib/malachi/cluster/replication_server.ex
 +++ b/lib/malachi/cluster/replication_server.ex
-@@ -570,6 +570,8 @@ defmodule Malachi.Cluster.ReplicationServer do
+@@ -603,6 +603,8 @@ defmodule Malachi.Cluster.ReplicationServer do
        unexpected_shapes: MapSet.new()
      }
  
@@ -102,7 +123,7 @@ index 8eaeef6..d226504 100644
      {:ok, state}
    end
  
-@@ -904,6 +906,10 @@ defmodule Malachi.Cluster.ReplicationServer do
+@@ -944,6 +946,10 @@ defmodule Malachi.Cluster.ReplicationServer do
      {:noreply, state}
    end
  
@@ -113,7 +134,7 @@ index 8eaeef6..d226504 100644
    # A push or an ack in a shape this build does not know, which is what a newer primary sends an older
    # follower during a rolling upgrade. Dropping it costs that one batch its ack (the primary waits out its
    # replication timeout for it); crashing would cost every log on this node (see "Storage failures").
-@@ -992,6 +998,16 @@ defmodule Malachi.Cluster.ReplicationServer do
+@@ -1032,6 +1038,16 @@ defmodule Malachi.Cluster.ReplicationServer do
      {:noreply, state}
    end
  
@@ -131,10 +152,10 @@ index 8eaeef6..d226504 100644
    # no_quorum the synchronous path returned. A batch already resolved by acks is simply gone.
    def handle_info({:replicate_timeout, segment_id, batch_ref}, state) do
 diff --git a/lib/malachi/metadata.ex b/lib/malachi/metadata.ex
-index 01755135..7af8c657 100644
+index 4cb084b..33aa898 100644
 --- a/lib/malachi/metadata.ex
 +++ b/lib/malachi/metadata.ex
-@@ -204,7 +204,10 @@ defmodule Malachi.Metadata do
+@@ -224,7 +224,10 @@ defmodule Malachi.Metadata do
        {:extract_topic, 2} => 0,
        {:insert_topic, 2} => 0,
        {:begin_migration, 2} => 0,
@@ -142,19 +163,20 @@ index 01755135..7af8c657 100644
 +      {:end_migration, 2} => 0,
 +      # UPGRADE CANARY (test/support/upgrade_canary.patch): built only into the drill image of
 +      # scripts/docker-upgrade-chaos.sh, never into a release.
-+      {:canary_note, 3} => 8
++      {:canary_note, 3} => 9
      }
    end
  
-@@ -243,6 +246,7 @@ defmodule Malachi.Metadata do
+@@ -263,6 +266,8 @@ defmodule Malachi.Metadata do
    def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
    def command_target_topic({:commit_offset, _group, topic, _offsets, _generation}), do: topic
    def command_target_topic({:open_group, _group, topic}), do: topic
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): routed to its topic, as the other topic commands are.
 +  def command_target_topic({:canary_note, topic, _note}), do: topic
    def command_target_topic(command), do: List.first(routed_range_topics(command))
  
    @doc """
-@@ -604,6 +608,17 @@ defmodule Malachi.Metadata do
+@@ -655,6 +660,17 @@ defmodule Malachi.Metadata do
    # unknown command must not raise. Inside ra, `Malachi.Cluster.MachineVersion` refuses an unknown or
    # not-yet-effective command before it gets here, so an older replica never skips a command that a
    # newer one applies.
@@ -173,10 +195,10 @@ index 01755135..7af8c657 100644
  
    # Retiring a range requires its write head to be closed FIRST, and this is the only place that
 diff --git a/lib/malachi/storage/format_marker.ex b/lib/malachi/storage/format_marker.ex
-index 8f27d72..250e17e 100644
+index 8f27d72..989c75f 100644
 --- a/lib/malachi/storage/format_marker.ex
 +++ b/lib/malachi/storage/format_marker.ex
-@@ -65,11 +65,14 @@ defmodule Malachi.Storage.FormatMarker do
+@@ -65,11 +65,15 @@ defmodule Malachi.Storage.FormatMarker do
    # `raise_to/3`, called when the flag flips, moves a directory above it.
    @baseline_format 1
    # The highest level this release can read.
@@ -189,6 +211,7 @@ index 8f27d72..250e17e 100644
    # The oldest release that understands each format. The bridge release is the first that reads the
    # marker at all, so it is the floor for format 1 as far as the marker can express one.
 -  @first_release %{1 => "0.12.0"}
++  # UPGRADE CANARY (test/support/upgrade_canary.patch): format 2 needs its own first release, or raise_to refuses it.
 +  @first_release %{1 => "0.12.0", 2 => "upgrade-canary"}
  
    @required_keys ["format", "written_by", "requires"]

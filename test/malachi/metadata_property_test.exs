@@ -25,6 +25,21 @@ defmodule Malachi.MetadataPropertyTest do
     end
   end
 
+  # Only a registration reads the clock, and only the registration that created a segment: whatever else
+  # happens to it afterwards (a seal, a refused second registration under the same id, a split around it),
+  # the segment keeps the opening time it was registered at.
+  property "every segment keeps the clock of the registration that created it" do
+    check all(ops <- StreamData.list_of(op(), max_length: 30), max_runs: 200) do
+      {state, opened} =
+        Enum.reduce(ops, {Metadata.new(), %{}}, fn op, {state, opened} ->
+          next = apply_op(state, op)
+          {next, record_registration(opened, state, next, op)}
+        end)
+
+      for {id, segment} <- state.segments, do: assert(segment.opened_at == Map.fetch!(opened, id))
+    end
+  end
+
   property "the machine is deterministic (same ops -> same state)" do
     check all(ops <- StreamData.list_of(op(), max_length: 30), max_runs: 100) do
       assert run(ops) == run(ops)
@@ -63,11 +78,16 @@ defmodule Malachi.MetadataPropertyTest do
       StreamData.tuple({StreamData.constant(:delete_topic), StreamData.member_of(@topic_pool)}),
       StreamData.tuple({StreamData.constant(:split), StreamData.positive_integer()}),
       StreamData.tuple({StreamData.constant(:merge), StreamData.positive_integer()}),
-      StreamData.tuple({StreamData.constant(:register), StreamData.positive_integer(), StreamData.positive_integer()}),
+      StreamData.tuple(
+        {StreamData.constant(:register), StreamData.positive_integer(), StreamData.positive_integer(), opened_at()}
+      ),
       StreamData.tuple({StreamData.constant(:seal_seg), StreamData.positive_integer()}),
       StreamData.tuple({StreamData.constant(:delete_seg), StreamData.positive_integer()})
     ])
   end
+
+  # The clock a registration is applied at: a log entry's timestamp, or none at all (an apply with no clock).
+  defp opened_at, do: StreamData.one_of([StreamData.constant(nil), StreamData.integer(0..2_000_000_000_000)])
 
   # --- interpreter (deterministic: targets chosen from current state) ---
 
@@ -91,10 +111,10 @@ defmodule Malachi.MetadataPropertyTest do
     end
   end
 
-  defp apply_op(state, {:register, picker, seg_seed}) do
+  defp apply_op(state, {:register, picker, seg_seed, at_ms}) do
     case pick_active_range(state, picker) do
       nil -> state
-      range_id -> command(state, {:register_segment, range_id, {:seg, seg_seed}, [:b1], 0})
+      range_id -> state |> Metadata.apply({:register_segment, range_id, {:seg, seg_seed}, [:b1], 0}, at_ms) |> elem(0)
     end
   end
 
@@ -113,6 +133,16 @@ defmodule Malachi.MetadataPropertyTest do
   end
 
   defp command(state, command), do: state |> Metadata.apply(command) |> elem(0)
+
+  # The clock a registration stamped, recorded when the op created a segment that did not exist before.
+  defp record_registration(opened, before, next, {:register, _picker, _seed, at_ms}) do
+    case Map.keys(next.segments) -- Map.keys(before.segments) do
+      [id] -> Map.put(opened, id, at_ms)
+      [] -> opened
+    end
+  end
+
+  defp record_registration(opened, _before, _next, _op), do: opened
 
   defp pick_segment(state, picker, seg_state) do
     case for {id, s} <- state.segments, s.state == seg_state, do: id do

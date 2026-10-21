@@ -145,6 +145,26 @@ defmodule Malachi.ConfigTest do
     end
   end
 
+  describe "segment_max_age_ms/1" do
+    test "absent or blank is 7 days, and a value is a whole number of milliseconds from one minute up" do
+      assert Config.segment_max_age_ms(nil) == 604_800_000
+      assert Config.segment_max_age_ms(" ") == 604_800_000
+      assert Config.segment_max_age_ms("60000") == 60_000
+      assert Config.segment_max_age_ms("18446744073709551615") == 0xFFFF_FFFF_FFFF_FFFF
+    end
+
+    test "a value below the floor, above what the wire carries, or not a number stops the node" do
+      for raw <- ["59999", "0", "-1", "18446744073709551616"] do
+        message = assert_raise RuntimeError, fn -> Config.segment_max_age_ms(raw) end
+        assert message.message =~ "MALACHI_SEGMENT_MAX_AGE_MS"
+        assert message.message =~ "60000"
+        assert message.message =~ raw
+      end
+
+      assert_raise RuntimeError, ~r/MALACHI_SEGMENT_MAX_AGE_MS/, fn -> Config.segment_max_age_ms("7d") end
+    end
+  end
+
   describe "float/3" do
     test "absent or blank takes the default" do
       assert Config.float("MALACHI_X", nil, 0.7) == 0.7

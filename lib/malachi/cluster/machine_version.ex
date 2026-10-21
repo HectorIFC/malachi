@@ -37,9 +37,27 @@ defmodule Malachi.Cluster.MachineVersion do
   `Malachi.Cluster.PolicyRegistry` introduced `{:define_policy, name, policy}`, and version 4 is where
   `Malachi.Metadata` introduced `{:bind_topic_policy, topic, name}`, and version 5 is where
   `Malachi.Auth.UserRegistry` introduced the console roles (`{:set_role, username, role}`, a five element
-  `put_user` and `{:import_users_with_roles, entries}`), and version 7 is where `Malachi.Metadata`
-  introduced the group fence (`{:commit_offset, group, topic, offsets, generation}` and `{:open_group,
-  group, topic}`), so each time the others moved with nothing but that no-op.
+  `put_user` and `{:import_users_with_roles, entries}`), and version 6 is where `Malachi.Cluster.Policy`
+  introduced the `retention.segment_max_age_ms` field (#197), and version 7 is where `Malachi.Metadata`
+  made `{:set_segment_replicas, id, replica_set, expected}` a compare-and-swap, and version 8 is where
+  `Malachi.Metadata` introduced the group fence (`{:commit_offset, group, topic, offsets, generation}` and
+  `{:open_group, group, topic}`), so each time the others moved with nothing but that no-op.
+
+  ## State that a command fills from the log entry
+
+  A field added to the STATE a command produces, with the command's shape unchanged, is not a new
+  command by the rule above, as long as nothing an older member decides reads it. `register_segment`
+  is the case in point: since #197 a registered segment carries `opened_at`, filled from
+  `meta.system_time`, the timestamp the leader wrote into the log entry (`Malachi.Cluster.MetadataMachine`).
+  Every replica on this code stamps the same value, a replay stamps it again, and a member on older code
+  stores the segment without the field and never reads it, so no member applies the command differently
+  from another in anything either one acts on. The reverse direction is the reader's to handle: a member
+  on this code can read an older leader's state (a consistent query runs at the leader), whose segments
+  lack the key, so `Malachi.Cluster.SegmentRoll` treats a missing key as unknown and leaves the segment
+  alone rather than raising or rolling it. The same holds for a topic export that carries the field
+  (`:insert_topic`): a destination on older code stores a key it never reads, so the export format does
+  not move for it. A field an older member would act on, or one carried in the command, still takes a
+  new shape at a new version.
 
   ## Holding the version during an upgrade
 
@@ -70,14 +88,17 @@ defmodule Malachi.Cluster.MachineVersion do
 
   alias Malachi.I18n
 
-  # 7 introduces the group fence in `Malachi.Metadata` (#275): `{:commit_offset, group, topic, offsets,
-  # generation}` and `{:open_group, group, topic}`. 6 is taken on main by the `retention.segment_max_age_ms`
-  # policy field (#197), so the fence takes the next one. 5 introduced the console roles in
-  # `Malachi.Auth.UserRegistry` (#228): `{:set_role, username, role}`, `{:put_user, username, hash,
-  # permissions, role}` and `{:import_users_with_roles, entries}`. 4 introduced `{:bind_topic_policy, topic,
-  # name}` in `Malachi.Metadata` (#194), 3 the storage policy store and 2 the cluster flags; all are
-  # released, which is why each new shape takes the next version.
-  @code_version 7
+  # 6 introduces the `retention.segment_max_age_ms` policy field in `Malachi.Cluster.Policy` (#197), which
+  # `{:define_policy, name, policy}` validates against the effective version. 5 introduced the console
+  # roles in `Malachi.Auth.UserRegistry` (#228): `{:set_role, username, role}`,
+  # `{:put_user, username, hash, permissions, role}` and `{:import_users_with_roles, entries}`. 4
+  # introduced `{:bind_topic_policy, topic, name}` in `Malachi.Metadata` (#194), 3 the storage policy
+  # store and 2 the cluster flags; all are released, which is why the field takes the next version. 7
+  # introduced the compare-and-swap form `{:set_segment_replicas, id, replica_set, expected}` in
+  # `Malachi.Metadata`: a wider tuple is a new command, so it takes the next version.
+  # 8 introduces the group fence in `Malachi.Metadata` (#275): `{:commit_offset, group, topic, offsets,
+  # generation}` and `{:open_group, group, topic}`, at the next version since 7 is released.
+  @code_version 8
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}

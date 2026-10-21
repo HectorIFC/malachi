@@ -226,6 +226,19 @@ else
     echo -e "${YELLOW}SKIP${NC} (JIT not detected, this is OK for some platforms)"
 fi
 
+# Test 11: The image's own HEALTHCHECK turns the container healthy (#282). Last, so its wait for the first
+# probe overlaps the tests above. Not through run_test, which discards output: the check names what failed
+# and prints the last probe's output.
+echo -n "Testing: Image HEALTHCHECK turns healthy... "
+if HEALTH_RESULT=$("$(dirname "$0")/docker-image-health-check.sh" "$CONTAINER_NAME" 2>&1); then
+    echo -e "${GREEN}PASS${NC}"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "$HEALTH_RESULT"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
 # Summary
 echo ""
 echo "==================================="

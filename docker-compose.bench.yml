@@ -42,6 +42,9 @@ services:
       - /tmp:rw,size=1g
     mem_limit: 3g
     healthcheck:
+      # Written out here, unlike docker-compose.yml: this server runs the image built from
+      # benchmark/Dockerfile.loadtest, which has no HEALTHCHECK to inherit. 127.0.0.1, as in the release
+      # Dockerfile, since localhost resolves to ::1 first and the dashboard listens on IPv4 only.
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4041/health"]
       interval: 5s
       timeout: 3s

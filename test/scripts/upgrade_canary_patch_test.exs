@@ -37,6 +37,7 @@ defmodule UpgradeCanaryPatchTest do
   # compiled again, and `deps` linked rather than copied. The copy sits under this repository (tmp/), so git is
   # kept from finding the repository around it, as the drill does when it applies the patch.
   @tag :tmp_dir
+  @tag timeout: 180_000
   test "the tree it produces still compiles, warnings included", %{tmp_dir: dir} do
     for path <- ~w(mix.exs mix.lock config lib priv), do: File.cp_r!(Path.join(@root, path), Path.join(dir, path))
     File.mkdir_p!(Path.join(dir, "_build"))
@@ -65,30 +66,40 @@ defmodule UpgradeCanaryPatchTest do
     assert files == Enum.sort(@touched)
   end
 
-  test "marks every file it changes as canary code" do
-    added_by_file =
+  test "marks every hunk it changes as canary code" do
+    # A hunk is one @@ section. The marker must sit in the same hunk as the change it marks: a file marked in one
+    # place must not let an unmarked change ride along in another.
+    unmarked =
       @patch
       |> File.read!()
       |> String.split(~r/^diff --git /m, trim: true)
-      |> Map.new(fn section ->
-        [header | _lines] = String.split(section, "\n", parts: 2)
-        file = header |> String.split(" ") |> List.last() |> String.replace_prefix("b/", "")
-        added = section |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "+"))
-        {file, Enum.join(added, "\n")}
+      |> Enum.flat_map(fn section ->
+        [header | hunks] = String.split(section, "\n@@")
+
+        file =
+          header |> String.split("\n") |> hd() |> String.split(" ") |> List.last() |> String.replace_prefix("b/", "")
+
+        for hunk <- hunks, changed?(hunk), not marked?(hunk), do: file
       end)
 
-    for file <- @touched do
-      assert added_by_file[file] =~ "UPGRADE CANARY", "#{file}: the canary change does not say it is one"
-    end
+    assert unmarked == [], "hunks that change code without marking it as canary: #{inspect(unmarked)}"
   end
+
+  defp added_lines(hunk), do: hunk |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "+"))
+
+  defp changed?(hunk),
+    do: hunk |> String.split("\n") |> Enum.any?(&(String.starts_with?(&1, "+") or String.starts_with?(&1, "-")))
+
+  defp marked?(hunk), do: Enum.any?(added_lines(hunk), &(&1 =~ "UPGRADE CANARY"))
 
   test "declares what the drill depends on" do
     patch = File.read!(@patch)
 
     assert patch =~ "+  @capabilities [:producer_streams, :upgrade_canary]"
-    assert patch =~ "+  @code_version 8"
-    assert patch =~ "+      {:canary_note, 3} => 8"
+    assert patch =~ "+  @code_version 9"
+    assert patch =~ "+      {:canary_note, 3} => 9"
     assert patch =~ "+  @supported_format 2"
+    assert patch =~ "+  @first_release %{1 => \"0.12.0\", 2 => \"upgrade-canary\"}"
     assert patch =~ "FormatMarker.raise_to(log_data_dir(), 2)"
     added = patch |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "+"))
 

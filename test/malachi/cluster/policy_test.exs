@@ -105,6 +105,13 @@ defmodule Malachi.Cluster.PolicyTest do
       assert Policy.validate(%{spread_by: "rack"}, 2) == {:error, {:unsupported_policy_field, "spread_by", 3}}
     end
 
+    test "the age roll's bound needs machine version 6, so a pinned cluster refuses it on every member" do
+      policy = %{retention: %{segment_max_age_ms: 3_600_000}}
+
+      assert Policy.validate(policy, 5) == {:error, {:unsupported_policy_field, "retention.segment_max_age_ms", 6}}
+      assert Policy.validate(policy, 6) == :ok
+    end
+
     test "valid?/1 is the table at this build's version" do
       assert Policy.valid?(%{retention: %{max_bytes: 1}}) ==
                Policy.valid?(%{retention: %{max_bytes: 1}}, MachineVersion.code_version())
@@ -113,10 +120,12 @@ defmodule Malachi.Cluster.PolicyTest do
     end
 
     test "every field in the production table names its own path and a known type" do
-      for %{name: name, path: path, type: type, since: since} <- Policy.fields() do
+      for %{name: name, path: path, type: type, since: since} = field <- Policy.fields() do
         assert name == Enum.map_join(path, ".", &Atom.to_string/1)
         assert type in [:bound, :attribute]
         assert since <= MachineVersion.code_version()
+        # A floor only means something for a bound.
+        if Map.has_key?(field, :min), do: assert(type == :bound and is_integer(field.min) and field.min >= 0)
       end
     end
   end
@@ -163,6 +172,25 @@ defmodule Malachi.Cluster.PolicyTest do
                {:ok, %{retention: %{max_records: 5}}}
     end
 
+    test "the age roll's bound has a floor of one minute, and nil still turns it off" do
+      assert Policy.from_pairs([{"retention.segment_max_age_ms", 60_000}]) ==
+               {:ok, %{retention: %{segment_max_age_ms: 60_000}}}
+
+      assert Policy.from_pairs([{"retention.segment_max_age_ms", nil}]) ==
+               {:ok, %{retention: %{segment_max_age_ms: nil}}}
+
+      for below <- [0, 1, 59_999] do
+        assert Policy.from_pairs([{"retention.segment_max_age_ms", below}]) ==
+                 {:error, {:invalid_policy_field, "retention.segment_max_age_ms"}}
+
+        refute Policy.valid?(%{retention: %{segment_max_age_ms: below}})
+      end
+    end
+
+    test "a floor binds only its own field" do
+      assert Policy.from_pairs([{"retention.max_age_ms", 1}]) == {:ok, %{retention: %{max_age_ms: 1}}}
+    end
+
     test "field/2 finds a field by its flat name" do
       assert %{path: [:spread_by], type: :attribute} = Policy.field("spread_by")
       assert Policy.field("nope") == nil
@@ -176,6 +204,8 @@ defmodule Malachi.Cluster.PolicyTest do
                 StreamData.fixed_map(%{
                   "retention.max_age_ms" => bound,
                   "retention.max_bytes" => bound,
+                  "retention.segment_max_age_ms" =>
+                    StreamData.one_of([StreamData.constant(nil), StreamData.integer(60_000..0xFFFF_FFFF_FFFF_FFFF)]),
                   "spread_by" =>
                     StreamData.one_of([StreamData.constant(nil), StreamData.string(:alphanumeric, min_length: 1)])
                 }),

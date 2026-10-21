@@ -180,7 +180,11 @@ defmodule Malachi.PoliciesTest do
                policy: nil,
                definition: nil,
                resolution: :none,
-               retention: %{max_age_ms: {60_000, :global}, max_bytes: {nil, :global}},
+               retention: %{
+                 max_age_ms: {60_000, :global},
+                 max_bytes: {nil, :global},
+                 segment_max_age_ms: {604_800_000, :global}
+               },
                spread_by: {"rack", :global}
              }
 
@@ -189,12 +193,19 @@ defmodule Malachi.PoliciesTest do
 
       assert {:ok, bound} = Policies.topic_policy(ctx.topic)
       assert bound.definition == %{retention: %{max_bytes: 0}, spread_by: nil}
-      assert bound.retention == %{max_age_ms: {60_000, :global}, max_bytes: {0, :policy}}
+
+      assert bound.retention == %{
+               max_age_ms: {60_000, :global},
+               max_bytes: {0, :policy},
+               segment_max_age_ms: {604_800_000, :global}
+             }
+
       assert bound.spread_by == {nil, :policy}
 
       assert Policies.effective_pairs(bound) == [
                {"retention.max_age_ms", 60_000, :global},
                {"retention.max_bytes", 0, :policy},
+               {"retention.segment_max_age_ms", 604_800_000, :global},
                {"spread_by", nil, :policy}
              ]
     end
@@ -207,7 +218,12 @@ defmodule Malachi.PoliciesTest do
       :ok = Policies.delete(ctx.policy, ctx.actor, force: true)
 
       assert {:ok, %{resolution: :unresolved} = orphaned} = Policies.topic_policy(ctx.topic)
-      assert orphaned.retention == %{max_age_ms: {7_000, :unresolved_backstop}, max_bytes: {nil, :unresolved_backstop}}
+
+      assert orphaned.retention == %{
+               max_age_ms: {7_000, :unresolved_backstop},
+               max_bytes: {nil, :unresolved_backstop},
+               segment_max_age_ms: {nil, :unresolved_backstop}
+             }
     end
 
     test "an unknown or empty topic is an error, not a report of the global limits", ctx do

@@ -36,9 +36,11 @@ defmodule Malachi.Cluster.OrphanedFence do
 
   ## Why the pass may not fence
 
-  The probing this policy drives must be read-only, which is why it asks
+  The probing this policy drives must not seal or fence, which is why it asks
   `Malachi.Cluster.ReplicationServer.fenced_segments/3` (which reports a latch) rather than `seal/4`
-  (which sets one). `Malachi.Cluster.HealCoordinator` learned this the hard way on the failover path:
+  (which sets one). That probe can still latch a copy whose log fails to open, except for a failure that may clear by
+  the next request, which is refused and reopened on the next request; see its moduledoc.
+  `Malachi.Cluster.HealCoordinator` learned this the hard way on the failover path:
   a pass that fenced while probing closed replicas of segments it then declined to seal, and at
   `replication_factor: 2` that wedged a range permanently, because below a majority nothing was sealed
   and nothing unseals a store. This pass visits EVERY active segment, so the same mistake here would

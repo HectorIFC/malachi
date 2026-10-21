@@ -185,7 +185,7 @@ defmodule Malachi.Cluster.RetentionTest do
     test "a topic with no policy takes every bound from the global policy" do
       assert Retention.effective(nil, %{}, %{max_age_ms: 5_000}, 99) == %{
                resolution: :none,
-               retention: %{max_age_ms: {5_000, :global}, max_bytes: {nil, :global}}
+               retention: %{max_age_ms: {5_000, :global}, max_bytes: {nil, :global}, segment_max_age_ms: {nil, :global}}
              }
     end
 
@@ -194,13 +194,13 @@ defmodule Malachi.Cluster.RetentionTest do
 
       assert Retention.effective("p", policies, %{max_age_ms: 5_000, max_bytes: 10}, nil) == %{
                resolution: :resolved,
-               retention: %{max_age_ms: {nil, :policy}, max_bytes: {0, :policy}}
+               retention: %{max_age_ms: {nil, :policy}, max_bytes: {0, :policy}, segment_max_age_ms: {nil, :global}}
              }
 
       partial = %{"p" => %{retention: %{max_bytes: 7}}}
 
       assert Retention.effective("p", partial, %{max_age_ms: 5_000}, nil).retention ==
-               %{max_age_ms: {5_000, :global}, max_bytes: {7, :policy}}
+               %{max_age_ms: {5_000, :global}, max_bytes: {7, :policy}, segment_max_age_ms: {nil, :global}}
     end
 
     test "a resolved policy that says nothing about retention inherits every bound" do
@@ -208,14 +208,18 @@ defmodule Malachi.Cluster.RetentionTest do
 
       assert Retention.effective("p", policies, %{max_age_ms: 5_000}, 1) == %{
                resolution: :resolved,
-               retention: %{max_age_ms: {5_000, :global}, max_bytes: {nil, :global}}
+               retention: %{max_age_ms: {5_000, :global}, max_bytes: {nil, :global}, segment_max_age_ms: {nil, :global}}
              }
     end
 
     test "an unresolved name holds everything except the operator's backstop age" do
       assert Retention.effective("ghost", %{}, %{max_age_ms: 5_000, max_bytes: 10}, 42) == %{
                resolution: :unresolved,
-               retention: %{max_age_ms: {42, :unresolved_backstop}, max_bytes: {nil, :unresolved_backstop}}
+               retention: %{
+                 max_age_ms: {42, :unresolved_backstop},
+                 max_bytes: {nil, :unresolved_backstop},
+                 segment_max_age_ms: {nil, :unresolved_backstop}
+               }
              }
     end
 

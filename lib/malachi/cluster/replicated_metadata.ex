@@ -2,12 +2,15 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   @moduledoc """
   The control plane's metadata made **authoritative via Raft**, with a local read cache.
 
-  It pairs a `Malachi.Cluster.MetadataServer` (one `ra` cluster running `Malachi.Metadata.apply/2`)
+  It pairs a `Malachi.Cluster.MetadataServer` (one `ra` cluster running `Malachi.Metadata.apply/3`)
   with a local `Malachi.Metadata` materialized view. Mutations go through the Raft log (durable and
   replicated); on commit, the very same command is applied to the local cache. Because
-  `Malachi.Metadata.apply/2` is deterministic, the cache always equals the replicated state, so
-  reads are served locally from the cache (no Raft round-trip on the hot path) with read-your-writes
-  consistency.
+  `Malachi.Metadata.apply/3` is deterministic, the cache equals the replicated state, so reads are
+  served locally from the cache (no Raft round-trip on the hot path) with read-your-writes
+  consistency. One field is the exception: a registered segment's `opened_at` comes from the
+  timestamp the leader wrote into the log entry, which the reply does not carry, so the cache stamps
+  its own clock instead. The two differ by the commit latency, and the next `refresh/1` (or the
+  broker's re-seed) installs the replicated value.
 
   The cache is correct without refreshing as long as this process is the only writer (the
   single-control-node topology). `refresh/1` re-reads the replicated state for the multi-writer case
@@ -44,9 +47,16 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
     {reply, %{replicated | cache: cache}}
   end
 
+  # A compare-and-swap the log refused: its check runs against the log's view, which this cache may not hold.
+  defp cas_refused?({:set_segment_replicas, _segment_id, _replica_set, _expected}, {:error, reason})
+       when reason in [:replica_set_changed, :no_such_segment],
+       do: true
+
+  defp cas_refused?(_command, _reply), do: false
+
   @doc """
   Stateless form: submit `command` to the Raft cluster `server_id` and apply it to the **caller's**
-  `metadata` cache, returning `{metadata, reply}` (the same shape as `Malachi.Metadata.apply/2`, so
+  `metadata` cache, returning `{metadata, reply}` (the same shape as `Malachi.Metadata.apply/3`, so
   it is a drop-in metadata command function). The caller threads the cache, which lets a single
   operation perform several mutations with read-your-writes between them (e.g. a produce that opens
   and seals a segment). On a transport failure the cache is left unchanged.
@@ -56,9 +66,12 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   def apply_command(server_id, metadata, command) do
     case submit(server_id, command) do
       {:ok, reply} ->
-        if MachineVersion.refusal?(reply) or refused_commit?(command, reply),
+        # A compare-and-swap the log refused was decided against a view this cache may not hold (the set moved, or the
+        # segment is gone from the log), and so was a group member's fenced commit; the cache must not apply either.
+        # Other refusals from the metadata are deterministic and still applied, so a stale cache converges on them.
+        if MachineVersion.refusal?(reply) or cas_refused?(command, reply) or refused_commit?(command, reply),
           do: {metadata, reply},
-          else: {elem(Metadata.apply(metadata, command), 0), reply}
+          else: {elem(Metadata.apply(metadata, command, System.system_time(:millisecond)), 0), reply}
 
       {:error, reason} ->
         {metadata, {:error, reason}}
@@ -148,10 +161,10 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   end
 
   # Why a refusal is not re-applied here. The cache tracks the replicated state because both apply the
-  # same deterministic `Malachi.Metadata.apply/2`, so a command the metadata refuses (an existing topic,
+  # same deterministic `Malachi.Metadata.apply/3`, so a command the metadata refuses (an existing topic,
   # an unknown range) leaves both unchanged. The machine version gate is the exception: it runs inside
-  # the ra machine only (`Malachi.Cluster.MachineVersion.apply/5`), in front of `Metadata.apply/2`. A
-  # command introduced above the group's effective version is refused there while `Metadata.apply/2`
+  # the ra machine only (`Malachi.Cluster.MachineVersion.apply/5`), in front of `Metadata.apply/3`. A
+  # command introduced above the group's effective version is refused there while `Metadata.apply/3`
   # would accept it, so re-applying it would put into the cache what the log refused, and a caller
   # that journals the cache change would replay it after the next refresh.
 

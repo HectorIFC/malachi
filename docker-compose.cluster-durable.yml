@@ -52,7 +52,6 @@ x-malachi-node: &malachi-node
     MALACHI_PRODUCER_PASS: ${MALACHI_PRODUCER_PASS:-malachi-local-only-producer}
     MALACHI_CONSUMER_PASS: ${MALACHI_CONSUMER_PASS:-malachi-local-only-consumer}
     MALACHI_APP_PASS: ${MALACHI_APP_PASS:-malachi-local-only-app}
-    MALACHI_AUDIT_LOG_OUTPUT: stdout
     # The image runs the prod release, and prod requires TLS unless told otherwise. Plaintext is right
     # for a stack on your own machine and wrong for anything else, so turning it back on takes
     # MALACHI_REQUIRE_TLS=true AND certificates: setting MALACHI_TLS_CERTFILE and MALACHI_TLS_KEYFILE
@@ -81,7 +80,7 @@ x-malachi-node: &malachi-node
     - /tmp:rw,noexec,nosuid
   mem_limit: 1g
   healthcheck:
-    test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4041/health"]
+    # The probe is the image's own HEALTHCHECK (Dockerfile); this only tunes its timings.
     interval: 5s
     timeout: 3s
     retries: 30

@@ -15,10 +15,15 @@ defmodule Malachi.Config do
 
   alias Malachi.Auth
   alias Malachi.Auth.ConsoleRole
+  alias Malachi.Cluster.Policy
   alias Malachi.I18n
 
   # The control plane a single node runs when MALACHI_LOG_CLUSTER is not set (`log_cluster/2`).
   @default_log_cluster :malachi_log
+
+  # 7 days, Kafka's `segment.ms` default: long enough that a topic busy enough to fill a segment rolls by
+  # size first, short enough that a quiet one is not held back from age retention for weeks.
+  @default_segment_max_age_ms 7 * 24 * 60 * 60 * 1000
 
   @doc """
   Normalizes an on-disk data directory taken from an environment variable.
@@ -190,6 +195,36 @@ defmodule Malachi.Config do
       nil -> nil
       bound when bound in 0..0xFFFF_FFFF_FFFF_FFFF -> bound
       _out_of_range -> raise "#{var} must be a whole number from 0 through 18446744073709551615, got: #{inspect(raw)}"
+    end
+  end
+
+  @doc """
+  How old an active segment may get before the retention sweep rolls it, from
+  `MALACHI_SEGMENT_MAX_AGE_MS`: 7 days when the variable is absent or blank, otherwise a whole number of
+  milliseconds from the field's floor (`retention.segment_max_age_ms` in `Malachi.Cluster.Policy`, one
+  minute) through 2^64 - 1. Anything else stops the node, for the reasons `retention_bound/2` gives and
+  one more: below the floor, the sweep that asks for the roll runs too rarely to honor the value, and
+  every roll is one more segment in the metadata.
+
+  ## Examples
+
+      iex> Malachi.Config.segment_max_age_ms(nil)
+      604_800_000
+
+      iex> Malachi.Config.segment_max_age_ms("3600000")
+      3_600_000
+  """
+  @spec segment_max_age_ms(String.t() | nil) :: pos_integer()
+  def segment_max_age_ms(raw) do
+    var = "MALACHI_SEGMENT_MAX_AGE_MS"
+    %{min: floor} = Policy.field("retention.segment_max_age_ms")
+
+    case integer(var, raw, @default_segment_max_age_ms) do
+      age when age in floor..0xFFFF_FFFF_FFFF_FFFF//1 ->
+        age
+
+      _out_of_range ->
+        raise "#{var} must be a whole number from #{floor} through 18446744073709551615, got: #{inspect(raw)}"
     end
   end
 
