@@ -65,6 +65,16 @@ defmodule Malachi.Test.FaultySegmentStore do
     :ok
   end
 
+  @doc """
+  From now on, a read under `directory` at or past `offset` answers `reply`; reads before `offset` still run.
+  This is how a test makes a peer serve the first batches of a range and then fail, which `fail/3` cannot.
+  """
+  @spec fail_reads_from(Path.t(), non_neg_integer(), term()) :: :ok
+  def fail_reads_from(directory, offset, reply) when is_integer(offset) do
+    true = :ets.insert(@table, {{:rule, Path.expand(directory), :read_from}, {offset, reply}})
+    :ok
+  end
+
   @doc "Removes every rule and counter under `directory`."
   @spec clear(Path.t()) :: :ok
   def clear(directory) do
@@ -114,8 +124,20 @@ defmodule Malachi.Test.FaultySegmentStore do
   end
 
   @impl true
-  def read(handle, offset, max_records),
-    do: intercept(directory_of(handle), :read, fn -> ElixirStore.read(handle, offset, max_records) end)
+  def read(handle, offset, max_records) do
+    case read_failure_from(directory_of(handle), offset) do
+      # A reply of `{:delay, ms, reply}` answers after `ms`, which makes a caller with a shorter bound give up.
+      {:ok, {:delay, ms, reply}} ->
+        Process.sleep(ms)
+        reply
+
+      {:ok, reply} ->
+        reply
+
+      :none ->
+        intercept(directory_of(handle), :read, fn -> ElixirStore.read(handle, offset, max_records) end)
+    end
+  end
 
   @impl true
   def seal(handle), do: intercept(directory_of(handle), :seal, fn -> ElixirStore.seal(handle) end)
@@ -162,6 +184,17 @@ defmodule Malachi.Test.FaultySegmentStore do
     case rule_for(directory, operation) do
       {:ok, reply} -> reply
       :none -> run.()
+    end
+  end
+
+  defp read_failure_from(directory, offset) do
+    directory = Path.expand(directory)
+
+    :ets.select(@table, [{{{:rule, :"$1", :read_from}, :"$2"}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.find(fn {scope, {from, _reply}} -> offset >= from and under?(directory, scope) end)
+    |> case do
+      {_scope, {_from, reply}} -> {:ok, reply}
+      nil -> :none
     end
   end
 

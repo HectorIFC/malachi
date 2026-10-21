@@ -101,21 +101,67 @@ defmodule Malachi.Log do
   @doc """
   Reopens an existing log, recovering all segments. Only the last (active) segment is
   scanned; sealed segments are trusted via their file names.
+
+  A visible seal marker is fsynced through its directory before it is trusted, and a failed fsync is
+  returned rather than trusted. A marker or segment directory that cannot be examined is an error too,
+  never an absent marker. What this does not cover is a directory entry lost before any recovery ran: once
+  that entry is gone, nothing here can see the marker, so the log comes back unsealed.
+
+  `:sync_fun` replaces the directory fsync (`Malachi.Storage.Directory.sync/1` by default), the same seam
+  `Malachi.Storage.DataDirGuard` takes, so a test can make it fail.
   """
   @spec recover(Path.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def recover(directory, opts \\ []) do
     store = Keyword.get(opts, :store, @default_store)
+    sync_fun = Keyword.get(opts, :sync_fun, &Directory.sync/1)
+    opts = Keyword.delete(opts, :sync_fun)
     segment_opts = Keyword.drop(opts, [:base_offset, :store])
 
-    base_offsets = base_offsets_in(directory)
-    sealed? = File.exists?(seal_marker_path(directory))
-
-    if base_offsets == [] do
-      with {:ok, log} <- open(directory, opts) do
-        {:ok, %{log | sealed?: sealed?}}
+    with {:ok, sealed?} <- sealed_marker(directory, sync_fun),
+         {:ok, base_offsets} <- segment_offsets(directory) do
+      if base_offsets == [] do
+        with {:ok, log} <- open(directory, opts) do
+          {:ok, %{log | sealed?: sealed?}}
+        end
+      else
+        recover_with_segments(directory, store, segment_opts, base_offsets, sealed?)
       end
-    else
-      recover_with_segments(directory, store, segment_opts, base_offsets, sealed?)
+    end
+  end
+
+  # The marker is checked before any segment is read, on both branches of `recover/2`. Its directory
+  # is fsynced before the marker is believed: a marker left visible by a seal whose directory fsync
+  # failed exists in the page cache, and a power failure can still lose the entry that makes it exist.
+  # Only `:enoent` means the marker is absent. Any other stat error, such as EACCES from a directory
+  # without search permission, is an error: `File.exists?/1` would answer it as absent and recover an
+  # unfenced log. An absent marker costs nothing here, which is the common case for an active log.
+  defp sealed_marker(directory, sync_fun) do
+    case seal_marker_visible(directory) do
+      {:ok, true} ->
+        case sync_fun.(directory) do
+          :ok -> {:ok, true}
+          {:error, reason} -> {:error, {:seal_marker_unsynced, reason}}
+        end
+
+      {:ok, false} ->
+        {:ok, false}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Whether a seal marker is visible in `directory`. An absent marker answers `{:ok, false}`; a marker that
+  cannot be examined is an error, never an absent one. It makes no durability promise: `recover/2` is what
+  fsyncs a visible marker before trusting it.
+  """
+  @spec seal_marker_visible(Path.t()) :: {:ok, boolean()} | {:error, {:seal_marker_unreadable, term()}}
+  def seal_marker_visible(directory) do
+    case File.stat(seal_marker_path(directory)) do
+      {:ok, _stat} -> {:ok, true}
+      {:error, reason} when reason in [:enoent, :enotdir] -> {:ok, false}
+      {:error, reason} -> {:error, {:seal_marker_unreadable, reason}}
     end
   end
 
@@ -450,12 +496,39 @@ defmodule Malachi.Log do
     end
   end
 
+  @doc """
+  The base offsets of the segment files in `directory`, sorted. A directory that does not exist (or whose
+  parent is a file) holds no segments, so `{:ok, []}`; one that cannot be listed is an error, never an empty
+  list. Lists with `File.ls/1` rather than a wildcard, which answers `[]` for a directory it cannot read.
+  The names match `Path.wildcard/1`'s `*.log`, which skips dotfiles.
+  """
+  @spec segment_offsets(Path.t()) :: {:ok, [non_neg_integer()]} | {:error, {:segments_unreadable, term()}}
+  def segment_offsets(directory) do
+    case File.ls(directory) do
+      {:ok, names} ->
+        offsets =
+          names
+          |> Enum.filter(&(String.ends_with?(&1, ".log") and not String.starts_with?(&1, ".")))
+          |> Enum.map(&base_offset_from_path/1)
+          |> Enum.sort()
+
+        {:ok, offsets}
+
+      {:error, reason} when reason in [:enoent, :enotdir] ->
+        {:ok, []}
+
+      {:error, reason} ->
+        {:error, {:segments_unreadable, reason}}
+    end
+  end
+
+  # The other readers (`verify/2`, `rebuild_index/2`, `truncate_to/2`) keep their answer for an unreadable
+  # directory as it was: no segments.
   defp base_offsets_in(directory) do
-    directory
-    |> Path.join("*.log")
-    |> Path.wildcard()
-    |> Enum.map(&base_offset_from_path/1)
-    |> Enum.sort()
+    case segment_offsets(directory) do
+      {:ok, base_offsets} -> base_offsets
+      {:error, _reason} -> []
+    end
   end
 
   defp recover_with_segments(directory, store, segment_opts, base_offsets, sealed?) do

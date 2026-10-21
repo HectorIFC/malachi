@@ -76,8 +76,13 @@ from a replica that still verifies, moving itself out of the read path first whe
 copy that will not decode is a lost replica, so the same re-replication clock applies to it. The one
 rule the repair never breaks: the local copy is not deleted until a peer has confirmed a copy that is
 both intact and *complete* against what the control plane recorded at seal time, because a partially
-readable copy beats no copy, and beats a shorter one. See the operations guide for the knobs and
-cadence.
+readable copy beats no copy, and beats a shorter one. A rebuilt copy is written back record by record, so
+it comes back without a seal marker, as any replica copy whose own log never rolled does. The repair then
+seals it again at the length the control plane recorded, so the copy is fenced like the copies it was rebuilt
+from; if that seal cannot be made, the copy is latched as failed and healing replaces it. A failed catch-up or
+verify after the delete latches it the same way. If the latch itself does not answer in time, the copy is removed instead. If that removal does not answer
+either, the copy stays in place, unfenced, until a later scrub pass retries the latch, and a restart loses that retry. The scrub does not copy a missing replica back: the heal pass does, once every replica of the segment is live. See the operations
+guide for the knobs and cadence.
 
 > **Analogy.** A segment is a notebook: you keep writing on the current page until it is full, then you
 > close that notebook for good (seal it, never edited again) and open a fresh one. Because closed notebooks

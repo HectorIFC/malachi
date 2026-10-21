@@ -1327,6 +1327,148 @@ defmodule Malachi.BrokerTest do
       assert broker.segments[root_id].replica_set == new_set
     end
 
+    test "apply_heal_reply answers the control plane's refusal, and leaves the cache on the set it had", %{
+      store: store
+    } do
+      {broker, root_id} = broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3)
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+      cached_before = broker.segments[root_id].replica_set
+      refusing = fn dsrsm, _topic, _command -> {dsrsm, {:error, :no_quorum}} end
+      broker = %{broker | command_fun: refusing}
+
+      assert {broker, {:error, :no_quorum}} =
+               Broker.apply_heal_reply(broker, [{:set_segment_replicas, segment.id, [:b, :a, :c]}])
+
+      # A produce routes by this cached head, so it must still be the head the control plane recorded.
+      assert broker.segments[root_id].replica_set == cached_before
+    end
+
+    test "apply_heal_reply answers :ok when the control plane applied every command", %{store: store} do
+      {broker, root_id} = broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3)
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+      assert {_broker, :ok} = Broker.apply_heal_reply(broker, [{:set_segment_replicas, segment.id, [:b, :a, :c]}])
+    end
+
+    test "a read of a sealed segment asks the other replicas when its head answers end of log", %{store: store} do
+      {broker, root_id} = broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3)
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+      broker = Broker.apply_heal(broker, [{:seal_segment, segment.id, 1, 3, 500}])
+
+      # The head no longer holds the copy (a repair deleted it); another replica still does.
+      [head | _others] = segment.replica_set
+      read_fun = fn replica, _id, _start, _budget -> if replica == head, do: :eof, else: {:ok, [record("v", "k")]} end
+
+      assert {:ok, [_record]} = Broker.read(broker, root_id, 0, 10, read_fun)
+    end
+
+    test "apply_heal_reply answers the first refusal of a batch, not the last command's answer", %{store: store} do
+      {broker, root_id} = broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3)
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+
+      refuse_first = fn dsrsm, _topic, {:set_segment_replicas, id, _set} ->
+        if id == segment.id, do: {dsrsm, {:error, :no_quorum}}, else: {dsrsm, :ok}
+      end
+
+      broker = %{broker | command_fun: refuse_first}
+      other = {{"other", 0}, 0}
+
+      # The first command is refused and the second accepted: the batch's answer is the refusal.
+      assert {_broker, {:error, :no_quorum}} =
+               Broker.apply_heal_reply(broker, [
+                 {:set_segment_replicas, segment.id, [:b, :a, :c]},
+                 {:set_segment_replicas, other, [:a, :b, :c]}
+               ])
+    end
+
+    test "a sealed read keeps asking the other replicas past one that is unreachable", %{store: store} do
+      {broker, root_id} = broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3)
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+      broker = Broker.apply_heal(broker, [{:seal_segment, segment.id, 1, 3, 500}])
+
+      [head, unreachable, holder] = segment.replica_set
+
+      read_fun = fn replica, _id, _start, _budget ->
+        cond do
+          replica == head -> :eof
+          replica == unreachable -> {:error, :unreachable}
+          replica == holder -> {:ok, [record("v", "k")]}
+        end
+      end
+
+      # The unreachable replica does not prove the records are absent: the holder behind it still answers.
+      assert {:ok, [_record]} = Broker.read(broker, root_id, 0, 10, read_fun)
+    end
+
+    test "a sealed read whose head is unreachable is answered by the other replicas, not with the head's error", %{
+      store: store
+    } do
+      {broker, root_id} = broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3)
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+      broker = Broker.apply_heal(broker, [{:seal_segment, segment.id, 1, 3, 500}])
+
+      [head, holder, _other] = segment.replica_set
+
+      read_fun = fn replica, _id, _start, _budget ->
+        cond do
+          replica == head -> {:error, :unreachable}
+          replica == holder -> {:ok, [record("v", "k")]}
+          true -> :eof
+        end
+      end
+
+      assert {:ok, [_record]} = Broker.read(broker, root_id, 0, 10, read_fun)
+    end
+
+    test "a sealed read whose head errors and whose other replicas hold nothing reports the head's error, not end of log",
+         %{store: store} do
+      {broker, root_id} = broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3)
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+      broker = Broker.apply_heal(broker, [{:seal_segment, segment.id, 1, 3, 500}])
+
+      [head | _rest] = segment.replica_set
+
+      read_fun = fn replica, _id, _start, _budget ->
+        if replica == head, do: {:error, :unreachable}, else: :eof
+      end
+
+      assert {:error, :unreachable} = Broker.read(broker, root_id, 0, 10, read_fun)
+    end
+
+    test "a compare-and-swap replica set change applies only while the set is still the expected one", %{store: store} do
+      {broker, root_id} = broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3)
+      {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v", "k")])
+
+      [segment] = segments(broker, root_id)
+      cached_before = broker.segments[root_id].replica_set
+
+      # A heal moves the set on the control plane. A swap built on the view from before that move is refused: the
+      # control plane keeps the moved set, and so does the cache, since only an :ok reply updates it.
+      moved = [:c, :b, :a]
+
+      assert {moved_broker, :ok} =
+               Broker.apply_heal_reply(broker, [{:set_segment_replicas, segment.id, moved, cached_before}])
+
+      assert {after_stale, {:error, :replica_set_changed}} =
+               Broker.apply_heal_reply(moved_broker, [{:set_segment_replicas, segment.id, [:b, :a, :c], cached_before}])
+
+      assert Metadata.get_segment(Broker.metadata(after_stale), segment.id).replica_set == moved
+      assert after_stale.segments[root_id].replica_set == moved
+    end
+
     test "a failed register command aborts the produce instead of crashing", %{store: store} do
       # a command_fun that fails register_segment (as a Raft timeout would), passing others through
       failing = fn

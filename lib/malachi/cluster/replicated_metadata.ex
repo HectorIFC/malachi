@@ -47,6 +47,13 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
     {reply, %{replicated | cache: cache}}
   end
 
+  # A compare-and-swap the log refused: its check runs against the log's view, which this cache may not hold.
+  defp cas_refused?({:set_segment_replicas, _segment_id, _replica_set, _expected}, {:error, reason})
+       when reason in [:replica_set_changed, :no_such_segment],
+       do: true
+
+  defp cas_refused?(_command, _reply), do: false
+
   @doc """
   Stateless form: submit `command` to the Raft cluster `server_id` and apply it to the **caller's**
   `metadata` cache, returning `{metadata, reply}` (the same shape as `Malachi.Metadata.apply/3`, so
@@ -59,7 +66,10 @@ defmodule Malachi.Cluster.ReplicatedMetadata do
   def apply_command(server_id, metadata, command) do
     case submit(server_id, command) do
       {:ok, reply} ->
-        if MachineVersion.refusal?(reply),
+        # A compare-and-swap the log refused was decided against a view this cache may not hold (the set moved, or the
+        # segment is gone from the log), so the cache must not apply it. Other refusals from the metadata are
+        # deterministic and still applied, so a stale cache converges on them.
+        if MachineVersion.refusal?(reply) or cas_refused?(command, reply),
           do: {metadata, reply},
           else: {elem(Metadata.apply(metadata, command, System.system_time(:millisecond)), 0), reply}
 

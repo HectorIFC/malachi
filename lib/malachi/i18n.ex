@@ -748,11 +748,17 @@ defmodule Malachi.I18n do
       "pt_BR" => "passada de heal pulada: não foi possível ler a metadata (%{reason})",
       "en_US" => "heal pass skipped: the metadata could not be read (%{reason})"
     },
+    heal_commands_refused: %{
+      "pt_BR" =>
+        "passada de heal: o plano de controle recusou um comando de heal (%{reason}); os comandos depois dele foram enviados, salvo se um ficou sem resposta (registrado à parte), e o recusado é planejado de novo pela próxima passada enquanto o motivo durar (#269)",
+      "en_US" =>
+        "heal pass: the control plane refused a heal command (%{reason}); the commands after it were sent unless one was left unanswered (logged separately), and the refused one is planned again by the next pass while its reason lasts (#269)"
+    },
     heal_commands_unapplied: %{
       "pt_BR" =>
-        "passada de heal não conseguiu entregar seus comandos ao broker (%{reason}); os não entregues esperam a próxima passada, e um selo de failover entre eles pode não ser planejado de novo (#269)",
+        "passada de heal: nenhuma resposta a um comando de heal (%{reason}); os não aplicados esperam a próxima passada, e um selo de failover entre eles pode não ser planejado de novo (#269)",
       "en_US" =>
-        "heal pass could not hand its commands to the broker (%{reason}); the ones not handed over wait for the next pass, and a failover seal among them may not be planned again (#269)"
+        "heal pass: no answer to a heal command (%{reason}); the ones not applied wait for the next pass, and a failover seal among them may not be planned again (#269)"
     },
     retention_metadata_unavailable: %{
       "pt_BR" => "varredura de retenção pulada: não foi possível ler a metadata (%{reason})",

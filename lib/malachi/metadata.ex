@@ -137,6 +137,7 @@ defmodule Malachi.Metadata do
           | {:seal_segment, segment_id(), non_neg_integer(), non_neg_integer(), non_neg_integer()}
           | {:delete_segment, segment_id()}
           | {:set_segment_replicas, segment_id(), [broker()]}
+          | {:set_segment_replicas, segment_id(), [broker()], [broker()]}
           | {:commit_offset, group(), topic_name(), offsets()}
           | {:define_policy, policy_name(), policy()}
           | {:set_topic_policy, topic_name(), policy_name() | nil}
@@ -182,6 +183,10 @@ defmodule Malachi.Metadata do
       {:seal_segment, 5} => 0,
       {:delete_segment, 2} => 0,
       {:set_segment_replicas, 3} => 0,
+      # The compare-and-swap form (`expected` is the set the write was decided against). A wider tuple is a new
+      # command by the rule in `Malachi.Cluster.MachineVersion`: it enters at the next version, so an older member
+      # refuses it with the state unchanged instead of guessing, and every command already in a log keeps its meaning.
+      {:set_segment_replicas, 4} => 7,
       {:commit_offset, 4} => 0,
       {:define_policy, 3} => 0,
       {:set_topic_policy, 3} => 0,
@@ -260,6 +265,9 @@ defmodule Malachi.Metadata do
   def routed_range_topics({:delete_segment, segment_id}), do: topics([segment_routing_topic(segment_id)])
 
   def routed_range_topics({:set_segment_replicas, segment_id, _replicas}),
+    do: topics([segment_routing_topic(segment_id)])
+
+  def routed_range_topics({:set_segment_replicas, segment_id, _replicas, _expected}),
     do: topics([segment_routing_topic(segment_id)])
 
   def routed_range_topics(_not_range_scoped), do: []
@@ -358,6 +366,10 @@ defmodule Malachi.Metadata do
   defp command_topic(state, {:seal_segment, segment_id, _len, _bytes, _at}), do: segment_topic(state, segment_id)
   defp command_topic(state, {:delete_segment, segment_id}), do: segment_topic(state, segment_id)
   defp command_topic(state, {:set_segment_replicas, segment_id, _replicas}), do: segment_topic(state, segment_id)
+
+  defp command_topic(state, {:set_segment_replicas, segment_id, _replicas, _expected}),
+    do: segment_topic(state, segment_id)
+
   defp command_topic(_state, _unfenced), do: nil
 
   defp range_topic(state, range_id) do
@@ -484,6 +496,16 @@ defmodule Malachi.Metadata do
 
   defp do_apply(%__MODULE__{} = state, {:set_segment_replicas, segment_id, replica_set}) do
     update_segment(state, segment_id, fn segment -> %{segment | replica_set: replica_set} end)
+  end
+
+  # Compare-and-swap: the set is replaced only if it is still the one the write was decided against. A set that
+  # moved since (a heal, a failover) is refused, so a write built from an older view cannot revert it.
+  defp do_apply(%__MODULE__{} = state, {:set_segment_replicas, segment_id, replica_set, expected}) do
+    case Map.fetch(state.segments, segment_id) do
+      {:ok, %{replica_set: ^expected}} -> do_apply(state, {:set_segment_replicas, segment_id, replica_set})
+      {:ok, _moved} -> {state, {:error, :replica_set_changed}}
+      :error -> {state, {:error, :no_such_segment}}
+    end
   end
 
   defp do_apply(%__MODULE__{} = state, {:commit_offset, group, topic, offsets}) do

@@ -18,6 +18,12 @@ defmodule Malachi.Cluster.ReplicatedMetadataTest do
     replicated
   end
 
+  defp command_ok(replicated, command) do
+    {reply, replicated} = ReplicatedMetadata.command(replicated, command)
+    assert reply == :ok
+    {:ok, replicated}
+  end
+
   test "a committed command updates the local cache (read-your-writes)" do
     replicated = start()
 
@@ -77,6 +83,45 @@ defmodule Malachi.Cluster.ReplicatedMetadataTest do
 
     assert {^cache, {:error, {:unsupported_command, {:create_topic, 3}, 4, 3}}} =
              ReplicatedMetadata.apply_command(version_refusing_server(), cache, {:create_topic, "unsupported", 2})
+  end
+
+  test "a compare-and-swap the log refuses leaves a lagging cache as it was, and is not applied to it" do
+    replicated = start()
+    {{:ok, root}, replicated} = ReplicatedMetadata.command(replicated, {:create_topic, "events", 4})
+    {:ok, replicated} = command_ok(replicated, {:register_segment, root, "seg1", [:a, :b, :c], 0})
+
+    # The view a stale writer holds: the set as the log had it before another writer moved it.
+    lagging = replicated.cache
+    {:ok, replicated} = command_ok(replicated, {:set_segment_replicas, "seg1", [:c, :a, :b]})
+
+    # The swap was decided against the lagging view, so it matches that cache, but the log holds [:c, :a, :b] and
+    # refuses it. A cache that applied it would now say [:b, :c, :a], which the log never took.
+    assert {^lagging, {:error, :replica_set_changed}} =
+             ReplicatedMetadata.apply_command(
+               replicated.server_id,
+               lagging,
+               {:set_segment_replicas, "seg1", [:b, :c, :a], [:a, :b, :c]}
+             )
+  end
+
+  test "a compare-and-swap on a segment the log no longer has leaves a lagging cache as it was" do
+    replicated = start()
+    {{:ok, root}, replicated} = ReplicatedMetadata.command(replicated, {:create_topic, "events", 4})
+    {_, replicated} = ReplicatedMetadata.command(replicated, {:register_segment, root, "seg1", [:a, :b, :c], 0})
+    {_, replicated} = ReplicatedMetadata.command(replicated, {:seal_segment, "seg1", 1024, 2048, 1_700_000_000_000})
+
+    # The cache still holds seg1, as a stale reader does, while the log has deleted it. Only a sealed segment is
+    # deletable, which is why it was sealed first.
+    lagging = replicated.cache
+    {reply, replicated} = ReplicatedMetadata.command(replicated, {:delete_segment, "seg1"})
+    assert reply == :ok
+
+    assert {^lagging, {:error, :no_such_segment}} =
+             ReplicatedMetadata.apply_command(
+               replicated.server_id,
+               lagging,
+               {:set_segment_replicas, "seg1", [:b, :c, :a], [:a, :b, :c]}
+             )
   end
 
   test "a command an older member does not know leaves the cache as it was" do

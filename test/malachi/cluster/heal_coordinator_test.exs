@@ -83,6 +83,190 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
     assert HealCoordinator.heal_now(coordinator) == %{applied: [], failed: [], repaired: []}
   end
 
+  test "a heal command the control plane refuses is logged and recorded as :heal_commands_refused" do
+    a = start_broker()
+    d = start_broker()
+    {metadata, _segment_id} = sealed_segment([a, :b, :c], a, ["x", "y", "z"])
+    {source, _apply} = metadata_store(metadata)
+
+    refuse = fn _command -> {:error, :migrating} end
+    coordinator = start_coordinator(live_brokers: fn -> [a, :b, d] end, metadata_source: source, apply_command: refuse)
+
+    log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+    assert log =~ "the control plane refused a heal command (:migrating)"
+    assert :sys.get_state(coordinator).skipping == :heal_commands_refused
+  end
+
+  # One pass over two topics, each segment under-replicated onto d, so the pass plans a command for each.
+  defp two_topics_to_heal(a) do
+    {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+    {metadata, {:ok, other}} = Metadata.apply(metadata, {:create_topic, "other", 4})
+    first = {root, 0}
+    second = {other, 0}
+    {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, first, [a, :b, :c], 0})
+    {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, first, 1, 0, 0})
+    {metadata, :ok} = Metadata.apply(metadata, {:register_segment, other, second, [a, :b, :c], 0})
+    {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, second, 1, 0, 0})
+    {:ok, _last} = ReplicationServer.replicate(a, first, [a], 0, records(["x"]))
+    {:ok, _last} = ReplicationServer.replicate(a, second, [a], 0, records(["y"]))
+    metadata
+  end
+
+  test "a failover seal answered already-sealed converges on the winner, and the head move after it still goes out" do
+    b = start_broker()
+    c = start_broker()
+    {metadata, segment_id} = active_segment([:dead_primary, b, c], [b, c], ["x", "y", "z"])
+    {source, _apply} = metadata_store(metadata)
+    test_pid = self()
+    calls = start_supervised!({Agent, fn -> 0 end}, id: {:calls, System.unique_integer([:positive])})
+
+    # Suppose a roll fence won the race and sealed the segment at length 2, so the failover seal (length 3) is
+    # answered with the winner's length. The pass then sends the head move that follows the seal.
+    apply = fn command ->
+      n = Agent.get_and_update(calls, &{&1, &1 + 1})
+      send(test_pid, {:applied, n, command})
+      if n == 0, do: {:error, {:already_sealed, 2}}, else: :ok
+    end
+
+    coordinator =
+      start_coordinator(
+        live_brokers: fn -> [b, c] end,
+        metadata_source: source,
+        apply_command: apply,
+        probe_timeout: 500
+      )
+
+    log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+    assert_received {:applied, 0, {:seal_segment, ^segment_id, _length, _byte_size, _sealed_at}}
+    assert_received {:applied, 1, {:set_segment_replicas, ^segment_id, _set}}
+    refute log =~ "control plane refused"
+    refute log =~ "no answer to a heal command"
+    assert :sys.get_state(coordinator).skipping == nil
+  end
+
+  test "a refused heal command does not stop the commands after it" do
+    a = start_broker()
+    d = start_broker()
+    metadata = two_topics_to_heal(a)
+    {source, _apply} = metadata_store(metadata)
+    test_pid = self()
+    calls = start_supervised!({Agent, fn -> 0 end}, id: {:calls, System.unique_integer([:positive])})
+
+    # The first command the broker sees is refused, every later one is answered, and each call is reported to the test.
+    apply = fn command ->
+      n = Agent.get_and_update(calls, &{&1, &1 + 1})
+      send(test_pid, {:applied, n, command})
+      if n == 0, do: {:error, :migrating}, else: :ok
+    end
+
+    coordinator = start_coordinator(live_brokers: fn -> [a, :b, d] end, metadata_source: source, apply_command: apply)
+
+    ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+    assert_received {:applied, 0, {:set_segment_replicas, _refused, _set}}
+    assert_received {:applied, 1, {:set_segment_replicas, _answered, _set}}
+    assert :sys.get_state(coordinator).skipping == :heal_commands_refused
+  end
+
+  test "a transport timeout that comes back as the reply stops the pass as an unanswered call" do
+    a = start_broker()
+    d = start_broker()
+    metadata = two_topics_to_heal(a)
+    {source, _apply} = metadata_store(metadata)
+    test_pid = self()
+    calls = start_supervised!({Agent, fn -> 0 end}, id: {:calls, System.unique_integer([:positive])})
+
+    # The ra server answers the first call with a timeout as a value, not an exit.
+    apply = fn command ->
+      n = Agent.get_and_update(calls, &{&1, &1 + 1})
+      send(test_pid, {:applied, n, command})
+      {:error, :timeout}
+    end
+
+    coordinator = start_coordinator(live_brokers: fn -> [a, :b, d] end, metadata_source: source, apply_command: apply)
+
+    log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+    assert_received {:applied, 0, {:set_segment_replicas, _first, _set}}
+    refute_received {:applied, 1, _command}
+    assert log =~ "no answer to a heal command (:timeout)"
+    refute log =~ "control plane refused"
+    assert :sys.get_state(coordinator).skipping == :heal_commands_unapplied
+  end
+
+  test "each transport value ra returns stops the pass as an unanswered call, never a refusal" do
+    a = start_broker()
+    d = start_broker()
+    metadata = two_topics_to_heal(a)
+    {source, _apply} = metadata_store(metadata)
+
+    for reply <- [:timeout, :noproc, :nodedown, :shutdown] do
+      test_pid = self()
+      calls = start_supervised!({Agent, fn -> 0 end}, id: {:calls, System.unique_integer([:positive])})
+
+      apply = fn command ->
+        n = Agent.get_and_update(calls, &{&1, &1 + 1})
+        send(test_pid, {:applied, reply, n, command})
+        {:error, reply}
+      end
+
+      coordinator = start_coordinator(live_brokers: fn -> [a, :b, d] end, metadata_source: source, apply_command: apply)
+
+      log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert_received {:applied, ^reply, 0, _first}
+      refute_received {:applied, ^reply, 1, _second}
+      assert log =~ "no answer to a heal command (#{inspect(reply)})"
+      refute log =~ "control plane refused"
+      assert :sys.get_state(coordinator).skipping == :heal_commands_unapplied
+    end
+  end
+
+  test "a refusal followed by a command the broker does not answer logs both" do
+    a = start_broker()
+    d = start_broker()
+    metadata = two_topics_to_heal(a)
+    {source, _apply} = metadata_store(metadata)
+    calls = start_supervised!({Agent, fn -> 0 end}, id: {:calls, System.unique_integer([:positive])})
+
+    # The first command is refused, the second exits as a broker that does not answer in time would.
+    apply = fn _command ->
+      n = Agent.get_and_update(calls, &{&1, &1 + 1})
+      if n == 0, do: {:error, :migrating}, else: exit(:timeout)
+    end
+
+    coordinator = start_coordinator(live_brokers: fn -> [a, :b, d] end, metadata_source: source, apply_command: apply)
+
+    log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+    assert log =~ "the control plane refused a heal command (:migrating)"
+    assert log =~ "no answer to a heal command (:timeout)"
+    assert :sys.get_state(coordinator).skipping == :heal_commands_unapplied
+  end
+
+  test "the first refusal of a pass is the one logged" do
+    a = start_broker()
+    d = start_broker()
+    metadata = two_topics_to_heal(a)
+    {source, _apply} = metadata_store(metadata)
+    calls = start_supervised!({Agent, fn -> 0 end}, id: {:calls, System.unique_integer([:positive])})
+
+    apply = fn _command ->
+      n = Agent.get_and_update(calls, &{&1, &1 + 1})
+      if n == 0, do: {:error, :migrating}, else: {:error, :not_leader}
+    end
+
+    coordinator = start_coordinator(live_brokers: fn -> [a, :b, d] end, metadata_source: source, apply_command: apply)
+
+    log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+    assert log =~ "the control plane refused a heal command (:migrating)"
+    refute log =~ "not_leader"
+    assert :sys.get_state(coordinator).skipping == :heal_commands_refused
+  end
+
   test "reports a segment with no live source as failed and applies nothing" do
     a = start_broker()
     d = start_broker()
@@ -1091,7 +1275,7 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
       assert_received {:handed, _first}
       assert_received {:handed, _again}
       refute_received {:handed, _third}
-      assert length(String.split(log, "heal pass could not hand its commands to the broker")) == 2
+      assert length(String.split(log, "heal pass: no answer to a heal command")) == 2
       assert Process.alive?(coordinator)
     end
 

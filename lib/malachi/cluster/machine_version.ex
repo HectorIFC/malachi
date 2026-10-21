@@ -91,8 +91,10 @@ defmodule Malachi.Cluster.MachineVersion do
   # roles in `Malachi.Auth.UserRegistry` (#228): `{:set_role, username, role}`,
   # `{:put_user, username, hash, permissions, role}` and `{:import_users_with_roles, entries}`. 4
   # introduced `{:bind_topic_policy, topic, name}` in `Malachi.Metadata` (#194), 3 the storage policy
-  # store and 2 the cluster flags; all are released, which is why the field takes the next version.
-  @code_version 6
+  # store and 2 the cluster flags; all are released, which is why the field takes the next version. 7
+  # introduced the compare-and-swap form `{:set_segment_replicas, id, replica_set, expected}` in
+  # `Malachi.Metadata`: a wider tuple is a new command, so it takes the next version.
+  @code_version 7
 
   @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
   @type command_key :: {atom(), non_neg_integer()}
