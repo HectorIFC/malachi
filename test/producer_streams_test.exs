@@ -346,6 +346,13 @@ defmodule Malachi.ProducerStreamsTest do
       :ok = Malachi.Auth.revoke_acl(user, :produce, ctx.topic)
       send_append(socket, id, 0, batch(["a"]))
       assert reply_to(socket) == {:error, "permission_denied"}
+
+      # the refusal ended the stream: it is no longer listed, and an append after it is not taken
+      %{streams: streams} = Malachi.ProducerDirectory.list()
+      assert Enum.filter(streams, &(&1.topic == ctx.topic)) == []
+      :ok = Malachi.Auth.grant_acl(user, :produce, ctx.topic)
+      send_append(socket, id, 1, batch(["b"]))
+      assert reply_to(socket) == {:error, "unknown_stream"}
     end
 
     test "a subscribe is refused: one connection does not push records and take appends at once", ctx do

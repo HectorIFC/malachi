@@ -199,7 +199,9 @@ defmodule Malachi.TCPProtocol do
   end
 
   # One append: the flag and the topic permission are checked again on every frame (an operator can revoke
-  # either while the stream is open). The publish quotas are charged inside `ProducerStreams.append/6`, once
+  # either while the stream is open). A refusal uses up no sequence, so the appends after it would break the
+  # sequence: it ends the stream, as a client that is refused retires it, and every later append is
+  # answered `unknown_stream`. The publish quotas are charged inside `ProducerStreams.append/6`, once
   # the batch is decoded, by its inflated records and bytes (`charge_publish/3`).
   defp append(correlation_id, stream_id, sequence, batch, session, streams, socket, transport) do
     case ProducerStreams.topic(streams.producers, stream_id) do
@@ -217,7 +219,8 @@ defmodule Malachi.TCPProtocol do
 
         if refusal do
           transport.send(socket, Wire.encode_error(correlation_id, refusal))
-          streams
+          {:ok, producers} = ProducerStreams.close(streams.producers, stream_id)
+          %{streams | producers: producers}
         else
           # `topic/2` above names only an open stream, so the append is taken or answered here
           charge = &charge_publish(session, &1, &2)
