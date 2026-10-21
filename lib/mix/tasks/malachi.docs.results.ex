@@ -434,6 +434,10 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
       "every invariant held through #{faults} injected #{plural(faults, "fault")}."
   end
 
+  defp chaos_headline(%{"verdict" => "skipped"} = result) do
+    "**#{result["certification"]} skipped**: #{result["skip_reason"]}."
+  end
+
   defp chaos_headline(result) do
     "**#{result["certification"]} FAILED** at replication factor #{result["replication_factor"]}. " <>
       "What broke is listed under *Failures*."

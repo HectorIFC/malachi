@@ -75,6 +75,8 @@ defmodule UpgradeChaosTest do
     write!(root, "benchmark/Dockerfile.loadtest", "FROM scratch\n")
     write!(root, "lib/malachi/cluster/machine_version.ex", "defmodule M do\n  @code_version 3\nend\n")
     write!(root, "lib/canary.txt", "released\n")
+    # Every release here serves the stream keys; a test that needs one that does not cuts it itself.
+    write!(root, "lib/malachi/tcp_protocol.ex", "defmodule T do\n  # api_key == Wire.fetch_range_key() ->\nend\n")
     write!(root, ".gitignore", "/tmp/\n")
     write!(root, "test/support/canary.patch", patch("lib/canary.txt", "released", "canary") <> version_patch(4))
 
@@ -243,6 +245,41 @@ defmodule UpgradeChaosTest do
   end
 
   describe "choosing OLD" do
+    # A release cut without the stream keys, newer than every other, and the tree past it again.
+    defp release_without_stream_keys(ctx) do
+      # the keys named and gated, but not answered: no fetch_range in the wire protocol
+      write!(ctx.root, "lib/malachi/tcp_protocol.ex", "defmodule T do\nend\n")
+      write!(ctx.root, "lib/malachi/routing.ex", "defmodule R do\n  @flag :producer_streams\nend\n")
+      git!(ctx.root, ["add", "lib/malachi/routing.ex"])
+      write!(ctx.root, "lib/malachi/wire.ex", "defmodule W do\n  def cluster_state_key, do: 24\nend\n")
+      git!(ctx.root, ["add", "lib/malachi/wire.ex"])
+      write!(ctx.root, "mix.exs", ~s(defmodule P do\n  @version "0.18.0"\nend\n))
+      git!(ctx.root, ["commit", "-q", "-am", "a release without the stream keys"])
+      git!(ctx.root, ["tag", "v0.18.0"])
+      write!(ctx.root, "lib/malachi/tcp_protocol.ex", "defmodule T do\n  # api_key == Wire.fetch_range_key() ->\nend\n")
+      git!(ctx.root, ["commit", "-q", "-am", "the stream keys"])
+    end
+
+    test "a newest release that predates the stream keys is skipped: recorded as skipped, nothing built", ctx do
+      release_without_stream_keys(ctx)
+      assert {output, 0} = run_drill(ctx)
+
+      assert output =~
+               "UPGRADE AND ROLLBACK CERTIFICATION SKIPPED: v0.18.0, the newest release, whose code this tree " <>
+                 "changes, predates the stream keys"
+
+      assert %{"verdict" => "skipped", "skip_reason" => reason, "details" => %{"old_ref" => "v0.18.0"}} = result(ctx)
+      assert reason =~ "no release can be rolled from yet"
+      refute Enum.any?(docker_calls(ctx), &String.starts_with?(&1, "build"))
+    end
+
+    test "an OLD_REF that predates the stream keys is a usage error, not a skip", ctx do
+      release_without_stream_keys(ctx)
+      assert {output, 2} = run_drill(ctx, [{"OLD_REF", "v0.18.0"}])
+      assert output =~ "usage error: OLD_REF=v0.18.0 predates the stream keys"
+      assert %{"verdict" => "failed"} = result(ctx)
+    end
+
     test "on a tree whose code is the newest release, OLD is the release before it", ctx do
       # What main looks like: every merge is tagged, so the newest tag holds this very code, and rolling from
       # it would certify a release against itself.
@@ -895,6 +932,7 @@ defmodule UpgradeChaosTest do
         esac ;;
       exec)
         case "$*" in
+          *"malachi.flag enable producer_streams"*) echo "cluster flag enabled: producer_streams" ;;
           *"malachi.flag enable"*)
             if [ "$2" = malachi-cluster-3 ] && [ "${STUB_MIXED_FLAG:-}" != accepted ]; then
               echo "these nodes are not alive or do not support that flag: malachi@malachi1, malachi@malachi2. Upgrade them"

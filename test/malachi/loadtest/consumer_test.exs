@@ -240,6 +240,23 @@ defmodule Malachi.Loadtest.ConsumerTest do
     defp fetch_n(f, topic, n), do: Enum.map_reduce(1..n, f, fn _, f -> f |> Fetcher.fetch(topic, now()) |> swap() end)
     defp swap({f, result}), do: {result, f}
 
+    test "fetch_page gives the values of a page with its range and positions; at_tail: :wait stays at the end", ctx do
+      produce!(ctx, for(i <- 1..5, do: "v#{i}"))
+      f = fetcher(ctx, at_tail: :wait)
+
+      {f, {:page, page}} = Fetcher.fetch_page(f, ctx.topic, now())
+      assert Enum.sort(page.values) == Enum.sort(for i <- 1..5, do: "v#{i}")
+      assert %{range: 0, block: {0, 256}, size: 256, from: :earliest, to: {0, 5}} = page
+
+      # nothing new: the next page is asked from where the last one ended, and stays there
+      {f, {:page, %{values: [], from: {:position, {0, 5}}}}} = Fetcher.fetch_page(f, ctx.topic, now())
+      {_f, {:page, %{values: [], from: {:position, {0, 5}}}}} = Fetcher.fetch_page(f, ctx.topic, now())
+    end
+
+    test "at_tail must be :restart or :wait", ctx do
+      assert_raise ArgumentError, ~r/at_tail must be :restart or :wait/, fn -> fetcher(ctx, at_tail: :never) end
+    end
+
     test "pages every record of every range, then starts each range over at its end", ctx do
       {:ok, _, _} = split!(ctx, 0)
       produce!(ctx, for(i <- 1..20, do: "v#{i}"))

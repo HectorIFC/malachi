@@ -1,36 +1,36 @@
 # Jepsen-style acked-durability checker for the chaos certification harness.
 #
-# produce mode: connects to the cluster (multi-host round-robin), creates the topic, and produces
-# sequential values c-1, c-2, ... at a steady rate for the whole window, RETRYING through errors and
-# dropped connections (chaos is happening on purpose). A value is appended to the acked file ONLY
-# when its produce was confirmed, so the file is the exact set of writes the cluster acknowledged.
+# produce mode: reads the cluster's state from the first host that answers (the cluster must serve the
+# stream keys), creates the topic, and produces sequential values c-1, c-2, ... at a steady rate for the
+# whole window, on a producer stream per range opened where the routes say, with a few appends in flight,
+# RESENDING every value whose append failed or was in flight on a dropped connection (chaos is happening
+# on purpose). A value is appended to the acked file ONLY when the cluster acknowledged it, so the file is
+# the exact set of writes the cluster acknowledged.
 #
-# verify mode: fetches the whole topic and asserts every acked value is present. The invariant under
-# test: an acknowledged write survives any single-node kill, partition, or stall (rf=3 quorum
-# durability). Exit 0 on success, 1 with a summary of missing values otherwise.
+# verify mode: reads the whole topic, range by range with `fetch_range` from the start of each range's
+# history, and asserts every acked value is present. The invariant under test: an acknowledged write
+# survives any single-node kill, partition, or stall (rf=3 quorum durability). Exit 0 on success, 1 with a
+# summary of missing values otherwise.
 #
-# Draining is deliberately patient, and separates two things a naive scan conflates:
+# Reading is deliberately patient, and separates two things a naive scan conflates:
 #
 #   * an acknowledged write that is GONE (the durability failure this drill exists to catch), and
-#   * an acknowledged write not YET VISIBLE on the node being asked.
+#   * an acknowledged write not YET VISIBLE where the range is read.
 #
-# The second is not a bug. A frontend's read horizon advances for the produces it handles and
-# otherwise from a periodic refresh of the vnodes (a second by default), so a write acknowledged
-# through one node is legitimately invisible on another for a moment, and the checker produces
-# round-robin across hosts while verifying against a single one. This scan used to stop at the FIRST
-# empty page of a non-blocking fetch, so one poll landing inside that window declared every unread
-# value lost: `acked=2034 read=2033 missing=1` on a healthy cluster (issue #75). Now an empty page
-# only ends the scan after it keeps coming back empty for `@drain_settle_ms`, and a missing set is
-# re-read for `@revisit_ms` before any verdict, with the outcome naming which of the two it was.
+# The second is not a bug: a range read right after a failover is read where its new segment is led, and
+# what that node makes visible can trail what the cluster acknowledged for a moment (issue #75 is that
+# window mistaken for loss). So an empty page only ends the scan after pages keep coming back empty for
+# `@drain_settle_ms` and every range has answered one in that stretch, and a missing set is re-read for
+# `@revisit_ms` before any verdict, with the outcome naming which of the two it was.
 #
 # There is a third thing, and it is neither of those: an acknowledged write that EXISTS on disk but
 # cannot be reached through the API. Two segments owning the same offsets (a sealed segment whose log
 # kept growing under a stale primary, and the next segment starting where the seal said the first one
-# ended) make a scan deliver one owner's records for those offsets and hand out a cursor past the
+# ended) make a scan deliver one owner's records for those offsets and hand out a position past the
 # other's. Re-reading never helps: every pass returns the same pages, so the revisit would spend its
 # whole budget and report inconclusive, wording that says the opposite of what happened. That case
 # has a signature a lag cannot produce, a contiguous block of missing values strictly between two
-# consecutive delivered pages of a scan that reached the end, and it is measured twice, by two reads
+# consecutive pages of a range in a scan that reached the end, and it is measured twice, by two reads
 # that both reached the end, before it is called: see `confirmed_boundary/3`.
 #
 # So verify ends in one of these, and the line it prints names which:
@@ -817,12 +817,28 @@ defmodule ChaosChecker.ControlPlane do
 end
 
 defmodule ChaosChecker do
+  alias Malachi.Keyspace
   alias Malachi.Loadtest.Conn
+  alias Malachi.Loadtest.Fetcher
+  alias Malachi.Loadtest.Producer
+  alias Malachi.Loadtest.Router
   alias Malachi.Log.Record
   alias Malachi.Wire
 
+  @conn_opts [user: "admin", pass: "admin123"]
   @rate_sleep_ms 20
   @retry_sleep_ms 250
+  # Appends a producer stream keeps in flight at most: enough that a failover finds some of them on the
+  # wire, which is the window the producer streams exist to keep safe.
+  @inflight 8
+  # How often a produce window reports how it is going.
+  @progress_ms 10_000
+  # How long the appends still in flight at the end of a produce window get to be answered.
+  @final_acks_ms 5_000
+  # Records a page carries at most.
+  @page_records 500
+  # Refusals that are routing, not reading: the reader reads the routes again and asks again.
+  @routing_errors ["connect_failed", "metadata_unavailable"]
 
   # How long an empty page has to keep repeating before the topic counts as drained, and how often to
   # ask. Comfortably over the frontend's default one-second metadata refresh, so a scan that arrives
@@ -853,19 +869,22 @@ defmodule ChaosChecker do
     deadline = System.monotonic_time(:millisecond) + String.to_integer(duration_s) * 1000
     {:ok, out} = File.open(acked_file, [:write])
 
-    conn = connect_retry(hosts, 0, deadline)
+    {router, conn} = stream_router(hosts, deadline)
     ensure_topic(conn, topic)
-    produce_loop(conn, hosts, topic, out, deadline, 1, 2, 0)
+    Conn.close(conn)
+    produced = produce_window(router, topic, deadline, &IO.write(out, &1 <> "\n"))
+    IO.puts("produced #{produced} values; done")
   end
 
   def main(["verify", hosts, topic, acked_file]) do
     hosts = parse_hosts(hosts)
     acked = acked_file |> File.read!() |> String.split("\n", trim: true) |> MapSet.new()
 
-    conn = connect_retry(hosts, 0, System.monotonic_time(:millisecond) + 30_000)
+    {router, conn} = stream_router(hosts, System.monotonic_time(:millisecond) + 30_000)
+    Conn.close(conn)
     scan_deadline = System.monotonic_time(:millisecond) + @verify_scan_ms
     started = System.monotonic_time(:millisecond)
-    {read, conn, scan} = drain(&fetch_page/3, conn, topic, deadline: scan_deadline)
+    {read, router, scan} = read_topic(router, topic, scan_deadline)
     scan_ms = System.monotonic_time(:millisecond) - started
     missing = MapSet.difference(acked, read)
 
@@ -884,8 +903,8 @@ defmodule ChaosChecker do
         # The FIRST scan's trace, not a later one: it is the pass where a skip first happened, and the
         # revisit re-reads from the start, so its own pages describe a topic that has since moved on.
         case skipped_at(scan.pages, missing) do
-          nil -> revisit(conn, hosts, topic, acked, read, missing, revisit_budget_ms(scan_ms), scan)
-          _boundary -> confirm_skip(conn, hosts, topic, acked, read, scan, scan_ms)
+          nil -> revisit(router, hosts, topic, acked, read, missing, revisit_budget_ms(scan_ms), scan)
+          _boundary -> confirm_skip(router, hosts, topic, acked, read, scan, scan_ms)
         end
     end
   end
@@ -1079,7 +1098,7 @@ defmodule ChaosChecker do
   end
 
   # The verdict for a skip that survived a second full read. A failure, not an inconclusive: the
-  # values were acknowledged, both scans reached the end, and both handed out a cursor past them, so
+  # values were acknowledged, both scans reached the end, and both handed out a position past them, so
   # the API cannot return them. Wording chosen so the shell harness can tell it from the lost case,
   # which is a different bug with a different owner.
   defp report_unreachable(missing, boundary) do
@@ -1102,8 +1121,8 @@ defmodule ChaosChecker do
   @spec unreachable_line(non_neg_integer(), {map(), map()}) :: String.t()
   def unreachable_line(missing_count, {before, following}) do
     "VERIFY FAILED: #{missing_count} acknowledged values are still missing after two full reads, " <>
-      "of which at least the block between #{before.last} and #{following.first} is unreachable " <>
-      "(both reads skipped it at the same page boundary)"
+      "of which at least the block between c-#{before.high} and c-#{following.low} of range " <>
+      "#{before.range} is unreachable (both reads skipped it at the same page boundary)"
   end
 
   # The pass that makes the verdict. Re-reads the topic with a deadline of its own, so the revisit
@@ -1119,11 +1138,11 @@ defmodule ChaosChecker do
   # each too short to reach the end of the topic, which is the one thing either pass must do to
   # conclude anything, and the transient case is rare by construction: a boundary that gets this far
   # has already been observed once.
-  defp confirm_skip(conn, hosts, topic, acked, read, first_scan, scan_ms) do
+  defp confirm_skip(router, hosts, topic, acked, read, first_scan, scan_ms) do
     IO.puts("scan trace shows a page boundary over the missing values; re-reading once to confirm it")
     budget_ms = revisit_budget_ms(scan_ms)
     started = System.monotonic_time(:millisecond)
-    {fresh, conn, second} = drain(&fetch_page/3, conn, topic, deadline: started + budget_ms)
+    {fresh, router, second} = read_topic(router, topic, started + budget_ms)
     elapsed_ms = System.monotonic_time(:millisecond) - started
     read = MapSet.union(read, fresh)
     missing = MapSet.difference(acked, read)
@@ -1140,7 +1159,7 @@ defmodule ChaosChecker do
           report_unreachable(missing, boundary)
 
         :no ->
-          revisit(conn, hosts, topic, acked, read, missing, budget_ms, first_scan)
+          revisit(router, hosts, topic, acked, read, missing, budget_ms, first_scan)
       end
     end
   end
@@ -1160,84 +1179,92 @@ defmodule ChaosChecker do
   @doc """
   The scan's pages rendered one per line, with runs of empty pages collapsed.
 
-  Reads as a walk: each line is one fetch, what it was asked from, what it returned, and the span of
-  values it carried. A scan that is merely slow shows pages marching upward and then stopping; a scan
-  that skipped shows one page ending at a value and the next starting well above it, which is the
-  distinction the verdict alone could never make.
+  Reads as a walk: each line is one page, its range, where it was asked from and where that range goes
+  on, and the span of values it carried. A scan that is merely slow shows each range's pages marching
+  upward and then stopping; a scan that skipped shows a page of a range ending at a value and that range's
+  next page starting well above it, which is the distinction the verdict alone could never make.
   """
   @spec page_lines([map()]) :: [String.t()]
   def page_lines(pages) do
     pages
     |> Enum.chunk_by(&(&1.count == 0))
     |> Enum.flat_map(fn
-      [%{count: 0} | _] = empties -> ["PAGE (#{length(empties)} empty, cursor held)"]
+      [%{count: 0} | _] = empties -> ["PAGE (#{length(empties)} empty, positions held)"]
       carrying -> Enum.map(carrying, &page_line/1)
     end)
   end
 
   defp page_line(page) do
-    "PAGE from=#{cursor_label(page.from)} to=#{cursor_label(page.to)} " <>
+    "PAGE range=#{page.range} from=#{position_label(page.from)} to=#{position_label(page.to)} " <>
       "count=#{page.count} first=#{page.first} last=#{page.last}"
   end
 
-  # Cursors are opaque on the wire, so what matters here is telling one from another and seeing when
-  # one repeats, not decoding it. Hashed rather than truncated: the cursor is a base64 Erlang term, so
-  # every one of them opens with the same header, and showing a prefix rendered every page identical
-  # (g3QAAAAB...) precisely in the trace that exists to compare them. A hash of the WHOLE cursor is
-  # short, stable, and different exactly when the cursor is.
-  defp cursor_label(nil), do: "start"
-
-  defp cursor_label(cursor) do
-    cursor |> :erlang.phash2() |> Integer.to_string(16) |> String.pad_leading(8, "0")
-  end
+  # A position is the index of a source in the range's history and an offset in it (`Malachi.Wire`).
+  defp position_label(:earliest), do: "start"
+  defp position_label({:position, position}), do: position_label(position)
+  defp position_label({source, offset}), do: "#{source}:#{offset}"
 
   @doc """
-  Where a scan walked past values it never returned, given its `pages` and the `missing` set: the two
-  consecutive pages that bracket the lowest missing value, or `nil` when no page boundary does.
+  Where a scan walked past values it never returned, given its `pages` and the `missing` set: two
+  consecutive pages of one range that bracket the lowest missing value of that range, or `nil` when no
+  page boundary does.
 
-  This is the finding the page trace exists to produce. A cursor that advances over records makes the
-  values above the gap readable while the ones inside it never come back, which looks exactly like a
-  slow scan from the outside and is nothing like it: one is a budget to raise, the other is the server
-  handing out a position past data it had not made visible yet. `nil` means the trace does not explain
-  the missing set, which is worth knowing too rather than inventing a boundary that fits.
+  This is the finding the page trace exists to produce. A position handed out past records makes the
+  values above the gap readable while the ones inside it never come back, which looks exactly like a slow
+  scan from the outside and is nothing like it: one is a budget to raise, the other is the server handing
+  out a position past data it had not made visible yet. `nil` means the trace does not explain the missing
+  set, which is worth knowing too rather than inventing a boundary that fits.
+
+  Asked per range, since a range only holds the values whose key falls in its block (`c-N` is keyed
+  `kN`), and each range is read in its own order. A page is bracketed by the lowest and highest sequence
+  numbers it carries, not its first and last: a value sent again after a failure lands after higher ones,
+  and taking it as the page's edge would draw a boundary over values the page carried.
   """
   @spec skipped_at([map()], MapSet.t()) :: {map(), map()} | nil
   def skipped_at(pages, missing) do
-    carrying = Enum.filter(pages, &(&1.count > 0))
+    pages
+    |> Enum.filter(&(&1.count > 0))
+    |> Enum.group_by(& &1.range)
+    |> Enum.sort()
+    |> Enum.find_value(fn {_range, [page | _] = carrying} ->
+      lowest = missing |> Enum.filter(&in_block?(&1, page)) |> lowest_sequence()
+      bracket(carrying, lowest)
+    end)
+  end
 
-    with lowest when is_integer(lowest) <- lowest_sequence(missing) do
-      carrying
-      |> Enum.chunk_every(2, 1, :discard)
-      |> Enum.find(fn [before, following] ->
-        brackets?(sequence_number(before.last), sequence_number(following.first), lowest)
-      end)
-      |> case do
-        [before, following] -> {before, following}
-        nil -> nil
-      end
-    else
-      _no_sequence -> nil
+  defp bracket(_carrying, nil), do: nil
+
+  defp bracket(carrying, lowest) do
+    carrying
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.find_value(fn [before, following] ->
+      if brackets?(before.high, following.low, lowest), do: {before, following}
+    end)
+  end
+
+  defp brackets?(high, low, lowest) when is_integer(high) and is_integer(low), do: high < lowest and low > lowest
+  defp brackets?(_high, _low, _lowest), do: false
+
+  # Whether `value` (`c-N`, keyed `kN`) belongs to the range a page came from.
+  defp in_block?(value, %{block: {key_start, key_end}, size: size}) do
+    case sequence_number(value) do
+      nil -> false
+      n -> (position = Keyspace.position_of("k#{n}", size)) >= key_start and position < key_end
     end
   end
 
-  defp brackets?(last, first, lowest) when is_integer(last) and is_integer(first) do
-    last < lowest and first > lowest
-  end
-
-  defp brackets?(_last, _first, _lowest), do: false
-
   @doc """
   Whether the skip `skipped_at/2` found in a first scan is still there in a second one: the same page
-  boundary, a page ending at the same sequence number followed by one starting at the same sequence
-  number, brackets the lowest value of `missing` in both `first_pages` and `second_pages`.
+  boundary, a page of the same range reaching the same sequence number followed by one starting at the
+  same sequence number, brackets the lowest value of `missing` in both `first_pages` and `second_pages`.
 
   Measured twice on purpose. One scan's boundary could in principle be a single transient page (a
-  fetch that came back short for a reason of the moment, with the cursor placed after it), and a
+  fetch that came back short for a reason of the moment, with the position placed after it), and a
   verdict as strong as "unreachable" must not rest on one observation. A boundary that comes back
   identical from a fresh read started at the beginning of the topic is not a moment: it is how the
   server answers that position, which is what makes the values behind it unreachable rather than
-  late. Compared by sequence number and not by cursor, because a fresh read hands out cursors of its
-  own, so the two scans never share one even when they walked the same pages.
+  late. Compared by sequence number and not by page, because a fresh read is a fresh walk: what the two
+  scans share, when they walked past the same block, is where the values stop and start again.
 
   This is the question stated over the two page traces alone, its readable form. The flow itself
   calls `confirmed_boundary/3`, which takes the second SCAN instead: whether that read reached the
@@ -1250,7 +1277,7 @@ defmodule ChaosChecker do
 
   @doc """
   The boundary two full reads agreed on: `{:ok, {before, following}}` when the first scan's
-  `first_pages` and the `second` scan (as `drain/4` returned it) both skip the lowest value of
+  `first_pages` and the `second` scan (as `drain/3` returned it) both skip the lowest value of
   `missing` at the same pair of sequence numbers, `:no` otherwise.
 
   The bracket handed back is the FIRST scan's, because that is the pass whose trace the failure
@@ -1282,9 +1309,7 @@ defmodule ChaosChecker do
 
   def confirmed_boundary(_first_pages, %{status: :timeout}, _missing), do: :no
 
-  defp boundary(before, following) do
-    {sequence_number(before.last), sequence_number(following.first)}
-  end
+  defp boundary(before, following), do: {before.range, before.high, following.low}
 
   defp lowest_sequence(values) do
     values |> Enum.map(&sequence_number/1) |> Enum.reject(&is_nil/1) |> Enum.min(fn -> nil end)
@@ -1297,9 +1322,9 @@ defmodule ChaosChecker do
     case skipped_at(scan.pages, missing) do
       {before, following} ->
         IO.puts(
-          "SCAN SKIPPED: a page ending at #{before.last} was followed by one starting at " <>
-            "#{following.first}, so the cursor advanced past values the scan never returned. " <>
-            "This is not a scan that ran out of time."
+          "SCAN SKIPPED: a page of range #{before.range} reaching c-#{before.high} was followed by one " <>
+            "starting at c-#{following.low}, so the position advanced past values the scan never " <>
+            "returned. This is not a scan that ran out of time."
         )
 
       nil ->
@@ -1357,10 +1382,10 @@ defmodule ChaosChecker do
   # (they were late to this node, not lost) or the budget runs out (they are gone). Reached only once
   # `confirm_skip/7` has ruled out a persistent page boundary, because re-reading cannot find values
   # the API skips on every pass, and spending the budget on them would end in the wrong verdict.
-  defp revisit(conn, hosts, topic, acked, read, missing, budget_ms, first_scan) do
+  defp revisit(router, hosts, topic, acked, read, missing, budget_ms, first_scan) do
     IO.puts("#{MapSet.size(missing)} values not visible yet; re-reading for up to #{budget_ms}ms")
     started = System.monotonic_time(:millisecond)
-    {read, elapsed_ms, status} = revisit_loop(conn, topic, acked, read, started + budget_ms, started, :settled)
+    {read, elapsed_ms, status} = revisit_loop(router, topic, acked, read, started + budget_ms, started, :settled)
     missing = MapSet.difference(acked, read)
 
     cond do
@@ -1381,7 +1406,7 @@ defmodule ChaosChecker do
 
   # `status` carries whether the last re-read reached the end of the topic or was cut off by the
   # budget, because a cut-off read leaves values unread rather than proving them gone.
-  defp revisit_loop(conn, topic, acked, read, deadline, started, status) do
+  defp revisit_loop(router, topic, acked, read, deadline, started, status) do
     now = System.monotonic_time(:millisecond)
 
     if MapSet.subset?(acked, read) or now >= deadline do
@@ -1395,32 +1420,37 @@ defmodule ChaosChecker do
       # a retry starting just before the deadline could still run a full scan past it, and a topic
       # that keeps producing would reset that scan's patience forever, leaving the bounded revisit
       # unbounded.
-      {fresh, conn, scan} = drain(&fetch_page/3, conn, topic, deadline: deadline)
-      revisit_loop(conn, topic, acked, MapSet.union(read, fresh), deadline, started, scan.status)
+      {fresh, router, scan} = read_topic(router, topic, deadline)
+      revisit_loop(router, topic, acked, MapSet.union(read, fresh), deadline, started, scan.status)
     end
   end
 
   # --- draining (pure over an injected fetch, so its policy is testable without a cluster) ---
 
   @doc """
-  Reads the topic from the start into a set of values, treating an empty page as "nothing right now"
-  rather than "nothing left": the scan only ends once pages keep coming back empty for `:settle_ms`.
-  Any page carrying records resets that patience, so a long log still drains in one pass.
+  Reads the topic from the start into a set of values, one range at a time in turn, treating an empty page
+  as "nothing right now" rather than "nothing left": the scan only ends once pages keep coming back empty
+  for `:settle_ms`, and every active range has answered one within that stretch. Any page carrying records
+  resets that patience, so a long log still drains in one pass; a range that only ever answered with a
+  routing retry keeps the scan open until its deadline, which ends it `:timeout`, never `:settled`.
 
-  Returns `{values, conn, scan}`, where `scan` is `%{status: :settled | :timeout, pages: [page]}`.
-  `:timeout` means the absolute `:deadline` cut the scan short, so `values` is a PREFIX of the topic
-  and the caller must not read a missing value as a lost one. `pages` is one entry per fetch, in
-  order, each `%{from: cursor, to: cursor, count: n, first: value, last: value}`: see `page_lines/1`
-  and `skipped_at/2` for what it answers, which is whether a scan that came up short ran out of time
-  or walked past records. The status travels inside the map rather than beside it so a caller cannot
-  take one and forget the other, which is the whole reason they are reported together.
+  Returns `{values, state, scan}`, where `scan` is `%{status: :settled | :timeout, pages: [page]}`.
+  `:timeout` means the absolute `:deadline` cut the scan short, so `values` is a PREFIX of the topic and
+  the caller must not read a missing value as a lost one. `pages` is one entry per page, in order, each
+  `%{range: r, block: block, size: size, from: position, to: position, count: n, first: value, last:
+  value, low: seq, high: seq}`: see `page_lines/1` and `skipped_at/2` for what it answers, which is
+  whether a scan that came up short ran out of time or walked past records. The status travels inside the
+  map rather than beside it so a caller cannot take one and forget the other.
 
-  `fetch` is `(conn, topic, cursor -> {:ok, values, next_cursor, conn} | {:error, reason})`, injected
-  so this policy can be exercised without a cluster; `:sleep` and `:now` are injected for the same
-  reason. Anything but a clean page is fatal: a failed read is not an empty log, and the caller must
-  not turn it into one (the mistake this whole module now guards against).
+  `fetch` is `(state -> {:ok, page, state} | {:retry, wait_ms, state} | {:error, reason})`, a page being
+  `%{range: r, active: [r], block: block, size: size, from: position, to: position, values: [value]}` (as
+  `Malachi.Loadtest.Fetcher.fetch_page/3` gives it), injected so this policy can be exercised without a
+  cluster; `:sleep` and `:now` are injected for the same reason. `{:retry, wait_ms, state}` is a routing
+  answer (a redirect, a dropped connection, routes held back) that is no page: the scan waits that long,
+  within its deadline, and asks again. Anything else is fatal: a failed read is not an empty log, and the
+  caller must not turn it into one.
   """
-  def drain(fetch, conn, topic, opts \\ []) do
+  def drain(fetch, state, opts \\ []) do
     settle_ms = Keyword.get(opts, :settle_ms, @drain_settle_ms)
     now = Keyword.get(opts, :now, fn -> System.monotonic_time(:millisecond) end)
 
@@ -1438,130 +1468,256 @@ defmodule ChaosChecker do
       deadline: Keyword.get(opts, :deadline, :infinity)
     }
 
-    drain_loop(fetch, conn, topic, nil, %{values: MapSet.new(), pages: []}, now.() + settle_ms, config)
+    acc = %{values: MapSet.new(), pages: [], quiet: MapSet.new(), answered: MapSet.new()}
+    drain_loop(fetch, state, acc, now.() + settle_ms, config)
   end
 
-  defp drain_loop(fetch, conn, topic, cursor, acc, settle_deadline, config) do
+  defp drain_loop(fetch, state, acc, settle_deadline, config) do
     if expired?(config, config.deadline) do
-      finish_scan(acc, conn, :timeout)
+      finish_scan(acc, state, :timeout)
     else
-      drain_page(fetch, conn, topic, cursor, acc, settle_deadline, config)
+      drain_page(fetch, state, acc, settle_deadline, config)
     end
   end
 
-  defp drain_page(fetch, conn, topic, cursor, acc, settle_deadline, config) do
-    case fetch.(conn, topic, cursor) do
-      {:ok, [], _next, conn} ->
-        acc = record_page(acc, cursor, cursor, [])
+  defp drain_page(fetch, state, acc, settle_deadline, config) do
+    case fetch.(state) do
+      {:ok, %{values: []} = page, state} ->
+        acc = record_page(acc, page)
+        acc = %{acc | answered: MapSet.put(acc.answered, page.range)}
 
-        if expired?(config, settle_deadline) do
-          # Quiet for a whole settle window: the topic is drained, which is a real end of scan.
-          finish_scan(acc, conn, :settled)
+        if expired?(config, settle_deadline) and MapSet.subset?(MapSet.new(page.active), acc.answered) do
+          # Quiet for a whole settle window, every active range having said so: the topic is drained, which
+          # is a real end of scan.
+          finish_scan(acc, state, :settled)
         else
-          # Never sleep past the caller's ceiling: a poll that would overshoot it is cut to whatever is
-          # left, so the scan returns on time instead of one poll late.
-          config.sleep.(capped_sleep(config))
-          # The same cursor on purpose: an empty page means this position had nothing to give yet, so
-          # the scan resumes from it rather than skipping past values it never read.
-          drain_loop(fetch, conn, topic, cursor, acc, settle_deadline, config)
+          # The ranges are asked in turn, so one empty page says nothing about the others: the scan waits
+          # only once a range comes back empty again before any page carried records, which is a whole
+          # round of nothing. Never past the caller's ceiling: a poll that would overshoot it is cut to
+          # whatever is left. The range keeps where it was asked from, so the next look resumes there
+          # rather than past values it never read.
+          acc =
+            if MapSet.member?(acc.quiet, page.range) do
+              config.sleep.(capped(config, config.poll_ms))
+              %{acc | quiet: MapSet.new([page.range])}
+            else
+              %{acc | quiet: MapSet.put(acc.quiet, page.range)}
+            end
+
+          drain_loop(fetch, state, acc, settle_deadline, config)
         end
 
-      {:ok, values, next_cursor, conn} ->
+      {:ok, page, state} ->
         # Progress resets the patience: only an uninterrupted stretch of nothing ends the scan. The
         # absolute deadline above is what keeps that reset from running forever.
-        acc = record_page(acc, cursor, next_cursor, values)
-        acc = %{acc | values: Enum.into(values, acc.values)}
-        drain_loop(fetch, conn, topic, next_cursor, acc, config.now.() + config.settle_ms, config)
+        acc = record_page(acc, page)
+        acc = %{acc | values: Enum.into(page.values, acc.values), quiet: MapSet.new(), answered: MapSet.new()}
+        drain_loop(fetch, state, acc, config.now.() + config.settle_ms, config)
+
+      {:retry, wait_ms, state} ->
+        config.sleep.(capped(config, wait_ms))
+        drain_loop(fetch, state, acc, settle_deadline, config)
 
       other ->
         config.on_error.(other)
     end
   end
 
-  # One entry per fetch, in the order the scan made them. The whole point is to be able to answer
-  # WHERE a scan stopped seeing values it should have seen: a page that ends at one sequence number
-  # followed by a page that starts well above it is a cursor that moved past records, which is a
-  # different finding from a scan that ran out of time, and the two were indistinguishable from the
-  # outside. Kept even on a clean scan, since it costs one small map per fetch and the run that turns
+  # One entry per page, in the order the scan read them. The whole point is to be able to answer WHERE a
+  # scan stopped seeing values it should have seen: a page of a range that ends at one sequence number
+  # followed, in that range, by a page that starts well above it is a position handed out past records,
+  # which is a different finding from a scan that ran out of time, and the two were indistinguishable from
+  # the outside. Kept even on a clean scan, since it costs one small map per page and the run that turns
   # out to need it is never the one you decided to instrument.
-  defp record_page(acc, from, to, values) do
-    page = %{from: from, to: to, count: length(values), first: List.first(values), last: List.last(values)}
-    %{acc | pages: [page | acc.pages]}
+  defp record_page(acc, page) do
+    sequences = page.values |> Enum.map(&sequence_number/1) |> Enum.reject(&is_nil/1)
+
+    entry = %{
+      range: page.range,
+      block: page.block,
+      size: page.size,
+      from: page.from,
+      to: page.to,
+      count: length(page.values),
+      first: List.first(page.values),
+      last: List.last(page.values),
+      low: Enum.min(sequences, fn -> nil end),
+      high: Enum.max(sequences, fn -> nil end)
+    }
+
+    %{acc | pages: [entry | acc.pages]}
   end
 
-  defp finish_scan(acc, conn, status) do
-    {acc.values, conn, %{status: status, pages: Enum.reverse(acc.pages)}}
+  defp finish_scan(acc, state, status) do
+    {acc.values, state, %{status: status, pages: Enum.reverse(acc.pages)}}
   end
 
   defp expired?(_config, :infinity), do: false
   defp expired?(config, deadline), do: config.now.() >= deadline
 
-  defp capped_sleep(%{deadline: :infinity} = config), do: config.poll_ms
-  defp capped_sleep(config), do: max(0, min(config.poll_ms, config.deadline - config.now.()))
+  defp capped(%{deadline: :infinity}, ms), do: ms
+  defp capped(config, ms), do: max(0, min(ms, config.deadline - config.now.()))
 
   defp halt_on_fetch_error(other) do
     IO.puts("fetch failed: #{inspect(other)}")
     System.halt(1)
   end
 
-  # One page over the wire, as the values it carried plus the cursor to continue from.
-  defp fetch_page(conn, topic, cursor) do
-    payload = Wire.encode_fetch_req(topic, cursor, nil, nil, 500, 0)
-
-    case Conn.request(conn, Wire.fetch_key(), next_corr(), payload) do
-      {:ok, 0, resp, conn} ->
-        {records, next_cursor} = Wire.decode_fetch_resp(resp)
-        {:ok, Enum.map(records, & &1.value), next_cursor, conn}
-
-      other ->
-        other
-    end
+  @doc """
+  One read of the whole of `topic` from the start, within `deadline`, by a reader of its own
+  (`fetch_range` on every range in turn, each range kept at the end it reached; see `drain/3`), so a
+  re-read never resumes where an earlier one stopped. Returns the values, the router as the reader left it
+  (routes it read again on the way included), and the scan.
+  """
+  @spec read_topic(Router.t(), String.t(), integer()) :: {MapSet.t(), Router.t(), map()}
+  def read_topic(router, topic, deadline) do
+    reader = Fetcher.new(router, @conn_opts, at_tail: :wait, max: @page_records)
+    {values, reader, scan} = drain(read_page(topic), reader, deadline: deadline)
+    Fetcher.close(reader)
+    {values, reader.router, scan}
   end
 
-  # The wire needs a fresh correlation id per request; the scan no longer threads one because it can
-  # re-read the same cursor any number of times.
-  defp next_corr do
-    corr = Process.get(:corr, 2)
-    Process.put(:corr, corr + 1)
-    corr
+  # A page over the wire. Routing answers are no page and no failure: the routes moved (a failover sealed
+  # the segment a range was read from), a connection dropped or could not be made, or the routes are held
+  # back after a failed read; the reader reads them again on its next fetch. A refusal is fatal.
+  defp read_page(topic) do
+    fn reader -> reader |> Fetcher.fetch_page(topic, System.monotonic_time(:millisecond)) |> page_answer() end
   end
 
-  defp parse_hosts(hosts), do: hosts |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+  @doc """
+  What `drain/3` makes of a `Malachi.Loadtest.Fetcher.fetch_page/3` answer: a page; a routing answer
+  (the routes moved, are held back, or a connection dropped or could not be made, or the routes could not
+  be read) as a retry after how long it says, or at once for a redirect; any other refusal as fatal.
+  """
+  @spec page_answer({Fetcher.t(), Fetcher.result()}) ::
+          {:ok, map(), Fetcher.t()} | {:retry, non_neg_integer(), Fetcher.t()} | {:error, term()}
+  def page_answer({reader, {:page, page}}), do: {:ok, page, reader}
+  def page_answer({reader, :redirected}), do: {:retry, 0, reader}
+  def page_answer({reader, {:held, ms}}), do: {:retry, ms, reader}
+  def page_answer({reader, :dropped}), do: {:retry, @retry_sleep_ms, reader}
+  def page_answer({reader, {:error, reason}}) when reason in @routing_errors, do: {:retry, @retry_sleep_ms, reader}
+  def page_answer({_reader, {:error, reason}}), do: {:error, reason}
 
-  # --- produce ---
-
-  defp produce_loop(conn, hosts, topic, out, deadline, i, corr, host_idx) do
-    if System.monotonic_time(:millisecond) >= deadline do
-      IO.puts("produced through #{i - 1} attempts; done")
-    else
-      value = "c-#{i}"
-      record = %Record{value: value, key: "k#{i}", timestamp: 0, headers: []}
-
-      case try_produce(conn, topic, record, corr) do
-        {:ok, conn} ->
-          # Confirmed by the cluster: this write must now survive anything the chaos does.
-          IO.write(out, value <> "\n")
-          Process.sleep(@rate_sleep_ms)
-          produce_loop(conn, hosts, topic, out, deadline, i + 1, corr + 1, host_idx)
-
-        {:retry, _dead} ->
-          # Error or dropped connection mid-chaos: reconnect (next host) and RETRY THE SAME value;
-          # it was never acked, so it may legitimately be absent or duplicated, both fine.
-          Process.sleep(@retry_sleep_ms)
-          conn = connect_retry(hosts, host_idx + 1, deadline)
-          produce_loop(conn, hosts, topic, out, deadline, i, corr + 1, host_idx + 1)
+  # "host" or "host:port", the port 4040 when not given.
+  defp parse_hosts(hosts) do
+    for host <- String.split(hosts, ",", trim: true) do
+      case String.split(String.trim(host), ":") do
+        [name, port] -> {name, String.to_integer(port)}
+        [name] -> {name, 4040}
       end
     end
   end
 
-  defp try_produce(conn, topic, record, corr) do
-    case Conn.request(conn, Wire.produce_key(), corr, Wire.encode_produce_req(topic, [record])) do
-      {:ok, 0, _resp, conn} -> {:ok, conn}
-      {:ok, _code, _resp, conn} -> {:retry, conn}
-      {:error, _reason} -> {:retry, conn}
+  # --- produce ---
+
+  @doc """
+  Produces `c-1`, `c-2`, ... (keyed `k1`, `k2`, ...) to `topic` until `deadline`, one new value every
+  `#{@rate_sleep_ms}`ms while the producer has room, through a producer stream on each range with up to
+  `#{@inflight}` appends in flight, and hands every value the cluster acknowledged to `acked` as its
+  acknowledgement comes. A value whose append failed (refused, or in flight on a connection that dropped)
+  is sent again before any new one: it was never acknowledged, so it may legitimately be absent or
+  present twice, both fine. At the deadline no new value goes out, and the appends still in flight get
+  `#{@final_acks_ms}`ms to be answered. Returns how many values it handed out.
+
+  Every `:progress_ms` (#{@progress_ms} unless given), and once at the end, it hands `:report` (`IO.puts/1`
+  unless given) a `PRODUCE` line: the values handed out and acknowledged so far, those waiting to be sent
+  again, and what routing did (`Malachi.Loadtest.Producer.stats/1`), so a drill whose acknowledgements
+  stopped shows when and how.
+  """
+  @spec produce_window(Router.t(), String.t(), integer(), (String.t() -> any()), keyword()) :: non_neg_integer()
+  def produce_window(router, topic, deadline, acked, opts \\ []) do
+    report = Keyword.get(opts, :report, &IO.puts/1)
+    progress_ms = Keyword.get(opts, :progress_ms, @progress_ms)
+    producer = Producer.new(router, @conn_opts, max_inflight: @inflight, label: "malachi-chaos-checker")
+    # the first value is due at once (monotonic time can be negative, so not at 0)
+    now = System.monotonic_time(:millisecond)
+
+    state = %{
+      producer: producer,
+      topic: topic,
+      deadline: deadline,
+      acked: acked,
+      next: 1,
+      pending: [],
+      due: now,
+      acked_count: 0,
+      started: now,
+      next_report: now + progress_ms,
+      progress_ms: progress_ms,
+      report: report
+    }
+
+    state = produce_loop(state)
+    {producer, events, _idle_or_timeout} = Producer.await(state.producer, @final_acks_ms)
+    state = take_events(%{state | producer: producer}, events)
+    report_progress(state, System.monotonic_time(:millisecond))
+    Producer.close(producer)
+    state.next - 1
+  end
+
+  defp report_progress(state, now) do
+    state.report.(
+      "PRODUCE t=#{div(now - state.started, 1000)}s handed=#{state.next - 1} acked=#{state.acked_count} " <>
+        "resend=#{length(state.pending)} routing=#{inspect(Producer.stats(state.producer))}"
+    )
+
+    %{state | next_report: now + state.progress_ms}
+  end
+
+  defp produce_loop(state) do
+    now = System.monotonic_time(:millisecond)
+    state = if now >= state.next_report, do: report_progress(state, now), else: state
+
+    cond do
+      now >= state.deadline ->
+        state
+
+      now >= state.due and Producer.room?(state.producer) ->
+        {entry, state} = next_entry(state)
+        {producer, events} = Producer.produce(state.producer, state.topic, [entry], now)
+
+        %{state | producer: producer, due: now + @rate_sleep_ms}
+        |> take_events(events)
+        |> produce_loop()
+
+      true ->
+        # Waiting for the next value's turn, or for room: the producer's own messages are taken meanwhile,
+        # and its backoffs run, so an acknowledgement is written as it comes.
+        wait =
+          max(
+            0,
+            min(state.deadline, if(Producer.room?(state.producer), do: state.due, else: now + @rate_sleep_ms)) - now
+          )
+
+        {producer, events, _idle_or_timeout} = Producer.await(state.producer, wait, &waited_for(&1, state))
+
+        %{state | producer: producer}
+        |> take_events(events)
+        |> produce_loop()
     end
-  rescue
-    _any -> {:retry, conn}
+  end
+
+  # While the producer has no room, room is what the loop waits for; while it has room, the clock.
+  defp waited_for(producer, state), do: not Producer.room?(state.producer) and Producer.room?(producer)
+
+  # A value sent again before a new one, so a failure is retried at once rather than behind the window.
+  defp next_entry(%{pending: [entry | rest]} = state), do: {entry, %{state | pending: rest}}
+
+  defp next_entry(state) do
+    value = "c-#{state.next}"
+    {{value, Record.new(value, key: "k#{state.next}")}, %{state | next: state.next + 1}}
+  end
+
+  defp take_events(state, events) do
+    Enum.reduce(events, state, fn
+      # Confirmed by the cluster: this write must now survive anything the chaos does.
+      {:acked, entries, _latency_us}, state ->
+        Enum.each(entries, fn {value, _record} -> state.acked.(value) end)
+        %{state | acked_count: state.acked_count + length(entries)}
+
+      {:failed, entries, _reason}, state ->
+        %{state | pending: entries ++ state.pending}
+    end)
   end
 
   # --- verify ---
@@ -1581,7 +1737,8 @@ defmodule ChaosChecker do
 
   defp request_topology([], _topic), do: {:error, :no_reachable_dashboard}
 
-  defp request_topology([host | rest], topic) do
+  # The dashboard listens on its own port (4041) on each host, whatever port the wire is on there.
+  defp request_topology([{host, _wire_port} | rest], topic) do
     base = "http://#{host}:4041"
     login_body = Jason.encode!(%{username: "admin", password: "admin123"})
     http_opts = [timeout: 5_000]
@@ -1603,17 +1760,59 @@ defmodule ChaosChecker do
 
   # --- connection plumbing ---
 
+  # A router bootstrapped from the first host that serves the stream keys before `deadline`, and that
+  # connection, still open, for what the caller asks over it (creating the topic). A node that does not
+  # serve them yet is asked again, the next host first: a cluster flag reaches each node on its own next
+  # refresh, so the node asked right after the flag went on can still be behind. Past the deadline, the
+  # last answer is the reason the run stops.
+  defp stream_router(hosts, deadline, idx \\ 0) do
+    {conn, address} = connect_retry(hosts, idx, deadline)
+
+    case Router.bootstrap(Router.new(address), conn) do
+      {:ok, router, conn} ->
+        if Router.streams_enabled?(router) do
+          {router, conn}
+        else
+          Conn.close(conn)
+          why = "#{inspect(address)} does not serve the stream keys: the producer_streams flag is off"
+          stream_router_again(hosts, deadline, idx, why)
+        end
+
+      {:legacy, _reason, conn} ->
+        Conn.close(conn)
+        stream_router_again(hosts, deadline, idx, "#{inspect(address)} does not answer cluster_state")
+
+      {:error, reason} ->
+        stream_router_again(
+          hosts,
+          deadline,
+          idx,
+          "could not read the cluster state from #{inspect(address)}: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp stream_router_again(hosts, deadline, idx, why) do
+    if System.monotonic_time(:millisecond) >= deadline do
+      IO.puts(why)
+      System.halt(1)
+    end
+
+    Process.sleep(@retry_sleep_ms)
+    stream_router(hosts, deadline, idx + 1)
+  end
+
   defp connect_retry(hosts, idx, deadline) do
     if System.monotonic_time(:millisecond) >= deadline do
       IO.puts("could not connect before the deadline")
       System.halt(1)
     end
 
-    host = Enum.at(hosts, rem(idx, length(hosts)))
+    {host, port} = address = Enum.at(hosts, rem(idx, length(hosts)))
 
-    with {:ok, conn} <- Conn.connect(host: host, port: 4040),
-         {:ok, conn} <- Conn.authenticate(conn, user: "admin", pass: "admin123") do
-      conn
+    with {:ok, conn} <- Conn.connect(Keyword.merge(@conn_opts, host: host, port: port)),
+         {:ok, conn} <- Conn.authenticate(conn, @conn_opts) do
+      {conn, address}
     else
       _err ->
         Process.sleep(@retry_sleep_ms)
@@ -1632,7 +1831,7 @@ defmodule ChaosChecker do
 end
 
 # Running a mode is what this file is for everywhere except a test, which requires it to exercise
-# `drain/4` and would otherwise be halted by `main/1` on the way in. The environment already answers
+# `drain/3` and would otherwise be halted by `main/1` on the way in. The environment already answers
 # the question, so no knob is invented for it: the drill runs the checker through `mix run` in the
 # loadtest image (MIX_ENV=dev), and only `mix test` is :test.
 unless Mix.env() == :test do

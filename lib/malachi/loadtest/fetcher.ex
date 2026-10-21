@@ -1,18 +1,20 @@
 defmodule Malachi.Loadtest.Fetcher do
   @moduledoc """
-  A fetching client of the load generator: one `fetch_range` (`Malachi.Wire` key 31) at a time, a closed
-  loop, over every active range of a topic in turn, each request to the broker the routes say serves the
-  range. Where a range's next fetch starts moves past each page it reads; a page that brings nothing new
-  sends that range back to the start of its history, so a reader keeps pulling a backlog the way a legacy
-  fetch does at the tail of its cursor.
+  A fetching client: one `fetch_range` (`Malachi.Wire` key 31) at a time, a closed loop, over every active
+  range of a topic in turn, each request to the broker the routes say serves the range. Where a range's
+  next fetch starts moves past each page it reads. What a page that brings nothing new does is the
+  `:at_tail` option: `:restart` (the default, the load generator's) sends that range back to the start of
+  its history, so a reader keeps pulling a backlog; `:wait` keeps it where it is, so a reader that wants
+  every record once (the chaos checker) asks again from the end it reached.
 
   The connections are passive (a request, then its answer); connections, routes and their backoffs go
   through `Malachi.Loadtest.Links`, and lanes and what a split hands its children through
   `Malachi.Loadtest.ReadLanes`. A fetch is answered as one of:
 
-    * `{:ok, count, latency_us}`: a page, with `count` records new to this reader (a page's leading records
-      it already had, `skip`, are not counted), and the round trip of its `fetch_range` alone: reading the
-      routes or connecting before it is preparation, timed by nobody, as a legacy reconnect is not;
+    * `{:ok, count, latency_us}` from `fetch/3`: a page, with `count` records new to this reader (a page's
+      leading records it already had, `skip`, are not counted), and the round trip of its `fetch_range`
+      alone: reading the routes or connecting before it is preparation, timed by nobody;
+    * `{:page, page}` from `fetch_page/3`: the same page with its records' values (`fetched/0`);
     * `{:error, reason}`: a refusal that is not a redirect, routes that could not be read, or a broker that
       took no connection (`"connect_failed"`: it is connected to again on a later fetch);
     * `{:held, ms}`: the topic's routes are held back, for `ms` more milliseconds, after a read that
@@ -34,14 +36,34 @@ defmodule Malachi.Loadtest.Fetcher do
   alias Malachi.Wire
   alias Malachi.Wire.Batch
 
+  @typedoc """
+  A page as `fetch_page/3` gives it: the range it came from (`range`, its number, and `block`, its keyspace
+  block in a keyspace of `size` keys), the topic's active ranges by the routes it was fetched by (`active`),
+  where it was asked from (`from`: `:earliest` or `{:position, p}`) and where the range's next page starts
+  (`to`), and the values of the records new to this reader, in the order the range holds them.
+  """
+  @type fetched :: %{
+          range: non_neg_integer(),
+          active: [non_neg_integer()],
+          block: {non_neg_integer(), pos_integer()},
+          size: pos_integer(),
+          from: term(),
+          to: Wire.position(),
+          values: [binary()]
+        }
+
   @type result ::
           {:ok, non_neg_integer(), non_neg_integer()}
+          | {:page, fetched()}
           | {:error, String.t()}
           | {:held, pos_integer()}
           | :redirected
           | :dropped
 
   @max_bytes 1_048_576
+  # What a page's batch may inflate to: the broker sends at least one whole batch per page, so a page can
+  # pass `@max_bytes`; the cap is the broker's own for a batch (`MALACHI_MAX_INFLATED_BATCH_BYTES`).
+  @max_inflated_bytes 16_777_216
 
   @enforce_keys [:router, :conn_opts]
   defstruct [
@@ -49,6 +71,7 @@ defmodule Malachi.Loadtest.Fetcher do
     :conn_opts,
     control: nil,
     max: 100,
+    at_tail: :restart,
     unroutable: %{},
     conns: %{},
     sockets: %{},
@@ -61,10 +84,19 @@ defmodule Malachi.Loadtest.Fetcher do
 
   @type t :: %__MODULE__{}
 
-  @doc "A fetcher routing by `router` and connecting with `conn_opts`. Option: `:max`, records per page at most (100)."
+  @doc """
+  A fetcher routing by `router` and connecting with `conn_opts`. Options: `:max`, records per page at most
+  (100), and `:at_tail`, `:restart` (the default) or `:wait` (see the moduledoc).
+  """
   @spec new(Router.t(), keyword(), keyword()) :: t()
   def new(%Router{} = router, conn_opts, opts \\ []) do
-    %__MODULE__{router: router, conn_opts: conn_opts, max: Options.positive!(opts, :max, 100)}
+    at_tail =
+      case Keyword.get(opts, :at_tail, :restart) do
+        value when value in [:restart, :wait] -> value
+        value -> raise ArgumentError, "at_tail must be :restart or :wait, got: #{inspect(value)}"
+      end
+
+    %__MODULE__{router: router, conn_opts: conn_opts, max: Options.positive!(opts, :max, 100), at_tail: at_tail}
   end
 
   @doc """
@@ -76,9 +108,47 @@ defmodule Malachi.Loadtest.Fetcher do
     with {:ok, f} <- Links.connect_ranges(f, topic, active: false), do: {:ok, reconcile(f, topic)}
   end
 
-  @doc "One fetch of the next range of `topic`, in turn: the fetcher and how it was answered."
+  @doc "One fetch of the next range of `topic`, in turn: the fetcher and how it was answered, a page as a count."
   @spec fetch(t(), String.t(), integer()) :: {t(), result()}
   def fetch(%__MODULE__{} = f, topic, now) do
+    case next(f, topic, now) do
+      # counted, not decoded: a load generator measures the broker, not its own parsing of what came back
+      {f, {:fetched, key, lane, _shape, page, latency_us}} ->
+        {%{count: count}, _rest} = Batch.split(page.batch)
+        new = max(0, count - page.skip)
+        {advance(f, key, lane, page, new > 0), {:ok, new, latency_us}}
+
+      answered ->
+        answered
+    end
+  end
+
+  @doc "One fetch of the next range of `topic`, in turn, as `fetch/3`, a page with its values (`fetched/0`)."
+  @spec fetch_page(t(), String.t(), integer()) :: {t(), result()}
+  def fetch_page(%__MODULE__{} = f, topic, now) do
+    case next(f, topic, now) do
+      {f, {:fetched, {_topic, range} = key, lane, shape, page, _latency_us}} ->
+        {:ok, entries} = Batch.decode(page.batch, max_inflated_bytes: @max_inflated_bytes, layout: :positioned)
+        values = entries |> Enum.drop(page.skip) |> Enum.map(fn {_position, record, _tombstone} -> record.value end)
+
+        fetched = %{
+          range: range,
+          active: shape.active,
+          block: lane.block,
+          size: shape.size,
+          from: lane.start,
+          to: page.next,
+          values: values
+        }
+
+        {advance(f, key, lane, page, values != []), {:page, fetched}}
+
+      answered ->
+        answered
+    end
+  end
+
+  defp next(f, topic, now) do
     case {Router.routes(f.router, topic), Map.get(f.unroutable, topic)} do
       {nil, {until, _reason}} when until > now -> {f, {:held, until - now}}
       _known_or_due -> fetch_known(f, topic, now)
@@ -129,7 +199,9 @@ defmodule Malachi.Loadtest.Fetcher do
       case Conn.request(conn, Wire.fetch_range_key(), corr, Wire.encode_fetch_range_req(req)) do
         {:ok, 0, payload, conn} ->
           latency_us = System.monotonic_time(:microsecond) - t0
-          page(put_conn(f, address, conn), key, lane, Wire.decode_page(payload), latency_us)
+          %{size: size, ranges: ranges} = Router.routes(f.router, topic)
+          shape = %{size: size, active: Enum.map(ranges, & &1.range)}
+          {put_conn(f, address, conn), {:fetched, key, lane, shape, Wire.decode_page(payload), latency_us}}
 
         {:ok, _code, refusal, conn} ->
           refused(put_conn(f, address, conn), topic, Wire.decode_error_reason(refusal))
@@ -148,13 +220,17 @@ defmodule Malachi.Loadtest.Fetcher do
     end
   end
 
-  # What a page brought, and where the range's next fetch starts: past it, or back at the start of its
-  # history when it brought nothing new.
-  defp page(f, key, lane, page, latency_us) do
-    {%{count: count}, _rest} = Batch.split(page.batch)
-    new = max(0, count - page.skip)
-    start = if new == 0, do: :earliest, else: {:position, page.next}
-    {%{f | lanes: Map.put(f.lanes, key, %{lane | start: start})}, {:ok, new, latency_us}}
+  # Where a range's next fetch starts after a page: past it, or, when it brought nothing new, back at the
+  # start of its history (`at_tail: :restart`) or where it is (`:wait`).
+  defp advance(f, key, lane, page, brought_any?) do
+    start =
+      cond do
+        brought_any? -> {:position, page.next}
+        f.at_tail == :restart -> :earliest
+        true -> lane.start
+      end
+
+    %{f | lanes: Map.put(f.lanes, key, %{lane | start: start})}
   end
 
   # Routes that name no address for a range's primary are behind the cluster's: read again, but not before a

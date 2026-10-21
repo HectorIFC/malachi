@@ -518,6 +518,26 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       refute body =~ "Post-chaos produce"
     end
 
+    test "a skipped run says it was skipped and why, neither passed nor failed", context do
+      publish(
+        context,
+        "chaos-upgrade.json",
+        chaos_result(%{
+          "certification" => "UPGRADE AND ROLLBACK CERTIFICATION",
+          "verdict" => "skipped",
+          "skip_reason" => "v0.16.4 predates the stream keys",
+          "events" => []
+        })
+      )
+
+      run(context)
+      body = page(context, "chaos-upgrade-results.md")
+
+      assert body =~ "**UPGRADE AND ROLLBACK CERTIFICATION skipped**: v0.16.4 predates the stream keys."
+      refute body =~ "FAILED"
+      refute body =~ "passed"
+    end
+
     test "the rolling upgrade drill has a page of its own, read from its own result", context do
       publish(
         context,

@@ -4,7 +4,8 @@
 # checker and background traffic producing through every step (issue #196).
 #
 # Two images. OLD is a release, built from its own tree (git archive of OLD_REF; by default the newest release
-# whose code differs from this tree's, see resolve_old_ref). NEW is the working tree with
+# whose code differs from this tree's, see resolve_old_ref), and one that serves the stream keys: the checker
+# speaks no other keys, so a default OLD that predates them ends the run skipped. NEW is the working tree with
 # test/support/upgrade_canary.patch applied, so it has what no release has yet: a capability and a cluster
 # flag (upgrade_canary), a metadata command at the next machine version ({:canary_note, topic, note} at NEW's
 # @code_version, read from the patched tree), a
@@ -113,6 +114,11 @@ same_code_as() {
   git diff --quiet "$1" -- lib config mix.lock && [ -z "$(git ls-files --others --exclude-standard -- lib config)" ]
 }
 
+# Whether release $1 serves the stream keys, which the checker speaks and nothing else: the last of them it
+# reads with, fetch_range, answered by its wire protocol (an older tree may name the keys, or gate them
+# behind their flag, and answer none).
+serves_stream_keys() { git show "$1:lib/malachi/tcp_protocol.ex" 2>/dev/null | grep -q 'api_key == Wire.fetch_range_key()'; }
+
 resolve_old_ref() {
   if [ -n "${OLD_REF:-}" ]; then
     OLD_RULE="given as OLD_REF"
@@ -139,6 +145,14 @@ resolve_old_ref() {
     usage_error "OLD_REF=$OLD_REF names no commit here; fetch the tags (fetch-depth: 0)"
   # From here on a run that stops early still records which release it was rolling from.
   record_details
+  # A release that predates the stream keys cannot be rolled from: the checker this tree runs against it
+  # speaks no other keys. Releases are cut in order, so when the release chosen above
+  # predates them every older one does too, and there is nothing to roll from yet.
+  if ! serves_stream_keys "$OLD_REF"; then
+    [ "$OLD_RULE" = "given as OLD_REF" ] &&
+      usage_error "OLD_REF=$OLD_REF predates the stream keys, which the checker speaks; pick a release that serves them"
+    skip_run "$OLD_REF, $OLD_RULE, predates the stream keys, which the checker speaks: no release can be rolled from yet"
+  fi
 }
 
 prepare_contexts() {

@@ -63,6 +63,21 @@ defmodule StorageChaosTest do
       assert output =~ ~r/host load: load average/
       assert Enum.count(docker_calls(ctx), &String.contains?(&1, "down -v")) == 2
     end
+
+    test "switches the stream keys on in each phase's cluster, after it is up and before its checker starts", ctx do
+      assert {_output, 0} = run_drill(ctx, [])
+      calls = docker_calls(ctx)
+      at = fn pattern -> for {call, i} <- Enum.with_index(calls), call =~ pattern, do: i end
+      ups = at.(~r/^up -d/)
+      flags = at.("malachi.flag enable producer_streams")
+      checkers = at.("chaos_checker.exs produce")
+
+      assert length(ups) == 2 and length(flags) == 2 and length(checkers) == 2
+
+      for {up, {flag, checker}} <- Enum.zip(ups, Enum.zip(flags, checkers)) do
+        assert up < flag and flag < checker
+      end
+    end
   end
 
   describe "invariant 4 on a passing run" do
@@ -392,6 +407,7 @@ defmodule StorageChaosTest do
       info) echo "docker kernel 6.8.0-stub, 4 cpus, Stub OS" ;;
       exec)
         case "$*" in
+          *"malachi.flag enable producer_streams"*) echo "cluster flag enabled: producer_streams"; exit 0 ;;
           *md5sum*)
             if [ "${STUB_IDX:-}" = swapped ]; then
               case "$*" in

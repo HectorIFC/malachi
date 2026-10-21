@@ -255,6 +255,34 @@ defmodule ChaosLibTest do
     end
   end
 
+  describe "start_cluster" do
+    test "switches the stream keys on once the cluster it started is healthy", ctx do
+      assert {output, 0} = drive(ctx, "start_cluster; echo \"failed=$FAILED\"")
+      assert output =~ "the stream keys are on"
+      calls = docker_calls(ctx)
+      up = Enum.find_index(calls, &String.starts_with?(&1, "up -d"))
+      flag = Enum.find_index(calls, &(&1 =~ "malachi.flag enable producer_streams"))
+      assert up && flag && up < flag
+    end
+  end
+
+  describe "enable_stream_keys" do
+    test "switches the producer_streams flag on through node 1", ctx do
+      assert {output, 0} = drive(ctx, "enable_stream_keys; echo \"failed=$FAILED\"")
+      assert output =~ "the stream keys are on"
+      assert output =~ "failed=0"
+
+      assert ("exec malachi-cluster-1 sh -c cd /app && elixir --sname chaoscli --cookie malachi_bench -S mix " <>
+                "malachi.flag enable producer_streams --node malachi@malachi1") in docker_calls(ctx)
+    end
+
+    test "a refused flag ends the run, naming the refusal", ctx do
+      assert {output, 1} = drive(ctx, "enable_stream_keys; echo not-reached", [{"STUB_FLAG", "refused"}])
+      assert output =~ "FAIL: the producer_streams flag could not be enabled: flag refused"
+      refute output =~ "not-reached"
+    end
+  end
+
   describe "node_task and reshard_on_lease_holder" do
     test "node_task runs the mix task inside the node, short-named, against that node", ctx do
       assert {_output, 0} = drive(ctx, "node_task 2 'malachi.ring --show'")
@@ -525,6 +553,19 @@ defmodule ChaosLibTest do
                result |> File.read!() |> Jason.decode!()
     end
 
+    test "a run with nothing to certify is recorded as skipped, with its reason, and exits 0", ctx do
+      result = Path.join(ctx.work_root, "skip.json")
+      File.mkdir_p!(ctx.work_root)
+      script = "CHAOS_CERTIFICATION='LIB TEST'; skip_run 'nothing to roll from'; echo not-reached"
+
+      assert {output, 0} = drive(ctx, script, [{"CHAOS_RESULT_FILE", result}])
+      assert output =~ "LIB TEST SKIPPED: nothing to roll from"
+      refute output =~ "not-reached"
+
+      assert %{"verdict" => "skipped", "skip_reason" => "nothing to roll from"} =
+               result |> File.read!() |> Jason.decode!()
+    end
+
     test "finish tears down only a cluster this run started", ctx do
       # A run that ends before start_cluster (an image that did not build) must not take down a cluster of
       # the same compose project that another run is using.
@@ -636,6 +677,9 @@ defmodule ChaosLibTest do
         exit 0 ;;
       exec)
         case "$*" in
+          *"malachi.flag enable producer_streams"*)
+            if [ "${STUB_FLAG:-}" = refused ]; then echo "flag refused: nodes do not support that flag: x"; exit 1; fi
+            echo "cluster flag enabled: producer_streams"; exit 0 ;;
           *"malachi.ring --show"*)
             if [ "${STUB_RING:-}" = unreadable ]; then echo "ring store not ready"; exit 1; fi
             echo "durable ring: version 3, 5 vnodes (ring size 1024)"; exit 0 ;;

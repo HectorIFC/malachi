@@ -41,8 +41,11 @@ Four events, each followed by a wait for the cluster to reconverge:
 - **rolling restart** of all three.
 
 Three invariants are certified. An acknowledged write is never lost: a checker produces sequential
-values through the whole window, retries through the faults, records only **confirmed** writes, and
-at the end proves every one of them is still readable. The cluster reconverges to 3/3 healthy after
+values through the whole window on the stream keys (a producer stream per range, opened where the routes
+say, a few appends in flight), sends again every value whose append failed, records only **acknowledged**
+writes, and at the end reads every range back with `fetch_range` to prove each of them is still readable.
+Every drill switches the stream keys on (`mix malachi.flag enable producer_streams`) as soon as its
+cluster is up, before its checker or its traffic starts. The cluster reconverges to 3/3 healthy after
 every event. And a clean produce plus fetch passes once the chaos ends: errors *during* an event are
 expected, errors after it are not.
 
@@ -177,7 +180,11 @@ node under load, and then putting the old one back. The drill builds two images.
 built from its own tree: `OLD_REF`, or by default the release an operator would be upgrading from. Every
 merge is tagged, so when your tree's code (`lib`, `config`, `mix.lock`) is the newest release's, as it is
 on `main`, that is the newest release whose code differs (a release that only changed the docs is
-skipped); when your tree changes the code, it is the newest release. The oldest it accepts is 0.14.2
+skipped); when your tree changes the code, it is the newest release. OLD must serve the stream keys, which
+the checker speaks and nothing else: when the release chosen by default predates
+them, the run ends **skipped**, recorded with the reason and not counted as passed or failed, and an
+`OLD_REF` that predates them is refused. The cluster starts on OLD with the stream keys switched on, as in
+every drill, and they stay on through every roll and the rollback. The oldest it accepts is 0.14.2
 for an unsharded run (the first release with every gate the canary exercises and every control-plane
 group this tree starts) and 0.16.1 for a sharded one (see below), although no release runs sharded before
 the first one that carries the fix for [#136](https://github.com/HectorIFC/malachi/issues/136). The run prints which release it took and why, and records it.

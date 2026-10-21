@@ -12,23 +12,58 @@ defmodule ChaosCheckerTest do
     :ok
   end
 
-  # A fetch that replays a script of pages. Each element is the values of one page; `[]` models a poll
-  # that found nothing right now. Pages are consumed in order regardless of cursor, which is enough to
-  # exercise the policy (the cursor's own correctness belongs to the server's fetch).
-  defp scripted(pages) do
+  # A fetch that replays a script of pages of range 0. Each element is the values of one page; `[]` models
+  # a poll that found nothing right now; `{:retry, ms}` a routing answer that is no page; `{range, values}`
+  # a page of another range. Pages are consumed in order, which is enough to exercise the policy (where a
+  # range's pages start belongs to the server's fetch_range).
+  defp scripted(pages, active \\ [0]) do
     {:ok, agent} = Agent.start_link(fn -> pages end)
 
-    fetch = fn conn, _topic, _cursor ->
+    fetch = fn state ->
       case Agent.get_and_update(agent, fn
              [] -> {[], []}
              [page | rest] -> {page, rest}
            end) do
-        [] -> {:ok, [], "cursor", conn}
-        values -> {:ok, values, "cursor", conn}
+        {:retry, ms} -> {:retry, ms, state}
+        {range, values} -> {:ok, fetched(range, values, active), state}
+        values -> {:ok, fetched(0, values, active), state}
       end
     end
 
     {fetch, agent}
+  end
+
+  defp fetched(range, values, active),
+    do: %{
+      range: range,
+      active: active,
+      block: {0, 256},
+      size: 256,
+      from: :earliest,
+      to: {0, length(values)},
+      values: values
+    }
+
+  # A page of range 0 as the scan records it, its edges taken from the sequence numbers it carries.
+  defp pg(count, first, last, opts \\ []) do
+    numbers =
+      for value <- [first, last], is_binary(value), do: value |> String.trim_leading("c-") |> String.to_integer()
+
+    Map.merge(
+      %{
+        range: 0,
+        block: {0, 256},
+        size: 256,
+        from: :earliest,
+        to: {0, 0},
+        count: count,
+        first: first,
+        last: last,
+        low: Enum.min(numbers, fn -> nil end),
+        high: Enum.max(numbers, fn -> nil end)
+      },
+      Map.new(opts)
+    )
   end
 
   # A clock the test advances by hand: every reading of `now` moves it by `step_ms`, and `sleep` adds
@@ -46,7 +81,7 @@ defmodule ChaosCheckerTest do
     {fetch, _agent} = scripted(pages)
     {now, sleep} = fake_clock()
     opts = Keyword.merge([now: now, sleep: sleep, settle_ms: 1_000, poll_ms: 250], opts)
-    {values, :conn, _scan} = ChaosChecker.drain(fetch, :conn, "topic", opts)
+    {values, :state, _scan} = ChaosChecker.drain(fetch, :state, opts)
     values
   end
 
@@ -88,11 +123,11 @@ defmodule ChaosCheckerTest do
       # The settle budget is reset by every page carrying records, which is what lets a long log drain
       # in one pass. Without an absolute ceiling that same reset lets a topic under continuous produce
       # keep the scan running indefinitely, and the revisit loop that calls it stops being bounded.
-      endless = fn conn, _topic, _cursor -> {:ok, ["v"], "cursor", conn} end
+      endless = fn state -> {:ok, fetched(0, ["v"], [0]), state} end
       {now, sleep} = fake_clock(50)
 
-      {_values, :conn, %{status: :timeout}} =
-        ChaosChecker.drain(endless, :conn, "topic",
+      {_values, :state, %{status: :timeout}} =
+        ChaosChecker.drain(endless, :state,
           now: now,
           sleep: sleep,
           settle_ms: 1_000,
@@ -106,8 +141,8 @@ defmodule ChaosCheckerTest do
       {fetch, _agent} = scripted([[], [], [], []])
       {now, sleep} = fake_clock(10)
 
-      {values, :conn, %{status: :timeout}} =
-        ChaosChecker.drain(fetch, :conn, "topic",
+      {values, :state, %{status: :timeout}} =
+        ChaosChecker.drain(fetch, :state,
           now: now,
           sleep: sleep,
           settle_ms: 10_000,
@@ -128,8 +163,8 @@ defmodule ChaosCheckerTest do
         sleep.(ms)
       end
 
-      {_values, :conn, _scan} =
-        ChaosChecker.drain(fetch, :conn, "topic",
+      {_values, :state, _scan} =
+        ChaosChecker.drain(fetch, :state,
           now: now,
           sleep: recording_sleep,
           settle_ms: 10_000,
@@ -173,9 +208,9 @@ defmodule ChaosCheckerTest do
     # previous ended: the cursor moved over c-6 through c-9 and the scan never returned them.
     defp skipping_pages do
       [
-        %{from: nil, to: "a", count: 2, first: "c-1", last: "c-5"},
-        %{from: "a", to: "b", count: 2, first: "c-10", last: "c-12"},
-        %{from: "b", to: "b", count: 0, first: nil, last: nil}
+        pg(2, "c-1", "c-5"),
+        pg(2, "c-10", "c-12"),
+        pg(0, nil, nil)
       ]
     end
 
@@ -191,7 +226,7 @@ defmodule ChaosCheckerTest do
       # Everything missing lies ABOVE the last page, which is a scan that ran out of time. Reporting a
       # skip here would be inventing a boundary to fit, and it is the distinction the whole trace
       # exists to draw.
-      pages = [%{from: nil, to: "a", count: 2, first: "c-1", last: "c-5"}]
+      pages = [pg(2, "c-1", "c-5")]
 
       assert ChaosChecker.skipped_at(pages, MapSet.new(["c-6", "c-7"])) == nil
     end
@@ -210,42 +245,27 @@ defmodule ChaosCheckerTest do
       assert {before.last, following.first} == {"c-5", "c-10"}
     end
 
-    test "two cursors sharing a long prefix get different labels" do
-      # The bug this pins: cursors are base64 Erlang terms, so they all open with the same header.
-      # Labelling them by their prefix rendered every page identical in the one trace whose whole job
-      # is to show when the cursor moved.
-      prefix = "g3QAAAABbQAAAA"
-      pages = [%{from: prefix <> "aaa", to: prefix <> "zzz", count: 1, first: "c-1", last: "c-1"}]
+    test "a page names its range, the start of the history and positions as source:offset" do
+      [line] = ChaosChecker.page_lines([pg(2, "c-1", "c-5", range: 3, from: :earliest, to: {1, 40})])
+      assert line == "PAGE range=3 from=start to=1:40 count=2 first=c-1 last=c-5"
 
-      [line] = ChaosChecker.page_lines(pages)
-      [_, from, to] = Regex.run(~r/from=(\S+) to=(\S+)/, line)
-
-      refute from == to, "a moved cursor must not render as the same label"
-    end
-
-    test "a cursor that did not move renders as the same label" do
-      same = "g3QAAAABbQAAAAsame"
-      pages = [%{from: same, to: same, count: 1, first: "c-1", last: "c-1"}]
-
-      [line] = ChaosChecker.page_lines(pages)
-      [_, from, to] = Regex.run(~r/from=(\S+) to=(\S+)/, line)
-
-      assert from == to
+      [line] = ChaosChecker.page_lines([pg(1, "c-6", "c-6", from: {:position, {1, 40}}, to: {2, 0})])
+      assert line =~ "from=1:40 to=2:0"
     end
 
     test "renders one line per page, collapsing runs of empty polls" do
       lines = ChaosChecker.page_lines(skipping_pages())
 
       assert length(lines) == 3
-      assert Enum.at(lines, 0) =~ "from=start"
+      assert Enum.at(lines, 0) =~ "range=0 from=start"
       assert Enum.at(lines, 0) =~ "count=2 first=c-1 last=c-5"
-      assert Enum.at(lines, 2) == "PAGE (1 empty, cursor held)"
+      assert Enum.at(lines, 2) == "PAGE (1 empty, positions held)"
     end
 
     test "a stretch of empty polls collapses to a single line carrying its length" do
-      empties = for _ <- 1..12, do: %{from: "a", to: "a", count: 0, first: nil, last: nil}
+      empties = for _ <- 1..12, do: pg(0, nil, nil)
 
-      assert ChaosChecker.page_lines(empties) == ["PAGE (12 empty, cursor held)"]
+      assert ChaosChecker.page_lines(empties) == ["PAGE (12 empty, positions held)"]
     end
   end
 
@@ -260,15 +280,15 @@ defmodule ChaosCheckerTest do
     # sequence numbers at the boundary are not.
     defp same_skip_fresh_cursors do
       [
-        %{from: nil, to: "x", count: 2, first: "c-1", last: "c-5"},
-        %{from: "x", to: "y", count: 2, first: "c-10", last: "c-12"},
-        %{from: "y", to: "y", count: 0, first: nil, last: nil}
+        pg(2, "c-1", "c-5"),
+        pg(2, "c-10", "c-12"),
+        pg(0, nil, nil)
       ]
     end
 
     # A scan that stopped before the missing block: nothing brackets it, which is what a slow read
     # looks like and must never be confirmed as a skip.
-    defp stopped_early_pages, do: [%{from: nil, to: "a", count: 2, first: "c-1", last: "c-5"}]
+    defp stopped_early_pages, do: [pg(2, "c-1", "c-5")]
 
     test "the same boundary in both scans confirms the skip, cursors notwithstanding" do
       # Compared by sequence number, not by cursor: the two scans above share no cursor at all, and a
@@ -281,9 +301,9 @@ defmodule ChaosCheckerTest do
       # The second read walked the block contiguously (c-1..c-12 in two pages with no gap), which is
       # what a transient short page looks like on the next try. That is the revisit's territory.
       contiguous = [
-        %{from: nil, to: "x", count: 5, first: "c-1", last: "c-5"},
-        %{from: "x", to: "y", count: 7, first: "c-6", last: "c-12"},
-        %{from: "y", to: "y", count: 0, first: nil, last: nil}
+        pg(5, "c-1", "c-5"),
+        pg(7, "c-6", "c-12"),
+        pg(0, nil, nil)
       ]
 
       assert ChaosChecker.skip_confirmed?(skipping_pages(), contiguous, missing_block()) == false
@@ -305,9 +325,9 @@ defmodule ChaosCheckerTest do
       # c-4 and resumes at c-11. Two different skips are two observations of something moving, not
       # one persistent structure, so the measurement is not repeated and the verdict is not taken.
       other_boundary = [
-        %{from: nil, to: "x", count: 4, first: "c-1", last: "c-4"},
-        %{from: "x", to: "y", count: 2, first: "c-11", last: "c-12"},
-        %{from: "y", to: "y", count: 0, first: nil, last: nil}
+        pg(4, "c-1", "c-4"),
+        pg(2, "c-11", "c-12"),
+        pg(0, nil, nil)
       ]
 
       assert ChaosChecker.skip_confirmed?(skipping_pages(), other_boundary, missing_block()) == false
@@ -317,9 +337,9 @@ defmodule ChaosCheckerTest do
       # Same lower edge (c-5), different upper edge (c-11): half a match is no match, since the
       # cursor landed somewhere else the second time.
       upper_moved = [
-        %{from: nil, to: "x", count: 2, first: "c-1", last: "c-5"},
-        %{from: "x", to: "y", count: 2, first: "c-11", last: "c-12"},
-        %{from: "y", to: "y", count: 0, first: nil, last: nil}
+        pg(2, "c-1", "c-5"),
+        pg(2, "c-11", "c-12"),
+        pg(0, nil, nil)
       ]
 
       assert ChaosChecker.skip_confirmed?(skipping_pages(), upper_moved, missing_block()) == false
@@ -330,9 +350,9 @@ defmodule ChaosCheckerTest do
       # side may be the one that carries it: a check that only watched where the cursor resumed would
       # confirm this and call a moving boundary structural.
       lower_moved = [
-        %{from: nil, to: "x", count: 4, first: "c-1", last: "c-4"},
-        %{from: "x", to: "y", count: 2, first: "c-10", last: "c-12"},
-        %{from: "y", to: "y", count: 0, first: nil, last: nil}
+        pg(4, "c-1", "c-4"),
+        pg(2, "c-10", "c-12"),
+        pg(0, nil, nil)
       ]
 
       assert ChaosChecker.skip_confirmed?(skipping_pages(), lower_moved, missing_block()) == false
@@ -399,7 +419,7 @@ defmodule ChaosCheckerTest do
 
       assert ChaosChecker.unreachable_line(6, {before, following}) ==
                "VERIFY FAILED: 6 acknowledged values are still missing after two full reads, " <>
-                 "of which at least the block between c-5 and c-10 is unreachable " <>
+                 "of which at least the block between c-5 and c-10 of range 0 is unreachable " <>
                  "(both reads skipped it at the same page boundary)"
     end
 
@@ -411,7 +431,7 @@ defmodule ChaosCheckerTest do
 
       assert ChaosChecker.unreachable_line(1, {before, following}) ==
                "VERIFY FAILED: 1 acknowledged values are still missing after two full reads, " <>
-                 "of which at least the block between c-5 and c-10 is unreachable " <>
+                 "of which at least the block between c-5 and c-10 of range 0 is unreachable " <>
                  "(both reads skipped it at the same page boundary)"
     end
 
@@ -433,8 +453,8 @@ defmodule ChaosCheckerTest do
       {fetch, _agent} = scripted([["c-1", "c-2"], ["c-3"], []])
       {now, sleep} = fake_clock()
 
-      {_values, :conn, scan} =
-        ChaosChecker.drain(fetch, :conn, "topic", now: now, sleep: sleep, settle_ms: 1_000, poll_ms: 250)
+      {_values, :state, scan} =
+        ChaosChecker.drain(fetch, :state, now: now, sleep: sleep, settle_ms: 1_000, poll_ms: 250)
 
       carrying = Enum.filter(scan.pages, &(&1.count > 0))
       assert Enum.map(carrying, & &1.count) == [2, 1]
@@ -443,17 +463,146 @@ defmodule ChaosCheckerTest do
       assert scan.status == :settled
     end
 
-    test "an empty poll is recorded too, holding the cursor it was asked from" do
+    test "an empty poll is recorded too, with the range and the position it was asked from" do
       # The trace has to show a poll that found nothing at a position, because a scan that sat at one
-      # cursor and a scan that walked past it look identical in the values alone.
+      # position and a scan that walked past it look identical in the values alone.
       {fetch, _agent} = scripted([[], ["c-1"], []])
       {now, sleep} = fake_clock()
 
-      {_values, :conn, scan} =
-        ChaosChecker.drain(fetch, :conn, "topic", now: now, sleep: sleep, settle_ms: 1_000, poll_ms: 250)
+      {_values, :state, scan} =
+        ChaosChecker.drain(fetch, :state, now: now, sleep: sleep, settle_ms: 1_000, poll_ms: 250)
 
-      assert [%{count: 0, from: nil, to: nil} | _] = scan.pages
+      assert [%{count: 0, range: 0, from: :earliest} | _] = scan.pages
       assert Enum.any?(scan.pages, &(&1.count == 1))
+    end
+  end
+
+  describe "drain/3 over ranges" do
+    test "a routing answer is no page: the scan waits what it was told, within its deadline, and asks again" do
+      {:ok, slept} = Agent.start_link(fn -> [] end)
+      {fetch, _agent} = scripted([{:retry, 300}, ["c-1"], []])
+      {now, sleep} = fake_clock()
+      recording = fn ms -> Agent.update(slept, &[ms | &1]) && sleep.(ms) end
+
+      {values, :state, scan} =
+        ChaosChecker.drain(fetch, :state, now: now, sleep: recording, settle_ms: 1_000, poll_ms: 250, deadline: 5_000)
+
+      assert Enum.to_list(values) == ["c-1"]
+      # the retry is in no page of the trace (the first page is the one carrying c-1), and its wait is the
+      # first sleep
+      assert [%{count: 1} | _] = scan.pages
+      assert Agent.get(slept, &List.last/1) == 300
+    end
+
+    test "a retry is cut to the deadline too" do
+      {:ok, slept} = Agent.start_link(fn -> [] end)
+      {fetch, _agent} = scripted([{:retry, 10_000}])
+      {now, sleep} = fake_clock()
+      recording = fn ms -> Agent.update(slept, &[ms | &1]) && sleep.(ms) end
+
+      assert {_values, :state, %{status: :timeout}} =
+               ChaosChecker.drain(fetch, :state, now: now, sleep: recording, settle_ms: 60_000, deadline: 700)
+
+      assert Agent.get(slept, & &1) == [700]
+    end
+
+    test "one range's empty page does not hold the scan while another range has records: only a quiet round waits" do
+      # range 0 is empty, range 1 still has records, then both are empty
+      {scripted_fetch, _agent} = scripted([[], {1, ["c-2"]}, [], {1, ["c-4"]}, [], {1, []}], [0, 1])
+      fetches = :counters.new(1, [])
+      {:ok, first_sleep} = Agent.start_link(fn -> nil end)
+      {now, sleep} = fake_clock()
+
+      fetch = fn state -> :counters.add(fetches, 1, 1) && scripted_fetch.(state) end
+
+      recording = fn ms ->
+        Agent.update(first_sleep, &(&1 || :counters.get(fetches, 1)))
+        sleep.(ms)
+      end
+
+      {values, :state, _scan} =
+        ChaosChecker.drain(fetch, :state, now: now, sleep: recording, settle_ms: 1_000, poll_ms: 250)
+
+      assert Enum.sort(values) == ["c-2", "c-4"]
+      # range 0 empty (1), c-2 (2), range 0 empty (3), c-4 (4), range 0 empty (5), range 1 empty (6): only
+      # the 7th fetch, range 0 empty again with nothing between, is a whole quiet round
+      assert Agent.get(first_sleep, & &1) == 7
+    end
+  end
+
+  describe "drain/3 does not call a range read that never answered" do
+    test "a range that only answers retries keeps the scan open past its settle window, until its deadline" do
+      # range 0 is empty again and again; range 1, active too, only ever answers a retry
+      script = List.duplicate([], 1) ++ Enum.flat_map(1..40, fn _ -> [{:retry, 100}, []] end)
+      {fetch, _agent} = scripted(script, [0, 1])
+      {now, sleep} = fake_clock()
+
+      assert {_values, :state, %{status: :timeout}} =
+               ChaosChecker.drain(fetch, :state, now: now, sleep: sleep, settle_ms: 500, poll_ms: 100, deadline: 3_000)
+    end
+
+    test "once every active range has answered an empty page within the window, the scan settles" do
+      {fetch, _agent} = scripted([[], {1, []}], [0, 1])
+      {now, sleep} = fake_clock(100)
+
+      assert {_values, :state, %{status: :settled}} =
+               ChaosChecker.drain(fetch, :state, now: now, sleep: sleep, settle_ms: 500, poll_ms: 100, deadline: 60_000)
+    end
+  end
+
+  describe "page_answer/1 (what a fetch_range answer is to a scan)" do
+    test "a page is a page; routing answers are retries; any other refusal is fatal" do
+      page = fetched(0, ["c-1"], [0])
+      assert ChaosChecker.page_answer({:reader, {:page, page}}) == {:ok, page, :reader}
+      assert ChaosChecker.page_answer({:reader, :redirected}) == {:retry, 0, :reader}
+      assert ChaosChecker.page_answer({:reader, {:held, 120}}) == {:retry, 120, :reader}
+      assert {:retry, wait, :reader} = ChaosChecker.page_answer({:reader, :dropped})
+      assert wait > 0
+      assert {:retry, ^wait, :reader} = ChaosChecker.page_answer({:reader, {:error, "connect_failed"}})
+      assert {:retry, ^wait, :reader} = ChaosChecker.page_answer({:reader, {:error, "metadata_unavailable"}})
+      assert ChaosChecker.page_answer({:reader, {:error, "permission_denied"}}) == {:error, "permission_denied"}
+      assert ChaosChecker.page_answer({:reader, {:error, "no_such_topic"}}) == {:error, "no_such_topic"}
+    end
+  end
+
+  describe "skipped_at/2 per range" do
+    # Two ranges splitting a keyspace of 256 keys: which `c-N` lands in which is the key hash of `kN`.
+    defp range_of_value(n), do: if(Malachi.Keyspace.position_of("k#{n}", 256) < 128, do: 0, else: 1)
+
+    defp half(range), do: if(range == 0, do: {0, 128}, else: {128, 256})
+
+    test "a value missing from another range does not make a boundary in this one" do
+      # range 0 read two values with nothing of its own between them; the missing value between them is
+      # range 1's, so range 0's pages bracket nothing
+      other = Enum.find(2..200, &(range_of_value(&1) == 1 and range_of_value(&1 - 1) == 0))
+      below = Enum.max(for n <- 1..(other - 1), range_of_value(n) == 0, do: n)
+      above = Enum.min(for n <- (other + 1)..400, range_of_value(n) == 0, do: n)
+
+      pages = [
+        pg(1, "c-#{below}", "c-#{below}", block: half(0)),
+        pg(1, "c-#{above}", "c-#{above}", block: half(0))
+      ]
+
+      assert ChaosChecker.skipped_at(pages, MapSet.new(["c-#{other}"])) == nil
+    end
+
+    test "a value missing from this range between two of its pages is a boundary, named with its range" do
+      [a, b, c] = Enum.take(for(n <- 1..200, range_of_value(n) == 1, do: n), 3)
+
+      pages = [
+        pg(1, "c-#{a}", "c-#{a}", range: 7, block: half(1)),
+        pg(1, "c-#{c}", "c-#{c}", range: 7, block: half(1))
+      ]
+
+      assert {before, following} = ChaosChecker.skipped_at(pages, MapSet.new(["c-#{b}"]))
+      assert {before.range, before.high, following.low} == {7, a, c}
+    end
+
+    test "a page's edges are the lowest and highest values it carries, not its first and last" do
+      # c-11 was sent again after c-14 and landed after it: the page carried c-14, so a missing c-13 lies
+      # inside what the page covered, not beyond it, and no boundary is drawn over it
+      pages = [pg(2, "c-14", "c-11"), pg(1, "c-16", "c-16")]
+      assert ChaosChecker.skipped_at(pages, MapSet.new(["c-13"])) == nil
     end
   end
 
@@ -527,11 +676,11 @@ defmodule ChaosCheckerTest do
   test "a failed fetch is not an empty log: it is fatal, never a short successful page" do
     # A read that failed used to be indistinguishable from a drained topic, which is a successful wrong
     # answer. `on_error` stands in for the halt so the test can observe it.
-    fetch = fn _conn, _topic, _cursor -> {:error, :unreachable} end
+    fetch = fn _state -> {:error, :unreachable} end
     {now, sleep} = fake_clock()
 
     assert {:halted, {:error, :unreachable}} =
-             ChaosChecker.drain(fetch, :conn, "topic",
+             ChaosChecker.drain(fetch, :state,
                now: now,
                sleep: sleep,
                on_error: fn other -> {:halted, other} end
@@ -548,8 +697,8 @@ defmodule ChaosCheckerTest do
       sleep.(ms)
     end
 
-    {_values, :conn, _scan} =
-      ChaosChecker.drain(fetch, :conn, "topic",
+    {_values, :state, _scan} =
+      ChaosChecker.drain(fetch, :state,
         now: now,
         sleep: counting_sleep,
         settle_ms: 1_000,
