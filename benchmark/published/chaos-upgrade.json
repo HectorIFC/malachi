@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": "2026-10-20T09:23:53Z",
+    "timestamp": "2026-10-21T09:24:33Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "e760d3a",
-    "git_ref_date": "2026-10-19T09:49:06Z",
+    "git_ref": "d22f770",
+    "git_ref_date": "2026-10-20T09:24:03Z",
     "malachi_version": "0.22.0",
     "hardware": {
       "cpu": "x86_64",
@@ -25,16 +25,16 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 35891,
-    "post_chaos_records_per_s": 4557
+    "acked_writes": 50594,
+    "post_chaos_records_per_s": 18157
   },
   "failures": [
-    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1290)",
-    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 3518)",
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1954)",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 4700)",
     "nodes 1 and 2 did not serve a clean produce while node 3 was down",
-    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 3518)"
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 4700)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261020T085040Z-e760d3a",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261021T085035Z-d22f770",
   "details": {
     "old_ref": "v0.21.1",
     "old_rule": "the newest release whose code differs from this tree, which is release v0.22.0's",
@@ -45,9 +45,9 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 14524,
-      "phase2": 8453,
-      "phase3": 12914
+      "phase1": 18895,
+      "phase2": 12926,
+      "phase3": 18773
     },
     "vnodes": 4,
     "vnode_rule": "sharded: v0.21.1 resumes its vnode members after a restart",
