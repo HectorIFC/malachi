@@ -492,9 +492,9 @@ defmodule Malachi.Broker do
   end
 
   @doc """
-  Reads up to `max_records` records from `range_id` starting at `offset`, from the owning
-  segment's primary via `read_fun`. Returns `:eof` past the range's end (or if nothing was
-  produced to it).
+  Reads up to `max_records` records from `range_id` starting at `offset`, via `read_fun`, from the owning
+  segment's primary, or, for a sealed segment, from the first of its copies that serves it, the head first.
+  Returns `:eof` past the range's end (or if nothing was produced to it).
   """
   @spec read(t(), Metadata.range_id(), non_neg_integer(), pos_integer(), read_fun()) ::
           {:ok, [Record.t()]} | :eof | {:error, term()}
@@ -534,14 +534,49 @@ defmodule Malachi.Broker do
   # hold, and nothing reports it. Failed, nothing moves; the next read rebuilds its view, and a segment
   # really deleted is then stepped over and reported as a skip. An active segment answering nothing is the
   # ordinary tail (records not yet durable are not served), and stays :eof.
+  #
+  # A sealed segment takes no more appends, so every copy that holds an offset holds the same record there:
+  # the read goes to the head of the replica set and, when that copy does not serve it (its broker died, and
+  # this segment is not the one a failover moved a live copy to the head of; or it is cut short, damaged or
+  # gone), to the next copy in turn. A copy with records answers the read. Without one, a copy that refused
+  # fails it (nothing moves, and the next read asks again), so a copy that could not answer never passes for
+  # a drained one; an empty page stands when a copy answered one and none refused, and when every copy asked
+  # answered :eof the read is failed as unreadable.
+  #
+  # The copies after the head are asked only on a node this one is connected to (or its own): a call to a
+  # node it is not connected to costs a connect attempt and a call timeout, on the loop that serves reads,
+  # for a copy that cannot answer. The head is asked whatever its node, as it always was.
   defp read_segment(%{length: length} = segment, start, budget, read_fun) when is_integer(length) do
-    case read_fun.(primary(segment), segment.id, start, budget) do
-      :eof -> {:error, :sealed_segment_unreadable}
-      other -> other
-    end
+    copies = readable_copies(segment.replica_set)
+    read_sealed(copies, segment.id, start, budget, read_fun, %{empty: false, refused: nil})
   end
 
   defp read_segment(segment, start, budget, read_fun), do: read_fun.(primary(segment), segment.id, start, budget)
+
+  defp readable_copies([head | others]), do: [head | Enum.filter(others, &connected?/1)]
+
+  defp connected?({_name, node}) when is_atom(node), do: node == node() or node in Node.list()
+  defp connected?(_local_ref), do: true
+
+  defp read_sealed([], _segment_id, _start, _budget, _read_fun, %{refused: {:error, _reason} = refused}), do: refused
+  defp read_sealed([], _segment_id, _start, _budget, _read_fun, %{empty: true}), do: {:ok, []}
+  defp read_sealed([], _segment_id, _start, _budget, _read_fun, _seen), do: {:error, :sealed_segment_unreadable}
+
+  defp read_sealed([copy | others], segment_id, start, budget, read_fun, seen) do
+    case read_fun.(copy, segment_id, start, budget) do
+      {:ok, [_ | _]} = read ->
+        read
+
+      {:ok, []} ->
+        read_sealed(others, segment_id, start, budget, read_fun, %{seen | empty: true})
+
+      {:error, _reason} = refused ->
+        read_sealed(others, segment_id, start, budget, read_fun, %{seen | refused: refused})
+
+      :eof ->
+        read_sealed(others, segment_id, start, budget, read_fun, seen)
+    end
+  end
 
   defp with_start({:ok, records}, start), do: {:ok, records, start}
   defp with_start(other, _start), do: other

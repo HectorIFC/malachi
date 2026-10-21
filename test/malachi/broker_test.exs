@@ -593,6 +593,118 @@ defmodule Malachi.BrokerTest do
       assert {:error, :sealed_segment_unreadable} = Broker.read_consume(broker, left_id, :start, 100, reader)
     end
 
+    test "a sealed segment whose head does not answer is read from another copy of it", %{store: store} do
+      # Two copies of every segment; the head's broker died, and this segment is not the one a failover
+      # moved a live copy to the head of. The fake store keeps one copy, under the head, and the other copy
+      # serves exactly what it holds.
+      one_record = Record.encoded_size(record("v0", "k0"))
+
+      {broker, root_id} =
+        broker_with_topic("events", 4, brokers: [:a, :b], replication_factor: 2, segment_max_bytes: one_record)
+
+      broker =
+        Enum.reduce(0..2, broker, fn index, broker ->
+          {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v#{index}", "k#{index}")])
+          broker
+        end)
+
+      [sealed | _] = segments(broker, root_id)
+      assert is_integer(sealed.length)
+      [head, other] = sealed.replica_set
+
+      copies = fn
+        ^head, _segment, _offset, _max -> {:error, :unreachable}
+        ^other, segment, offset, max -> FakeSegmentStore.read(store, head, segment, offset, max)
+      end
+
+      assert {:ok, [%{value: "v0"}]} = Broker.read(broker, root_id, 0, 10, copies)
+
+      # a head whose copy is gone (its directory lost) answers :eof, and the other copy still serves the read
+      gone_head = fn
+        ^head, _segment, _offset, _max -> :eof
+        ^other, segment, offset, max -> FakeSegmentStore.read(store, head, segment, offset, max)
+      end
+
+      assert {:ok, [%{value: "v0"}]} = Broker.read(broker, root_id, 0, 10, gone_head)
+
+      # every copy refusing still fails the read, with the refusal
+      refusing = fn _replica, _segment, _offset, _max -> {:error, :unreachable} end
+      assert {:error, :unreachable} = Broker.read(broker, root_id, 0, 10, refusing)
+    end
+
+    test "a copy that answers an empty page does not hide one that holds the records, nor one that refused",
+         %{store: store} do
+      one_record = Record.encoded_size(record("v0", "k0"))
+
+      {broker, root_id} =
+        broker_with_topic("events", 4, brokers: [:a, :b, :c], replication_factor: 3, segment_max_bytes: one_record)
+
+      broker =
+        Enum.reduce(0..2, broker, fn index, broker ->
+          {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v#{index}", "k#{index}")])
+          broker
+        end)
+
+      [sealed | _] = segments(broker, root_id)
+      [head, damaged, intact] = sealed.replica_set
+
+      # the head is gone, the next copy is damaged (it answers nothing below the sealed end), the last holds it
+      copies = fn
+        ^head, _segment, _offset, _max -> {:error, :unreachable}
+        ^damaged, _segment, _offset, _max -> {:ok, []}
+        ^intact, segment, offset, max -> FakeSegmentStore.read(store, head, segment, offset, max)
+      end
+
+      assert {:ok, [%{value: "v0"}]} = Broker.read(broker, root_id, 0, 10, copies)
+
+      # no copy with the records: the refusal fails the read rather than the empty page passing for drained
+      without = fn
+        ^head, _segment, _offset, _max -> {:error, :unreachable}
+        _other, _segment, _offset, _max -> {:ok, []}
+      end
+
+      assert {:error, :unreachable} = Broker.read(broker, root_id, 0, 10, without)
+
+      # every copy empty: the empty page stands, as a single copy's always has
+      empty = fn _copy, _segment, _offset, _max -> {:ok, []} end
+      assert {:ok, []} = Broker.read(broker, root_id, 0, 10, empty)
+    end
+
+    test "a copy on a node this one is not connected to is not asked, unless it is the head", %{store: store} do
+      local = {:repl, node()}
+      ghost = {:repl, :"ghost@nowhere.invalid"}
+      one_record = Record.encoded_size(record("v0", "k0"))
+
+      {broker, root_id} =
+        broker_with_topic("events", 4, brokers: [local, ghost], replication_factor: 2, segment_max_bytes: one_record)
+
+      broker =
+        Enum.reduce(0..2, broker, fn index, broker ->
+          {broker, {:ok, _placements}} = produce(broker, store, "events", [record("v#{index}", "k#{index}")])
+          broker
+        end)
+
+      [sealed | _] = segments(broker, root_id)
+      [first | _] = sealed.replica_set
+      parent = self()
+
+      copies = fn copy, segment, offset, max ->
+        send(parent, {:asked, copy})
+        if copy == local, do: {:error, :unreachable}, else: FakeSegmentStore.read(store, first, segment, offset, max)
+      end
+
+      # the local copy first, refusing: the ghost after it is not asked
+      broker = Broker.apply_heal(broker, [{:set_segment_replicas, sealed.id, [local, ghost]}])
+      assert {:error, :unreachable} = Broker.read(broker, root_id, 0, 10, copies)
+      assert_received {:asked, ^local}
+      refute_received {:asked, ^ghost}
+
+      # the ghost at the head is asked, as the head always is
+      broker = Broker.apply_heal(broker, [{:set_segment_replicas, sealed.id, [ghost, local]}])
+      Broker.read(broker, root_id, 0, 10, copies)
+      assert_received {:asked, ^ghost}
+    end
+
     test "a page over a filtered ancestor reads whole pages, however few of their records it keeps",
          %{store: store} do
       # 99 records of the left child's slice, then a long run of the right child's. Asking each read for
