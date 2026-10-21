@@ -66,8 +66,30 @@ defmodule Malachi.Loadtest.RouterTest do
       assert Router.address_of(router, "t", 0) == {:ok, {"10.0.0.2", 5050}}
     end
 
-    test "a range with no active segment yet is opened through the bootstrap node" do
+    test "a range with no active segment, in a cluster of one broker, is opened through the bootstrap node" do
       router = cluster([broker("a@h", "10.0.0.2", 5050)]) |> routes([range(0, 0, 16, nil)])
+      assert Router.address_of(router, "t", 0) == {:ok, @bootstrap}
+    end
+
+    test "a range with no active segment is opened at a live broker, never one the cluster state says is down" do
+      dead = %{broker("a@h", "10.0.0.1", 4040) | status: :dead}
+      suspect = %{broker("b@h", "10.0.0.2", 4040) | status: :suspect}
+      ranges = for seq <- 0..15, do: range(seq, seq, seq + 1, nil)
+
+      router =
+        cluster([dead, suspect, broker("c@h", "10.0.0.3", 4040), broker("d@h", "10.0.0.4", 4040)]) |> routes(ranges)
+
+      addresses = for seq <- 0..15, do: elem(Router.address_of(router, "t", seq), 1)
+      # only the live ones, the bootstrap node (down here) included only if it were alive
+      assert Enum.uniq(addresses) -- [{"10.0.0.3", 4040}, {"10.0.0.4", 4040}] == []
+      # the ranges spread over them, each range always at the same one
+      assert length(Enum.uniq(addresses)) == 2
+      assert Router.address_of(router, "t", 5) == Router.address_of(router, "t", 5)
+    end
+
+    test "a range with no active segment falls back to the bootstrap node when no broker is listed alive" do
+      down = for id <- ["a@h", "b@h"], do: %{broker(id, "10.0.0.9", 4040) | status: :dead}
+      router = cluster(down) |> routes([range(0, 0, 16, nil)])
       assert Router.address_of(router, "t", 0) == {:ok, @bootstrap}
     end
 

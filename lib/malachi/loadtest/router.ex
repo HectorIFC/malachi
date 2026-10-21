@@ -7,9 +7,9 @@ defmodule Malachi.Loadtest.Router do
 
   A record's key is hashed into the topic's keyspace exactly as the server does (`Malachi.Keyspace`), the
   active range holding that position is the range it goes to, and the broker leading that range's active
-  segment is where the range's stream is opened. A range with no active segment yet (`unassigned`, before
-  its first record) is opened through the node the client bootstrapped from, which places the segment and
-  answers `moved` towards its primary.
+  segment is where the range's stream is opened. A range with no active segment (`unassigned`, before its
+  first record or after a failover sealed its segment) is opened at a live broker, which places the segment
+  and answers `moved` towards its primary (`address_of/3`).
 
   Pure but for `bootstrap/1` and `refresh/3`, which ask over a passive `Malachi.Loadtest.Conn`.
   """
@@ -172,10 +172,14 @@ defmodule Malachi.Loadtest.Router do
   end
 
   @doc """
-  The address to open `topic`'s `range` stream at: its primary's advertised address, or the bootstrap
-  address for a range with no active segment yet. A primary that advertises no address can only be
-  reached when it is the bootstrap node itself, the one broker of a single node cluster; in a larger one
-  it is `{:error, :unadvertised}`, as is a primary the cluster state does not list.
+  The address to open `topic`'s `range` stream at: its primary's advertised address. A range with no
+  active segment (never written, or its segment sealed by a failover) is opened at any live broker, which
+  places its segment and answers `moved` toward its primary: one of the brokers the cluster state says
+  are alive and advertise an address, picked by the range so a topic's ranges spread over the cluster,
+  and so not a node that went down once the routes are read again. The bootstrap address when the cluster
+  is one broker, or lists none alive. A primary that advertises no address can only be reached when it is
+  the bootstrap node itself, the one broker of a single node cluster; in a larger one it is
+  `{:error, :unadvertised}`, as is a primary the cluster state does not list.
   """
   @spec address_of(t(), String.t(), non_neg_integer()) ::
           {:ok, address()} | :unknown_topic | {:error, :unknown_range | :unadvertised}
@@ -187,9 +191,24 @@ defmodule Malachi.Loadtest.Router do
       %{ranges: ranges} ->
         case Enum.find(ranges, &(&1.range == range)) do
           nil -> {:error, :unknown_range}
-          %{primary: nil} -> {:ok, router.bootstrap}
+          %{primary: nil} -> {:ok, unassigned_address(router, topic, range)}
           %{primary: primary} -> broker_address(router, primary)
         end
+    end
+  end
+
+  defp unassigned_address(%{brokers: brokers} = router, _topic, _range) when map_size(brokers) <= 1,
+    do: router.bootstrap
+
+  defp unassigned_address(router, topic, range) do
+    live =
+      for {_id, %{status: :alive, host: host, port: port}} <- Enum.sort(router.brokers),
+          is_binary(host) and port > 0,
+          do: {host, port}
+
+    case live do
+      [] -> router.bootstrap
+      _ -> Enum.at(live, :erlang.phash2({topic, range}, length(live)))
     end
   end
 
