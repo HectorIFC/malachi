@@ -1490,10 +1490,13 @@ defmodule Malachi.BrokerServer do
       {broker, :ok} ->
         %{state | broker: broker}
 
-      # The store is fenced and the metadata is not, as in `fence_and_seal/2`, and just as loud. Unlike a
-      # split, the roll stays owed: its fence is resent once the retry window passes, and answers the same
-      # numbers, so the seal is recorded again rather than left to a heal pass. The answer did arrive, so the
-      # fence is no longer awaited: a produce refused by it fails at once instead of being held for nothing.
+      # The store is fenced and the metadata is not, as in `fence_and_seal/2`, and just as loud. While the
+      # roll is still owed its fence is resent once the retry window passes, and answers the same numbers, so
+      # the seal is recorded again. A produce this frontend sent after the fence may have been refused with
+      # `{:sealed, _}` first, though, and that cleared the roll (`Malachi.Broker.forget_sealed/4`): then
+      # nothing here resends it, and the range takes no write until the heal pass seals the segment
+      # (`Malachi.Cluster.OrphanedFence`, one heal interval). The answer did arrive, so the fence is no
+      # longer awaited: a produce refused by it fails at once instead of being held for nothing.
       {broker, {:error, reason}} ->
         Logger.error(I18n.t(:seal_record_failed, segment_id: inspect(roll.segment_id), reason: inspect(reason)))
         Telemetry.orphaned_fence(roll.segment_id, reason)
