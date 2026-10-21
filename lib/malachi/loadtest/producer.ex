@@ -74,6 +74,9 @@ defmodule Malachi.Loadtest.Producer do
   # The first correlation id a stream's open takes; pushes on the stream come back under it.
   @first_corr 100
 
+  # The errors with which a broker ends a stream at the sequence the producer broke it at.
+  @sequence_breaks ["sequence_gap", "sequence_repeat"]
+
   @enforce_keys [:router, :conn_opts]
   defstruct [
     :router,
@@ -806,12 +809,21 @@ defmodule Malachi.Loadtest.Producer do
   # Every append below `acked_sequence` has been answered: the ones named in `errors` failed with their
   # reason, the rest landed.
   defp acked(p, events, stream_key, stream, ack) do
-    errors = Map.new(ack.errors, &{&1.sequence, &1.reason})
+    # A sequence break ends the stream (`Malachi.Wire`): the appends before it are still answered, and the
+    # ones after it are refused `unknown_stream` (`refused/5`). A gap names an append that failed now, at or
+    # above `acked_sequence`; a repeat names a second copy, and the original's own answer still comes, so it
+    # fails nothing.
+    ends? = Enum.any?(ack.errors, &(&1.reason in @sequence_breaks))
+
+    errors =
+      for %{reason: reason} = error <- ack.errors, reason != "sequence_repeat", into: %{}, do: {error.sequence, reason}
+
     {answered, inflight} = Map.split_with(stream.inflight, fn {seq, _sent} -> seq < ack.acked_sequence end)
+    {ended, inflight} = Map.split_with(inflight, fn {seq, _sent} -> Map.has_key?(errors, seq) end)
     now_us = mono_us()
 
     new_events =
-      answered
+      (Map.to_list(answered) ++ Map.to_list(ended))
       |> Enum.sort_by(fn {seq, _sent} -> seq end)
       |> Enum.map(fn {seq, sent} ->
         case Map.fetch(errors, seq) do
@@ -820,18 +832,26 @@ defmodule Malachi.Loadtest.Producer do
         end
       end)
 
+    gone = Map.merge(answered, ended)
+
     stream = %{
       stream
       | inflight: inflight,
-        inflight_bytes: stream.inflight_bytes - Enum.reduce(answered, 0, fn {_seq, sent}, acc -> acc + sent.size end),
+        inflight_bytes: stream.inflight_bytes - Enum.reduce(gone, 0, fn {_seq, sent}, acc -> acc + sent.size end),
         window_appends: ack.window_appends,
         window_bytes: ack.window_bytes
     }
 
+    # the range opens a new stream once this one drains (`settle/2`); its routes have not changed
+    p = if ends?, do: retire(p, stream.lane, stream_key, stream), else: p
+    stream = if ends?, do: %{stream | open?: false}, else: stream
+
     streams =
-      if not stream.open? and inflight == %{},
-        do: Map.delete(p.streams, stream_key),
-        else: Map.put(p.streams, stream_key, stream)
+      cond do
+        not stream.open? and inflight == %{} -> Map.delete(p.streams, stream_key)
+        Map.has_key?(p.streams, stream_key) -> Map.put(p.streams, stream_key, stream)
+        true -> p.streams
+      end
 
     {settle(%{p | streams: streams}, stream_key), events ++ new_events}
   end

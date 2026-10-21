@@ -806,6 +806,74 @@ defmodule Malachi.Loadtest.ProducerTest do
     assert acked(events) == ["a", "b"]
   end
 
+  test "an error the broker names at or above acked_sequence ends the stream there: that append fails now" do
+    # A sequence the broker refused out of order ends the stream at it: its error comes in an ack that
+    # does not pass it, since the appends before it are still answered (`Malachi.Wire`). The producer left
+    # it in flight for good, and the range never opened another stream.
+    stub = start_stub()
+    {:ok, p} = stub |> stub_router() |> Producer.new(stub_opts(stub), max_inflight: 2) |> Producer.prepare("t", 2_000)
+    StreamStub.set_appends(stub, :silent)
+    p = Enum.reduce(["a", "b"], p, &(&2 |> Producer.produce("t", entries([&1]), now()) |> elem(0)))
+    PollingHelper.wait_until!(fn -> length(StreamStub.appends(stub)) == 2 end)
+    [{{_address, id}, %{corr: corr}}] = Map.to_list(p.streams)
+
+    # "b" (sequence 1) refused out of order, "a" (sequence 0) still to be answered
+    ended = %{
+      stream_id: id,
+      acked_sequence: 0,
+      window_appends: 2,
+      window_bytes: 16_777_216,
+      errors: [%{sequence: 1, reason: "sequence_gap"}]
+    }
+
+    StreamStub.push(stub, Wire.encode_ok(corr, IO.iodata_to_binary(Wire.encode_push(:append_ack, ended))))
+    {p, events, _} = Producer.await(p, 2_000, &match?(%{stream: nil}, &1.lanes[{"t", 0}]))
+    assert [{:failed, [{"b", _}], "sequence_gap"}] = events
+
+    # "a" answered: the stream is drained, and the range opens a new one for what comes next
+    StreamStub.set_appends(stub, :ack)
+    answered = %{ended | acked_sequence: 1, errors: []}
+    StreamStub.push(stub, Wire.encode_ok(corr, IO.iodata_to_binary(Wire.encode_push(:append_ack, answered))))
+    {p, []} = Producer.produce(p, "t", entries(["c"]), now())
+    {_p, events, :idle} = Producer.await(p, 2_000)
+    assert acked(events) == ["a", "c"]
+    assert [{^id, 0, ["a"]}, {^id, 1, ["b"]}, {other, 0, ["c"]}] = StreamStub.appends(stub)
+    assert other != id
+  end
+
+  test "a repeat the broker names ends the stream, but the append it names is answered by its original" do
+    # A repeat is a second copy of a sequence whose original may still land: failing it would have the
+    # caller send it once more, a duplicate if the original was stored.
+    stub = start_stub()
+    {:ok, p} = stub |> stub_router() |> Producer.new(stub_opts(stub), max_inflight: 2) |> Producer.prepare("t", 2_000)
+    StreamStub.set_appends(stub, :silent)
+    p = Enum.reduce(["a", "b"], p, &(&2 |> Producer.produce("t", entries([&1]), now()) |> elem(0)))
+    PollingHelper.wait_until!(fn -> length(StreamStub.appends(stub)) == 2 end)
+    [{{_address, id}, %{corr: corr}}] = Map.to_list(p.streams)
+
+    repeat = %{
+      stream_id: id,
+      acked_sequence: 0,
+      window_appends: 2,
+      window_bytes: 16_777_216,
+      errors: [%{sequence: 1, reason: "sequence_repeat"}]
+    }
+
+    StreamStub.push(stub, Wire.encode_ok(corr, IO.iodata_to_binary(Wire.encode_push(:append_ack, repeat))))
+    {p, events, _} = Producer.await(p, 2_000, &match?(%{stream: nil}, &1.lanes[{"t", 0}]))
+    assert events == []
+
+    # both originals land: both acknowledged, and the range streams on through a new stream
+    StreamStub.set_appends(stub, :ack)
+    landed = %{repeat | acked_sequence: 2, errors: []}
+    StreamStub.push(stub, Wire.encode_ok(corr, IO.iodata_to_binary(Wire.encode_push(:append_ack, landed))))
+    {p, []} = Producer.produce(p, "t", entries(["c"]), now())
+    {_p, events, :idle} = Producer.await(p, 2_000)
+    assert acked(events) == ["a", "b", "c"]
+    assert [{^id, 0, ["a"]}, {^id, 1, ["b"]}, {other, 0, ["c"]}] = StreamStub.appends(stub)
+    assert other != id
+  end
+
   test "across a split, a parent range in backoff hands its records over before its children send" do
     stub = start_stub()
     p = Producer.new(stub_router(stub), stub_opts(stub), linger_ms: 100, linger_bytes: 1_000_000)

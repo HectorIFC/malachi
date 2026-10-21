@@ -50,7 +50,10 @@ defmodule Malachi.Wire do
     * **Produce** is a stream (`open_stream`, 26): a handshake binds it to a range's active segment and
       grants a window; `append` (27) carries a sequence number and one batch, pipelined up to the window;
       the server pushes `append_ack` with the sequence below which every append has been answered (0
-      before the first answer), per sequence errors and the current window, and `moved` when the segment
+      before the first answer), per sequence errors and the current window (`sequence_gap` or
+      `sequence_repeat` ends the stream at the sequence the producer broke it at: the appends before it are
+      still answered and any after it is refused `unknown_stream`; a gap's append was refused, while a
+      repeat's names a second copy, and the original's own answer still comes), and `moved` when the segment
       seals (a roll or a failover), the range splits or merges, or the broker restarts; the appends in flight
       when it moves are still answered after the `moved`. `close_stream` (28) ends it.
     * **Consume** is the mirror (`open_consume`, 29): pushes of `records` carry the offset of every record,
@@ -891,7 +894,8 @@ defmodule Malachi.Wire do
 
   @doc """
   A server push on a stream: `append_ack` (`acked_sequence`, the sequence below which every append has been
-  answered, 0 before the first answer; the sequences that failed with their reason; the window granted now,
+  answered, 0 before the first answer; the sequences that failed with their reason, where `sequence_gap` and
+  `sequence_repeat` end the stream, see the moduledoc; the window granted now,
   where 0 holds further appends until a later ack), `moved` (the stream takes no more appends: where its
   range's data goes now, after a seal, a split or merge, or a broker restart; the appends in flight are
   still answered) or `records` (a page, see `encode_page/1`).
