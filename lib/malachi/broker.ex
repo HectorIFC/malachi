@@ -397,10 +397,30 @@ defmodule Malachi.Broker do
   end
 
   @doc """
+  The ranges whose durable end this frontend knows from anything but their sealed segments: a produce it
+  answered (`mark_durable/2`) or a recovery (`seed_durable/3`).
+  """
+  @spec durable_ranges(t()) :: MapSet.t(Metadata.range_id())
+  def durable_ranges(%__MODULE__{} = broker), do: broker.durable |> Map.keys() |> MapSet.new()
+
+  @doc """
+  Seeds `range_id`'s durable end after a restart from what a replication quorum of its active segment
+  holds (`offset`, the end at least a quorum of its replicas flushed and report): every record below it is
+  held through any failover, since a seal takes the furthest end its seal quorum reports and that quorum
+  shares a replica with this one. Monotone, and never past the range's end.
+  """
+  @spec seed_durable(t(), Metadata.range_id(), non_neg_integer()) :: t()
+  def seed_durable(%__MODULE__{} = broker, range_id, offset) do
+    %{broker | durable: raise_durable(broker.durable, range_id, min(offset, next_offset(broker, range_id)))}
+  end
+
+  @doc """
   The offset below which `range_id`'s records are durable, as this frontend knows it: the produces it
-  answered as stored (`mark_durable/2`) and the end of every sealed segment of the range. So records another
-  node's frontend wrote become readable here once their segment seals, and after this frontend restarts
-  the records of an active segment become readable with the next produce it answers there, or the seal.
+  answered as stored (`mark_durable/2`), the end a replication quorum held when it restarted
+  (`seed_durable/3`), and the end of every sealed segment of the range. So records another node's frontend
+  wrote become readable here once their segment seals. After this frontend restarts, the records of an active
+  segment it leads become readable once a quorum of the segment's replicas answers the recovery (the first
+  reconcile, at boot); while fewer answer, with the next produce it answers there, a later pass, or the seal.
   Never past the range's end.
   """
   @spec durable_end(t(), Metadata.range_id()) :: non_neg_integer()
