@@ -255,6 +255,24 @@ async function selfTest() {
     assert.strictEqual(links.stats.connect_failures, 0, 'and none counted as failed');
   });
 
+  await check('a metadata connect that finishes after closeAll is closed, not kept', async () => {
+    const router = routerWith([], []);
+    router.refresh = async () => {};
+    const links = new Links(router);
+    let made = null;
+    links.connect = async () => {
+      await tick(50);
+      made = fakeClient();
+      return made;
+    };
+    const read = links.refresh('t');
+    await tick(10);
+    await links.closeAll();
+    assert.deepStrictEqual(await read, { error: 'metadata_unavailable' });
+    assert.strictEqual(links.control, null);
+    assert.strictEqual(made.closed, 1, 'the connection that came after the close was closed');
+  });
+
   await check('a topic whose routes failed is asked again once its backoff ends, not before', async () => {
     const links = new Links(routerWith([], []));
     let reads = 0;

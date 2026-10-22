@@ -186,6 +186,11 @@ class Links {
   async _openControl() {
     for (const address of this._controlAddresses()) {
       const client = await this.connect(address);
+      // closed while it connected: closed here, as `connection` closes its own
+      if (client && this.closed) {
+        client.close();
+        return null;
+      }
       if (client) {
         this.control = client;
         return client;

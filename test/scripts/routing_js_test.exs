@@ -19,7 +19,7 @@ defmodule RoutingJsTest do
 
   test "the routing cases that need no server", ctx do
     assert {output, 0} = System.cmd(ctx.node, [@selftest], stderr_to_stdout: true)
-    assert output =~ "passed 18 routing cases"
+    assert output =~ "passed 19 routing cases"
   end
 
   test "a range opens at the broker the Elixir router picks, for every cluster and range", ctx do
