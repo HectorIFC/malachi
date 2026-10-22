@@ -13,6 +13,7 @@ defmodule LoadtestJsTest do
   alias Malachi.LogApi
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.LoadtestProbes
+  alias Malachi.Test.PollingHelper
   alias Malachi.Test.StreamsOn
   alias Malachi.Test.SubscribeResetStub
 
@@ -219,13 +220,17 @@ defmodule LoadtestJsTest do
     test "what routing did over the run is reported: the routes read, and the move a split made", ctx do
       t = topic()
       parent = self()
+      # split once the measured window opens: every producer has read its routes and opened its streams by
+      # then, so the move reaches them whatever the runner's speed
+      marker = Path.join(ctx.tmp_dir, "window.marker")
 
       spawn_link(fn ->
-        Process.sleep(600)
+        PollingHelper.wait_until!(fn -> File.exists?(marker) end, timeout: 30_000)
+        Process.sleep(200)
         send(parent, {:split, BrokerServer.split_range(DataPlaneRouter.shard_for(t), {t, 0})})
       end)
 
-      args = ~w(--scenario produce --json --connections 2 --duration 2 --topic) ++ [t]
+      args = ~w(--scenario produce --json --connections 2 --duration 2 --measure-marker) ++ [marker, "--topic", t]
       assert {output, 0} = run_js(ctx, args)
       assert_receive {:split, {:ok, _left, _right}}, 5_000
       report = Jason.decode!(output)
