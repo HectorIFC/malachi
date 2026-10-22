@@ -208,7 +208,8 @@ defmodule Malachi.Loadtest.Router do
 
     case live do
       [] -> router.bootstrap
-      _ -> Enum.at(live, :erlang.phash2({topic, range}, length(live)))
+      # hashed as a binary, so the Node client (scripts/lib/router.js) picks the same broker with its port of phash2
+      _ -> Enum.at(live, :erlang.phash2("#{topic}/#{range}", length(live)))
     end
   end
 

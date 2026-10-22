@@ -12,6 +12,12 @@
  *   - produce(topic, records)  -> append by key; the server picks the range
  *   - fetch(topic, {cursor})   -> pull a batch + an opaque next cursor (position lives only in the cursor)
  *   - subscribe(topic, {...})  -> server-push stream, flow-controlled by a credit window + streamAck
+ *
+ * The stream keys (24 to 34, see "Streams, routing and groups" in lib/malachi/wire.ex) work the same way:
+ * `openStream` sends an open (`open_stream` or `open_consume`), and once it is answered every later frame
+ * under its correlation id belongs to the stream: a push (`append_ack`, `moved`, `records`) or an error
+ * frame that refuses one frame the stream sent (`sendOnStream`). A routing client (./router.js,
+ * ./links.js) keeps one of these per broker.
  */
 
 const net = require('net');
@@ -20,6 +26,9 @@ const wire = require('./wire');
 const DEFAULT_PORT = 4040;
 const DEFAULT_HOST = 'localhost';
 const DEFAULT_TIMEOUT = 5000;
+// How long a connect may take, as the Elixir load generator bounds it (Malachi.Loadtest.Conn): a host that
+// drops the handshake is a connect that failed, not one the operating system retries for a minute or two.
+const DEFAULT_CONNECT_TIMEOUT = 15000;
 
 class MalachiError extends Error {
   constructor(reason) {
@@ -61,6 +70,9 @@ class MalachiClient {
     this.host = options.host || process.env.MALACHI_HOST || DEFAULT_HOST;
     this.port = options.port || parseInt(process.env.MALACHI_PORT, 10) || DEFAULT_PORT;
     this.timeout = options.timeout || DEFAULT_TIMEOUT;
+    this.connectTimeout = options.connectTimeout || DEFAULT_CONNECT_TIMEOUT;
+    // how the socket is made: net.createConnection, or a test's stand-in
+    this.createConnection = options.createConnection || net.createConnection;
 
     this.socket = null;
     this.token = null;
@@ -68,6 +80,8 @@ class MalachiClient {
     this.nextCorrelationId = 1;
     this.pending = new Map(); // correlationId -> { resolve, reject, timer }
     this.subscriptions = new Map(); // correlationId -> { onRecords, onError }
+    this.streams = new Map(); // correlationId -> { onPush, onRefusal, onClosed }
+    this.opening = new Set(); // correlation ids of streams whose open is not answered yet
     this.closed = false;
   }
 
@@ -80,8 +94,13 @@ class MalachiClient {
 
   _openSocket() {
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection(this.port, this.host);
+      const socket = this.createConnection(this.port, this.host);
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(transportError(`connect timed out after ${this.connectTimeout}ms`));
+      }, this.connectTimeout);
       socket.once('connect', () => {
+        clearTimeout(timer);
         socket.on('data', (chunk) => this._onData(chunk));
         socket.on('close', () => this._onClose());
         // Swap the connect-phase reject for a persistent error handler: after connect, an ECONNRESET/EPIPE
@@ -90,7 +109,10 @@ class MalachiClient {
         socket.on('error', (err) => this._onError(err));
         resolve();
       });
-      socket.once('error', reject);
+      socket.once('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
       this.socket = socket;
     });
   }
@@ -121,6 +143,13 @@ class MalachiClient {
       if (sub.onError) sub.onError(err);
     }
     this.subscriptions.clear();
+    // a stream still opening learns of the loss from its open's rejection (the pending loop above), not here
+    const streams = [...this.streams].filter(([id]) => !this.opening.has(id)).map(([, stream]) => stream);
+    this.streams.clear();
+    this.opening.clear();
+    for (const stream of streams) {
+      if (stream.onClosed) stream.onClosed(err);
+    }
   }
 
   _onData(chunk) {
@@ -161,7 +190,10 @@ class MalachiClient {
     }
 
     const waiter = this.pending.get(correlationId);
-    if (!waiter) return; // late/duplicate frame for a settled request, ignore
+    if (!waiter) {
+      this._streamFrame(correlationId, errorCode, payload);
+      return;
+    }
     this.pending.delete(correlationId);
     clearTimeout(waiter.timer);
     if (errorCode === wire.OK) {
@@ -171,14 +203,32 @@ class MalachiClient {
     }
   }
 
+  // A frame under the correlation id of an open stream, after its open was answered: a push, or an error
+  // frame refusing one frame the stream sent. Any other is late or duplicate, and ignored.
+  _streamFrame(correlationId, errorCode, payload) {
+    const stream = this.streams.get(correlationId);
+    if (!stream) return;
+    if (errorCode === wire.OK) {
+      const [kind, push] = wire.decodePush(payload);
+      stream.onPush(kind, push);
+    } else {
+      stream.onRefusal(wire.decodeString(payload));
+    }
+  }
+
   // Sends one request and resolves with the ok payload (or rejects with the server's reason).
   _request(apiKey, payload, timeout = this.timeout) {
     if (!this.socket || this.closed) return Promise.reject(transportError('not connected'));
-    const correlationId = this._nextId();
+    return this._requestAs(this._nextId(), apiKey, payload, timeout);
+  }
+
+  _requestAs(correlationId, apiKey, payload, timeout) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(correlationId);
-        reject(new MalachiError(`request timed out after ${timeout}ms`));
+        const err = new MalachiError(`request timed out after ${timeout}ms`);
+        err.timeout = true; // no answer, as opposed to a refusal: a routing client replaces the connection
+        reject(err);
       }, timeout);
       this.pending.set(correlationId, { resolve, reject, timer });
       this.socket.write(wire.encodeRequest(apiKey, correlationId, payload));
@@ -254,6 +304,52 @@ class MalachiClient {
     if (!this.socket || this.closed) throw transportError('not connected');
     const payload = wire.encodeStreamAckReq(topic, group, member, cursor, count);
     this.socket.write(wire.encodeRequest(wire.API.streamAck, this._nextId(), payload));
+  }
+
+  // ---- streams and routing (keys 24 to 34) ----
+
+  // The minimal cluster state any node answers (`cluster_state`, key 24).
+  async clusterState() {
+    return wire.decodeClusterStateResp(await this._request(wire.API.clusterState, wire.encodeClusterStateReq()));
+  }
+
+  // `topic`'s routes (`topic_routes`, key 25): its version, keyspace bits and ranges with their primaries.
+  async topicRoutes(topic) {
+    return wire.decodeTopicRoutesResp(await this._request(wire.API.topicRoutes, wire.encodeTopicRoutesReq(topic)));
+  }
+
+  // Opens a stream (`open_stream` or `open_consume`, encoded by the caller) and resolves with
+  // `{ correlationId, payload }`, the open's ok answer still encoded, or rejects with the refusal (a loss of
+  // the connection before the answer included). From the answer on, the stream's frames reach `handlers`:
+  // `onPush(kind, push)` for a push, `onRefusal(reason)` for an error frame refusing one frame the stream
+  // sent, and `onClosed(err)` once if the connection drops. A deliberate `close()` calls none of them.
+  // The handlers are held from the open on, so a push the server sends right behind the answer is not lost.
+  async openStream(apiKey, payload, handlers, timeout = this.timeout) {
+    if (!this.socket || this.closed) throw transportError('not connected');
+    const correlationId = this._nextId();
+    this.streams.set(correlationId, handlers);
+    this.opening.add(correlationId);
+    try {
+      const answer = await this._requestAs(correlationId, apiKey, payload, timeout);
+      this.opening.delete(correlationId);
+      return { correlationId, payload: answer };
+    } catch (err) {
+      this.opening.delete(correlationId);
+      this.streams.delete(correlationId);
+      throw err;
+    }
+  }
+
+  // Sends one frame on an open stream (an `append`, a `consume_ack`), under the stream's correlation id: its
+  // answer, if any, comes to the stream's handlers.
+  sendOnStream(apiKey, correlationId, payload) {
+    if (!this.socket || this.closed) throw transportError('not connected');
+    this.socket.write(wire.encodeRequest(apiKey, correlationId, payload));
+  }
+
+  // Stops routing frames to a stream's handlers (one the server ended, or the caller is done with).
+  forgetStream(correlationId) {
+    this.streams.delete(correlationId);
   }
 
   // --- admin user management (require the admin permission; the server routes to the replicated store) ---
