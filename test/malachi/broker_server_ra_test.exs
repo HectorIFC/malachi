@@ -308,6 +308,67 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(second)
   end
 
+  test "a horizon a quorum answered while the range's end was not learned yet is asked again once it is" do
+    # The primary misses the end probe the recovery makes (a slow open), while the followers answer the
+    # horizon's: the range is unrecovered when the quorum's horizon arrives. Recorded then, clamped to the
+    # end nobody knew, it read as a known horizon of zero, and the range served nothing until a produce.
+    cluster = :"bs_meta_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+    brokers = for {name, _directory} <- named_replicas("malachi_unrecovered_horizon"), do: {name, node()}
+
+    {:ok, first} = BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+    {:ok, root} = BrokerServer.create_topic(first, "events", 4)
+    {:ok, _} = BrokerServer.produce(first, "events", for(i <- 1..5, do: Record.new("v#{i}", key: "k#{i}")))
+    [%{replica_set: [{primary, _node} | _]}] = Metadata.segments_of_range(BrokerServer.metadata(first), root)
+    :ok = BrokerServer.stop(first)
+
+    gate = refuse_end_probes(primary)
+
+    {:ok, second} =
+      BrokerServer.start_link("unused", brokers: brokers, replication_factor: 3, metadata_cluster: cluster)
+
+    assert Broker.unrecovered?(:sys.get_state(second).broker, root)
+
+    # the primary answers again: the next pass learns the end, and the horizon with it
+    send(gate, :answer)
+    :ok = BrokerServer.reconcile_now(second)
+    assert Broker.durable_end(:sys.get_state(second).broker, root) == 5
+    :ok = BrokerServer.stop(second)
+  end
+
+  # Puts a proxy under `name`, in front of the server registered there: it answers the recovery's end probe
+  # (`durable_end`) as a failed copy until it is sent `:answer`, and forwards everything else, so the horizon's
+  # probe (`durable_stats`) reaches the server.
+  defp refuse_end_probes(name) do
+    server = Process.whereis(name)
+    Process.unregister(name)
+
+    proxy =
+      spawn(fn ->
+        Process.register(self(), name)
+        end_probe_proxy(server, true)
+      end)
+
+    on_exit(fn -> Process.exit(proxy, :kill) end)
+    wait_until!(fn -> Process.whereis(name) == proxy end)
+    proxy
+  end
+
+  defp end_probe_proxy(server, refusing?) do
+    receive do
+      :answer ->
+        end_probe_proxy(server, false)
+
+      {:"$gen_call", from, {:durable_end, _segment_id, _base}} when refusing? ->
+        GenServer.reply(from, {:error, {:storage, :failed}})
+        end_probe_proxy(server, refusing?)
+
+      message ->
+        send(server, message)
+        end_probe_proxy(server, refusing?)
+    end
+  end
+
   test "replicas that never answer the horizon probes do not hold the broker's loop" do
     # Each probe may wait its whole bound, and a range short of a quorum is asked on every pass. Asked
     # one replica at a time, eight ranges with two silent replicas cost the boot seconds, and on the loop
@@ -341,14 +402,16 @@ defmodule Malachi.BrokerServerRaTest do
         second
       end)
 
-    assert elapsed_us < 1_000_000, "boot took #{div(elapsed_us, 1000)} ms"
+    # one bound for every probe at once (about 250 ms), not one per range (about 2 s) nor one per probe in turn
+    # (about 4 s)
+    assert elapsed_us < 1_500_000, "boot took #{div(elapsed_us, 1000)} ms"
 
-    # every pass asks again (no quorum answers), and the node keeps answering in the meantime
-    for _ <- 1..3 do
-      {call_us, _metadata} = :timer.tc(fn -> BrokerServer.metadata(second) end)
-      assert call_us < 200_000, "a call waited #{div(call_us, 1000)} ms"
-      Process.sleep(400)
-    end
+    # every later pass asks again (no quorum answers), off the loop: while a pass waits on its probes, the
+    # node answers, and the same pass is still the one in flight once it has
+    wait_until!(fn -> match?(%{reconcile_task: %{ref: _}}, :sys.get_state(second)) end)
+    %{reconcile_task: %{ref: probing}} = :sys.get_state(second)
+    _metadata = BrokerServer.metadata(second)
+    assert %{reconcile_task: %{ref: ^probing}} = :sys.get_state(second)
 
     :ok = BrokerServer.stop(second)
   end

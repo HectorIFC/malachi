@@ -408,11 +408,15 @@ defmodule Malachi.Broker do
   Seeds `range_id`'s durable end after a restart from what a replication quorum of its active segment
   holds (`offset`, the end at least a quorum of its replicas flushed and report): every record below it is
   held through any failover, since a seal takes the furthest end its seal quorum reports and that quorum
-  shares a replica with this one. Monotone, and never past the range's end.
+  shares a replica with this one. Monotone, and never past the range's end. A range whose end the recovery
+  has not learned (`unrecovered?/2`) is left as it is: clamped to an end it does not know, the horizon would
+  be recorded as known at nothing, and never learned again.
   """
   @spec seed_durable(t(), Metadata.range_id(), non_neg_integer()) :: t()
   def seed_durable(%__MODULE__{} = broker, range_id, offset) do
-    %{broker | durable: raise_durable(broker.durable, range_id, min(offset, next_offset(broker, range_id)))}
+    if unrecovered?(broker, range_id),
+      do: broker,
+      else: %{broker | durable: raise_durable(broker.durable, range_id, min(offset, next_offset(broker, range_id)))}
   end
 
   @doc """
