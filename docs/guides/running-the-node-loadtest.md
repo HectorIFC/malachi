@@ -50,6 +50,31 @@ node loadtest.js --scenario mixed --connections 20 --record-size 512 --keys 1000
 `--keys` sets key cardinality, which matters for anything that partitions by key. `--prepopulate`
 defaults to 10000 for the scenarios that need a backlog and to nothing for `produce`.
 
+## How it produces
+
+Producing goes through producer streams, as a NorthGuard client does and as the Elixir generator does.
+Each producing connection is a routing producer (`scripts/lib/producer.js`): it reads the cluster state and
+the topic's routes, hashes each record's key into the range that holds it, opens one stream per range on
+the broker leading that range's active segment, and sends its appends within the window the broker
+grants. The topic is created with a keyspace of 8 bits, as the Elixir generator creates it, and the record
+keys are `k0`, `k1`, and so on.
+
+- `--pipeline` (default 1) is how many appends a stream keeps in flight at most, under the window the
+  broker grants.
+- `--linger-ms` (default 0) is how long a range's records may wait to join one append; 0 sends as soon as
+  the window has room.
+- `--linger-bytes` is how many bytes of records one append takes at most, counted as the broker counts
+  them (value, key, and 22 bytes of framing a record), unless one batch alone is more: an append never
+  splits a batch. The default is one batch's worth, so with one range a batch is one append.
+
+In a closed loop an op is one acknowledged append, timed from its send, as in the Elixir generator: one
+batch with no lingering on a one-range topic, several batches when lingering joins them, and part of one
+when the topic has several ranges, since each range's share of a batch is its own append. In the open loop
+an op is one batch handed over, timed from its schedule to the acknowledgement of its last record. At the
+end of the run nothing more is sent and the appends still in flight are waited for, up to 15 seconds, and
+counted. The prepopulate of the backlog goes through a producer too, and fails the run if a step of it
+waits more than 30 seconds.
+
 ## Payloads
 
 By default every record value is one repeated byte, which is what every published series so far
@@ -185,11 +210,15 @@ anyone can check out.
 ## Reading the output
 
 `errors` is the first number to look at: a throughput figure taken from a run with errors is a
-measurement of the failure, not of the server. A stream run also reports `dropped` and `reconnects`: a
-stream connection that is lost is counted there rather than in `errors`, and reconnected and
-resubscribed within the window as the Elixir generator does, so a stream run with no errors can still
-have been losing connections. Outside the stream scenario those two fields are null, since a lost
-connection there is counted in `errors` instead, once for every request that fails on it. `--warmup` excludes the opening seconds from the
+measurement of the failure, not of the server. Appends the broker shed are counted apart, in
+`overloaded` and `rate_limited`, and what routing did over the run in `moved`, `redirects` and
+`route_refreshes`, with the same names as the Elixir generator's report; `ops` is the count of operations.
+`dropped` counts the connections a producer lost (an append in flight on one may or may not have landed,
+and is not an error) and, in a stream run, the stream connections lost, which `reconnects` counts the
+reconnects of: a stream connection that is lost is reconnected and resubscribed within the window as the
+Elixir generator does, so a run with no errors can still have been losing connections. `reconnects` is
+null outside the stream scenario, and `dropped` in the fetch and mixed scenarios, whose reads count a lost
+connection in `errors` instead, once for every request that fails on it. `--warmup` excludes the opening seconds from the
 statistics, which matters because the first connections pay for topic creation and JIT warmup.
 
 `--self-test` validates the latency histogram against a brute-force reference without a server, and

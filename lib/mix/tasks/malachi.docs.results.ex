@@ -324,8 +324,7 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
       {"Operations per second", number(result["ops_per_s"])},
       {"Data rate", suffix(result["mb_per_s"], " MB/s")},
       {"Records", number(result["records"])},
-      # The Node client calls it `operations` and the BEAM one `ops`; same measure, two spellings.
-      {"Operations", number(result["ops"] || result["operations"])},
+      {"Operations", number(result["ops"])},
       # The connection count at the sweep's peak: the load that drove this ceiling number.
       {"Peak connections", number(result["connections"])},
       # Absent on runs that did not sample them (skipped by table/1), so they never read as measured zeros.

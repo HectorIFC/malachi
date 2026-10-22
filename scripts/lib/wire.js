@@ -724,6 +724,14 @@ function encodeBatch(entries, codec, layout = 'plain') {
   return Buffer.concat([u8(codeIn(CODECS, codec)), u32(entries.length), u32(inflated.length), u32(payload.length), payload]);
 }
 
+// A batch's header, read without inflating it: its codec, record count, inflated size and payload size, as
+// Malachi.Wire.Batch.split/1 reads it. What a producer counts against its byte window, and what a reader
+// counts records by.
+function batchHeader(batch) {
+  const r = new Reader(batch);
+  return { codec: codeOf(CODECS, r.u8()), count: r.u32(), inflated_size: r.u32(), size: r.u32() };
+}
+
 function readBatch(r) {
   const start = r.pos;
   r.u8();
@@ -831,6 +839,7 @@ module.exports = {
   encodeCommitOffsetsReq,
   encodeBatch,
   decodeBatch,
+  batchHeader,
 };
 
 // Self-test: `node scripts/lib/wire.js`. No server needed. Guards the frame-length cap against

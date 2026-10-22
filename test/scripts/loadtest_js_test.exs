@@ -7,11 +7,13 @@ defmodule LoadtestJsTest do
   # Not async: the authentication counts would pick up other tests' connections.
   use ExUnit.Case, async: false
 
+  alias Malachi.BrokerServer
   alias Malachi.DataPlaneRouter
   alias Malachi.Loadtest.Payload
   alias Malachi.LogApi
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.LoadtestProbes
+  alias Malachi.Test.StreamsOn
   alias Malachi.Test.SubscribeResetStub
 
   @moduletag :tmp_dir
@@ -25,6 +27,8 @@ defmodule LoadtestJsTest do
   end
 
   setup do
+    # the generator produces on the stream keys, which the producer_streams flag serves
+    :ok = StreamsOn.setup(%{})
     probe = LoadtestProbes.watch_auth()
     on_exit(fn -> LoadtestProbes.stop_auth(probe) end)
     :ok
@@ -135,6 +139,164 @@ defmodule LoadtestJsTest do
     end
   end
 
+  describe "producing on producer streams" do
+    test "a closed loop counts every record the server stored, and no more, its pipeline drained at the end", ctx do
+      t = topic()
+      args = ~w(--scenario produce --json --connections 2 --batch 5 --pipeline 4 --duration 1 --topic) ++ [t]
+      # the streams the server holds open for the run, seen from its side: each worker's, under its label,
+      # asking the window its pipeline sets
+      watcher = Task.async(fn -> watch_streams(t, System.monotonic_time(:millisecond) + 4_000, MapSet.new()) end)
+
+      assert {output, 0} = run_js(ctx, args)
+      seen = Task.await(watcher, 10_000)
+      assert MapSet.new(seen, & &1.label) == MapSet.new(["malachi-loadtest-0", "malachi-loadtest-1"])
+      assert Enum.all?(seen, &(&1.window.appends == 4))
+      report = Jason.decode!(output)
+      assert %{"errors" => 0, "ops" => ops, "records" => records, "pipeline" => 4} = report
+      assert ops > 0 and records == ops * 5, "each acknowledged append is one op of one batch"
+      assert length(first_values(t, 1_000_000)) == records
+    end
+
+    test "an open loop counts each hand-over once all its records are acknowledged, timed from its schedule", ctx do
+      t = topic()
+      args = ~w(--scenario produce --json --connections 2 --batch 3 --rate 300 --duration 1 --topic) ++ [t]
+
+      assert {output, 0} = run_js(ctx, args)
+      report = Jason.decode!(output)
+      assert %{"mode" => "open-loop", "errors" => 0, "saturated" => false, "ops" => ops, "records" => records} = report
+      # each hand-over timed from its schedule to its last acknowledgement, a round trip at least
+      assert %{"latency_ms" => %{"coordinated_omission_corrected" => true, "min" => min, "p50" => p50}} = report
+      assert min > 0 and p50 >= min
+      assert ops > 100 and records == ops * 3
+      assert length(first_values(t, 1_000_000)) == records
+    end
+  end
+
+  describe "producing, what it counts" do
+    test "a refusal is counted apart when the broker shed it, as an error otherwise, and a lost append not at all",
+         ctx do
+      script = ~s"""
+      const { Stats } = require(#{inspect(@script)});
+      const s = new Stats();
+      for (const r of ['overloaded', 'overloaded', 'rate_limited', 'connection_lost', 'permission_denied']) s.refusal(r);
+      console.log(JSON.stringify({ overloaded: s.overloaded, rateLimited: s.rateLimited, errors: s.errors, reasons: s.errorReasons }));
+      """
+
+      assert {output, 0} = System.cmd(ctx.node, ["-e", script])
+
+      assert Jason.decode!(output) == %{
+               "overloaded" => 2,
+               "rateLimited" => 1,
+               "errors" => 1,
+               "reasons" => %{"permission_denied" => 1}
+             }
+    end
+
+    test "appends the publish quota refuses are counted in rate_limited, not in errors", ctx do
+      prior =
+        for key <- [:publish_rate_limit, :publish_rate_window_ms],
+            into: %{},
+            do: {key, Application.get_env(:malachi, key)}
+
+      on_exit(fn ->
+        for {key, value} <- prior,
+            do: if(value, do: Application.put_env(:malachi, key, value), else: Application.delete_env(:malachi, key))
+      end)
+
+      Application.put_env(:malachi, :publish_rate_limit, 20)
+      Application.put_env(:malachi, :publish_rate_window_ms, 60_000)
+      user = "ltjs_quota_#{System.unique_integer([:positive])}"
+      :ok = Malachi.Auth.add_user(user, "Quota-Pass-1!", [:produce, :consume, :admin])
+      on_exit(fn -> Malachi.Auth.remove_user(user) end)
+
+      args = ~w(--scenario produce --json --connections 1 --batch 5 --duration 1 --topic) ++ [topic()]
+      assert {output, 0} = run_js(ctx, args, user: user, pass: "Quota-Pass-1!")
+      report = Jason.decode!(output)
+      assert %{"errors" => 0, "rate_limited" => limited, "records" => records} = report
+      assert limited > 0 and records <= 20
+    end
+
+    test "what routing did over the run is reported: the routes read, and the move a split made", ctx do
+      t = topic()
+      parent = self()
+
+      spawn_link(fn ->
+        Process.sleep(600)
+        send(parent, {:split, BrokerServer.split_range(DataPlaneRouter.shard_for(t), {t, 0})})
+      end)
+
+      args = ~w(--scenario produce --json --connections 2 --duration 2 --topic) ++ [t]
+      assert {output, 0} = run_js(ctx, args)
+      assert_receive {:split, {:ok, _left, _right}}, 5_000
+      report = Jason.decode!(output)
+      assert %{"errors" => 0, "route_refreshes" => refreshes, "moved" => moved, "redirects" => redirects} = report
+      assert refreshes >= 2, "each producer read its routes, and again after the move"
+      assert moved + redirects >= 1
+    end
+
+    test "an open loop of mixed with an odd number of workers gives each its own op", ctx do
+      args = ~w(--scenario mixed --json --connections 3 --rate 100 --duration 1 --prepopulate 20 --topic) ++ [topic()]
+      assert {output, 0} = run_js(ctx, args, stderr: false)
+      assert %{"errors" => 0, "ops" => ops} = Jason.decode!(output)
+      assert ops > 50
+    end
+  end
+
+  describe "against a broker that stalls or refuses" do
+    @fake Path.expand("../../scripts/lib/testing/run_against_fake.js", __DIR__)
+
+    defp against_fake(ctx, policy, args) do
+      {output, 0} = System.cmd(ctx.node, [@fake, Jason.encode!(policy), "--" | args])
+      Jason.decode!(output)
+    end
+
+    test "a prepopulate the broker refuses fails the run, naming the refusal", ctx do
+      run =
+        against_fake(
+          ctx,
+          %{open: %{refuse: "permission_denied"}},
+          ~w(--scenario fetch --prepopulate 10 --duration 1 --json)
+        )
+
+      assert run["code"] == 1
+      assert run["stderr"] =~ "could not prepopulate"
+      assert run["stderr"] =~ "permission_denied"
+    end
+
+    @tag timeout: 120_000
+    test "a prepopulate the broker never answers fails after one wait, not one wait per chunk", ctx do
+      # twenty chunks of 1000 records against a window of 16 appends: the seventeenth waits for room, and that
+      # one wait of 30 seconds is the bound; one wait per chunk left would be two minutes
+      run = against_fake(ctx, %{append: "silent"}, ~w(--scenario fetch --prepopulate 20000 --duration 1 --json))
+      assert run["code"] == 1
+      assert run["stderr"] =~ "prepopulate_timeout"
+      assert run["elapsedMs"] < 60_000
+    end
+
+    @tag timeout: 120_000
+    test "an open loop whose appends are never answered ends 15 seconds after its window, and reports", ctx do
+      run = against_fake(ctx, %{append: "silent"}, ~w(--scenario produce --rate 50 --duration 1 --json))
+      assert run["code"] == 0
+      assert %{"ops" => 0, "mode" => "open-loop"} = Jason.decode!(run["stdout"])
+      assert run["elapsedMs"] < 25_000
+    end
+  end
+
+  # Every open producer stream of `topic` the server lists until `deadline`, polled.
+  defp watch_streams(topic, deadline, seen) do
+    %{streams: streams} = Malachi.ProducerDirectory.list(2_000)
+
+    seen =
+      Enum.reduce(streams, seen, fn stream, acc -> if stream.topic == topic, do: MapSet.put(acc, stream), else: acc end)
+
+    if System.monotonic_time(:millisecond) >= deadline do
+      seen |> Enum.uniq_by(&{&1.label, &1.stream_id}) |> Enum.map(&Map.take(&1, [:label, :window]))
+    else
+      Process.sleep(50)
+      watch_streams(topic, deadline, seen)
+    end
+  end
+
   describe "the flush regime" do
     test "the report records the batch size and record size it ran with, as fields of their own", ctx do
       args = ~w(--scenario produce --json --connections 1 --duration 1 --batch 7 --record-size 100 --topic) ++ [topic()]
@@ -153,7 +315,12 @@ defmodule LoadtestJsTest do
                 "record_size" => 256,
                 "payload" => "constant",
                 "payload_seed" => nil,
-                "payload_pool_values" => nil
+                "payload_pool_values" => nil,
+                "pipeline" => 1,
+                "linger_ms" => 0,
+                # one batch's worth, counted as the producer counts a record: 256 value bytes, the longest
+                # key ("k999"), and 22 bytes of framing
+                "linger_bytes" => 282
               }} =
                Jason.decode(defaults)
     end
@@ -166,14 +333,17 @@ defmodule LoadtestJsTest do
         "batch" => 3,
         "record_size" => 160,
         "payload" => "json",
-        "payload_seed" => 7
+        "payload_seed" => 7,
+        "pipeline" => 2,
+        "linger_ms" => 5,
+        "linger_bytes" => 4096
       }
 
       {node_output, 0} =
         run_js(
           ctx,
           ~w(--scenario produce --json --connections 2 --batch 3 --record-size 160 --payload json) ++
-            ~w(--payload-seed 7 --duration 1 --topic) ++ [topic()]
+            ~w(--payload-seed 7 --pipeline 2 --linger-ms 5 --linger-bytes 4096 --duration 1 --topic) ++ [topic()]
         )
 
       elixir_report =
@@ -188,6 +358,9 @@ defmodule LoadtestJsTest do
             record_size: 160,
             payload: :json,
             payload_seed: 7,
+            pipeline: 2,
+            linger_ms: 5,
+            linger_bytes: 4096,
             duration: 1,
             warmup: 0,
             topic: topic(),
@@ -201,7 +374,7 @@ defmodule LoadtestJsTest do
       assert regime.(elixir_report) == flags
 
       # Derived from the flags by the same rule on both sides, so it must agree too.
-      pool = Payload.pool_size(160, 3, 2, 1)
+      pool = Payload.pool_size(160, 3, 2, 2)
       assert %{"payload_pool_values" => ^pool} = Jason.decode!(node_output)
       assert %{"payload_pool_values" => ^pool} = Jason.decode!(elixir_report)
 
@@ -494,11 +667,17 @@ defmodule LoadtestJsTest do
       assert %{"dropped" => 0, "reconnects" => 0, "errors" => 0} = Jason.decode!(output)
     end
 
-    test "outside the stream scenario the two counters are null, since only the stream driver counts them", ctx do
-      args = ~w(--scenario produce --json --connections 1 --duration 1 --topic) ++ [topic()]
+    test "outside the stream scenario reconnects is null; dropped counts the producers' drops, null for fetch", ctx do
+      produce = ~w(--scenario produce --json --connections 1 --duration 1 --topic) ++ [topic()]
+      assert {output, 0} = run_js(ctx, produce)
+      assert %{"dropped" => 0, "reconnects" => nil} = Jason.decode!(output)
 
-      assert {output, 0} = run_js(ctx, args)
-      assert %{"dropped" => nil, "reconnects" => nil} = Jason.decode!(output)
+      # the reads of fetch and of mixed count a lost connection in errors, so dropped claims no zero there
+      for scenario <- ~w(fetch mixed) do
+        args = ~w(--scenario #{scenario} --json --connections 2 --duration 1 --prepopulate 10 --topic) ++ [topic()]
+        assert {output, 0} = run_js(ctx, args)
+        assert %{"dropped" => nil, "reconnects" => nil} = Jason.decode!(output)
+      end
     end
   end
 
@@ -524,8 +703,9 @@ defmodule LoadtestJsTest do
       args = ~w(--scenario produce --json --connections 4 --duration 1 --warmup 1 --topic) ++ [topic()]
 
       assert {_output, 0} = run_js(ctx, args)
-      # The topic-creating admin connection, then one per worker.
-      assert length(LoadtestProbes.successful_auths()) == 5
+      # The topic-creating admin connection, then each worker's producer: its metadata connection and the
+      # connection to the broker leading the range, as the Elixir producer opens them.
+      assert length(LoadtestProbes.successful_auths()) == 1 + 4 * 2
     end
 
     test "a mixed run keeps its connections too, since it subscribes to nothing", ctx do
@@ -533,8 +713,8 @@ defmodule LoadtestJsTest do
         ~w(--scenario mixed --json --connections 2 --duration 1 --warmup 1 --prepopulate 50 --topic) ++ [topic()]
 
       assert {_output, 0} = run_js(ctx, args)
-      # Admin, the prepopulating connection, then one per worker.
-      assert length(LoadtestProbes.successful_auths()) == 4
+      # Admin, the prepopulating producer (metadata and broker), the producing worker's two, the reader's one.
+      assert length(LoadtestProbes.successful_auths()) == 1 + 2 + 2 + 1
     end
 
     test "a stream run still reconnects after the warmup, since a subscription ends only with its socket", ctx do
@@ -542,15 +722,16 @@ defmodule LoadtestJsTest do
         ~w(--scenario stream --json --connections 2 --duration 1 --warmup 1 --prepopulate 50 --topic) ++ [topic()]
 
       assert {_output, 0} = run_js(ctx, args)
-      # Admin, the prepopulating connection, then every worker twice.
-      assert length(LoadtestProbes.successful_auths()) == 6
+      # Admin, the prepopulating producer's two, then every worker twice.
+      assert length(LoadtestProbes.successful_auths()) == 1 + 2 + 2 * 2
     end
 
     test "without a warmup nothing reconnects in any scenario", ctx do
       args = ~w(--scenario stream --json --connections 2 --duration 1 --prepopulate 50 --topic) ++ [topic()]
 
       assert {_output, 0} = run_js(ctx, args)
-      assert length(LoadtestProbes.successful_auths()) == 4
+      # Admin, the prepopulating producer's two, then each worker once.
+      assert length(LoadtestProbes.successful_auths()) == 1 + 2 + 2
     end
   end
 end
