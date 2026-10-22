@@ -98,6 +98,7 @@ class FakeBroker {
     this.window = { appends: 64, bytes: 16777216 };
     this.extraBrokers = []; // further brokers the cluster state lists
     this.clusterStateAnswer = null; // a [code, payload] to answer cluster_state with instead
+    this.authDelayMs = 0; // how long an authentication waits for its answer
   }
 
   async start() {
@@ -182,7 +183,10 @@ class FakeBroker {
   _request(socket, apiKey, corr, payload) {
     const reply = (code, body) => socket.write(responseFrame(corr, code, body));
     reply.socket = socket;
-    if (apiKey === wire.API.auth) return reply(wire.OK, str('token'));
+    if (apiKey === wire.API.auth) {
+      if (this.authDelayMs > 0) return setTimeout(() => reply(wire.OK, str('token')), this.authDelayMs);
+      return reply(wire.OK, str('token'));
+    }
     if (apiKey === wire.API.clusterState) {
       if (this.clusterStateAnswer) return reply(...this.clusterStateAnswer);
       const brokers = [{ id: this.id, host: '127.0.0.1', port: this.port, status: 'alive' }, ...this.extraBrokers];

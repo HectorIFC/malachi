@@ -405,13 +405,17 @@ check('a range stopped before subscribe was called is still its refusal, not an 
 check('a closed consumer opens nothing more, even from a flush already on its way', () =>
   withBroker(
     async (broker, make) => {
+      // the flush is waiting on its first connection when the consumer closes: that connection is closed
+      // as it comes, and nothing is opened on the ranges
+      broker.authDelayMs = 150;
       const c = make((router) => new Consumer(router, conn));
-      await c.prepare('t');
       const starting = c.start('t');
+      await tick(50);
       await c.close();
       await starting;
-      await tick(100);
-      assert.ok(broker.consumes.length <= 1, `opened ${broker.consumes.length} after close`);
+      await tick(300);
+      assert.strictEqual(broker.consumes.length, 0, `opened ${broker.consumes.length} after close`);
+      assert.ok(broker.sockets.every((s) => s.destroyed || s.readyState !== 'open'), 'no connection left open');
     },
     [
       [1, 0, 8, 'self'],
