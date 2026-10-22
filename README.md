@@ -832,7 +832,7 @@ group that only uses these keys never meets. A generation carries the group's ep
 plane raises each time a coordinator opens the group; a commit at an epoch another coordinator has since
 superseded is refused, and that coordinator opens the group again, so its members learn a new generation
 on their next heartbeat. A connection's commits land in the order it sent them. The group keys need the control
-plane at machine version 7 and answer `unsupported` below it. `leave_group` (7) takes a member out;
+plane at machine version 8 and answer `unsupported` below it. `leave_group` (7) takes a member out;
 closing a consume stream does not.
 
 Records on the served keys carry **no offset**: position travels only in the opaque cursor. The stream
