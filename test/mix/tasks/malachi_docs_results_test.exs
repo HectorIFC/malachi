@@ -138,9 +138,9 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       refute body =~ "| Maximum |"
     end
 
-    test "the backpressure section appears only for a run that counted it", context do
-      # A Node run outside the stream scenario writes the two counters it does not measure as null.
-      publish(context, "loadtest-node.json", loadtest_result(%{"dropped" => nil, "reconnects" => nil}))
+    test "the backpressure section appears only for a run that counted it, with the rows it carries", context do
+      # A Node run counts the drops and the sheds, and has no reconnects.
+      publish(context, "loadtest-node.json", loadtest_result(%{"dropped" => 1, "overloaded" => 0, "rate_limited" => 0}))
 
       publish(
         context,
@@ -150,7 +150,10 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
 
       run(context)
 
-      refute page(context, "loadtest-node-results.md") =~ "## Backpressure"
+      node = page(context, "loadtest-node-results.md")
+      assert node =~ "## Backpressure"
+      assert node =~ "| Dropped connections | 1 |"
+      refute node =~ "Reconnects"
 
       elixir = page(context, "loadtest-elixir-results.md")
       assert elixir =~ "## Backpressure"
@@ -158,6 +161,17 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       # the two refusals are reported apart: saturation and quota mean different things to an operator
       assert elixir =~ "| Quota-refused produces | 2 |"
       assert elixir =~ "| Reconnects | 1 |"
+    end
+
+    test "a result that counted none of the backpressure has no section for it", context do
+      publish(
+        context,
+        "loadtest-node.json",
+        loadtest_result(%{"dropped" => nil, "overloaded" => nil, "rate_limited" => nil})
+      )
+
+      run(context)
+      refute page(context, "loadtest-node-results.md") =~ "## Backpressure"
     end
 
     test "a result without a meta block still renders", context do

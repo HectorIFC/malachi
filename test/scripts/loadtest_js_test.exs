@@ -17,7 +17,6 @@ defmodule LoadtestJsTest do
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Test.PollingHelper
   alias Malachi.Test.StreamsOn
-  alias Malachi.Test.SubscribeResetStub
 
   @moduletag :tmp_dir
 
@@ -176,6 +175,35 @@ defmodule LoadtestJsTest do
   end
 
   describe "producing, what it counts" do
+    test "an open-loop fetch counts a page as an op, a refusal under its reason, and an unserved request not at all",
+         ctx do
+      script = ~s"""
+      const { Stats, countOpenFetch } = require(#{inspect(@script)});
+      const s = new Stats();
+      const answers = [
+        { kind: 'ok', count: 3, latencyUs: 1 },
+        { kind: 'error', reason: 'rate_limited' },
+        { kind: 'error', reason: 'permission_denied' },
+        { kind: 'error', reason: 'connect_failed' },
+        { kind: 'dropped' }, { kind: 'held', ms: 10 }, { kind: 'redirected' }, { kind: 'closed' },
+      ];
+      for (const a of answers) countOpenFetch(s, a, 7, 100);
+      console.log(JSON.stringify({ ops: s.count, records: s.records, bytes: s.bytes, rateLimited: s.rateLimited, errors: s.errors, reasons: s.errorReasons, max: s.max }));
+      """
+
+      assert {output, 0} = System.cmd(ctx.node, ["-e", script])
+
+      assert Jason.decode!(output) == %{
+               "ops" => 1,
+               "records" => 3,
+               "bytes" => 300,
+               "rateLimited" => 1,
+               "errors" => 1,
+               "reasons" => %{"permission_denied" => 1},
+               "max" => 7
+             }
+    end
+
     test "a refusal is counted apart when the broker shed it, as an error otherwise, and a lost append not at all",
          ctx do
       script = ~s"""
@@ -245,6 +273,41 @@ defmodule LoadtestJsTest do
       assert moved + redirects >= 1
     end
 
+    test "a fetch_range the subscribe quota sheds is counted in rate_limited, not in errors", ctx do
+      prior =
+        for key <- [:subscribe_rate_limit, :subscribe_rate_window_ms],
+            into: %{},
+            do: {key, Application.get_env(:malachi, key)}
+
+      on_exit(fn ->
+        for {key, value} <- prior,
+            do: if(value, do: Application.put_env(:malachi, key, value), else: Application.delete_env(:malachi, key))
+      end)
+
+      Application.put_env(:malachi, :subscribe_rate_limit, 10)
+      Application.put_env(:malachi, :subscribe_rate_window_ms, 60_000)
+
+      # inside one window of the limiter's clock, as the publish quota test runs
+      report =
+        within_one_window(60_000, fn ->
+          user = quota_user("ltjs_fquota")
+          args = ~w(--scenario fetch --json --connections 1 --prepopulate 10 --duration 1 --topic) ++ [topic()]
+          assert {output, 0} = run_js(ctx, args, user: user, pass: "Quota-Pass-1!")
+          Jason.decode!(output)
+        end)
+
+      assert %{"errors" => 0, "rate_limited" => limited, "ops" => ops} = report
+      assert limited > 0 and ops <= 10
+    end
+
+    test "an open loop on fetch queues each fetcher's fetches, and counts them", ctx do
+      args = ~w(--scenario fetch --json --connections 2 --rate 200 --prepopulate 50 --duration 1 --topic) ++ [topic()]
+      assert {output, 0} = run_js(ctx, args)
+      report = Jason.decode!(output)
+      assert %{"mode" => "open-loop", "errors" => 0, "saturated" => false, "ops" => ops, "records" => records} = report
+      assert ops > 100 and records > 0
+    end
+
     test "an open loop of mixed with an odd number of workers gives each its own op", ctx do
       args = ~w(--scenario mixed --json --connections 3 --rate 100 --duration 1 --prepopulate 20 --topic) ++ [topic()]
       assert {output, 0} = run_js(ctx, args, stderr: false)
@@ -282,6 +345,15 @@ defmodule LoadtestJsTest do
       assert run["code"] == 1
       assert run["stderr"] =~ "prepopulate_timeout"
       assert run["elapsedMs"] < 60_000
+    end
+
+    @tag timeout: 120_000
+    test "an open loop whose fetches are never answered reports and exits, opening nothing after it closed", ctx do
+      run = against_fake(ctx, %{fetch: "silent"}, ~w(--scenario fetch --rate 20 --prepopulate 5 --duration 1 --json))
+      assert run["code"] == 0
+      assert %{"mode" => "open-loop", "ops" => 0} = Jason.decode!(run["stdout"])
+      # the 15 second drain, then out: no queued fetch reconnects after the readers closed
+      assert run["elapsedMs"] < 25_000
     end
 
     @tag timeout: 120_000
@@ -611,107 +683,53 @@ defmodule LoadtestJsTest do
     {user, pass}
   end
 
-  describe "dropped stream connections" do
-    # Issue #218, mirrored from the Elixir generator: a stream connection lost before or after its
-    # subscribe went out used to end the worker, counted in `errors` or (when the socket had already
-    # closed) not at all, where the Elixir generator counts a drop and resubscribes.
+  describe "dropped connections" do
+    test "a consume stream whose connection drops is counted, and reopened from where it read", ctx do
+      run =
+        against_fake(
+          ctx,
+          %{consume: %{dropAfterMs: 300}},
+          ~w(--scenario stream --prepopulate 50 --connections 1 --duration 2 --json)
+        )
 
-    test "a stream worker whose subscribe send fails counts the drop and resubscribes", ctx do
-      report = stream_on_reset_stub(ctx, :reconnect)
-
-      assert report["dropped"] == 1, "the failed subscribe was not counted as a drop"
-      assert report["reconnects"] == 1, "the worker should reconnect and resubscribe, not end"
-      assert report["errors"] == 0, "a transport failure is a drop, not a server error"
-      assert report["error_reasons"] == %{}
+      assert run["code"] == 0
+      report = Jason.decode!(run["stdout"])
+      assert %{"dropped" => 1, "errors" => 0, "records" => 50} = report
+      # opened from the start, then again from past the 50 records it read
+      assert run["consumes"] == ["earliest", %{"position" => [0, 50]}]
     end
 
-    test "a stream worker that cannot reconnect after a failed subscribe gives up without crashing", ctx do
-      report = stream_on_reset_stub(ctx, :give_up)
-
-      assert report["dropped"] == 1, "the failed subscribe was not counted as a drop"
-      assert report["reconnects"] == 0
-      assert report["errors"] == 0
+    test "a consume stream refused during the warmup is counted in the report all the same", ctx do
+      args = ~w(--scenario stream --prepopulate 0 --connections 2 --duration 1 --warmup 1 --json)
+      run = against_fake(ctx, %{consume: %{refuse: "permission_denied"}}, args)
+      assert run["code"] == 0
+      assert %{"errors" => 2, "error_reasons" => %{"permission_denied" => 2}} = Jason.decode!(run["stdout"])
     end
 
-    test "a stream connection lost after its subscribe went out counts the drop and resubscribes", ctx do
-      # A FIN reaches the client as 'close' and a reset as 'error', so both of the client's paths for a
-      # connection lost on a live subscription are covered.
-      for how <- [:close, :reset] do
-        report = stream_on_reset_stub(ctx, {:mid_stream, how}, 1)
+    test "a refused consume stream stays an error under its reason, not a drop", ctx do
+      run =
+        against_fake(
+          ctx,
+          %{consume: %{refuse: "permission_denied"}},
+          ~w(--scenario stream --prepopulate 0 --connections 2 --duration 1 --json)
+        )
 
-        assert report["dropped"] == 1, "#{how}: the lost stream connection was not counted as a drop"
-        assert report["reconnects"] == 1, "#{how}: the worker should reconnect and resubscribe, not end"
-        assert report["errors"] == 0, "#{how}: a transport failure is a drop, not a server error"
-      end
-    end
-
-    test "a reconnect that hangs at the deadline is abandoned instead of stretching the run", ctx do
-      # The rates divide by the time the run took, so waiting out a stalled authentication (30s) would report
-      # a fraction of the real rate and count pushes that arrived after the window.
-      report = stream_on_reset_stub(ctx, :stall_reconnect)
-
-      assert report["dropped"] == 1
-      assert report["reconnects"] == 0
-      assert report["duration_s"] < 1.5, "the run waited on the stalled reconnect past its 1s window"
-    end
-
-    # Without the fix this never finishes on its own: the refused reconnects keep sockets open, the process
-    # outlives its report, and run_js waits on it until the test times out.
-    @tag timeout: 30_000
-    test "a reconnect whose authentication is refused leaves no socket holding the process open", ctx do
-      report = stream_on_reset_stub(ctx, :refuse_reconnect_auth)
-
-      assert report["dropped"] == 1
-      assert report["reconnects"] == 0
-      assert report["errors"] == 0, "a refused reconnect is not a stream error"
-    end
-
-    test "a refused subscription stays an error under its reason, not a drop", ctx do
-      {user, pass} = add_user([:produce])
-      args = ~w(--scenario stream --json --connections 2 --duration 1 --prepopulate 0 --topic) ++ [topic()]
-
-      assert {output, 0} = run_js(ctx, args, user: user, pass: pass)
-      report = Jason.decode!(output)
-
-      assert report["errors"] == 2, "each worker subscribed once and each refusal counts once"
+      assert run["code"] == 0
+      report = Jason.decode!(run["stdout"])
+      assert report["errors"] == 2, "each worker's range refused once, and not opened again"
       assert report["error_reasons"] == %{"permission_denied" => 2}
       assert report["dropped"] == 0
-      assert report["reconnects"] == 0
+      refute Map.has_key?(report, "reconnects")
     end
 
-    test "a healthy stream run that stays idle reports no drop", ctx do
-      args = ~w(--scenario stream --json --connections 2 --duration 1 --prepopulate 0 --topic) ++ [topic()]
-
-      assert {output, 0} = run_js(ctx, args)
-      assert %{"dropped" => 0, "reconnects" => 0, "errors" => 0} = Jason.decode!(output)
-    end
-
-    test "outside the stream scenario reconnects is null; dropped counts the producers' drops, null for fetch", ctx do
-      produce = ~w(--scenario produce --json --connections 1 --duration 1 --topic) ++ [topic()]
-      assert {output, 0} = run_js(ctx, produce)
-      assert %{"dropped" => 0, "reconnects" => nil} = Jason.decode!(output)
-
-      # the reads of fetch and of mixed count a lost connection in errors, so dropped claims no zero there
-      for scenario <- ~w(fetch mixed) do
+    test "a healthy run of every scenario reports no drop, as a number", ctx do
+      for scenario <- ~w(produce fetch stream mixed) do
         args = ~w(--scenario #{scenario} --json --connections 2 --duration 1 --prepopulate 10 --topic) ++ [topic()]
         assert {output, 0} = run_js(ctx, args)
-        assert %{"dropped" => nil, "reconnects" => nil} = Jason.decode!(output)
+        assert %{"dropped" => 0, "errors" => 0} = report = Jason.decode!(output)
+        refute Map.has_key?(report, "reconnects")
       end
     end
-  end
-
-  # A stream run against Malachi.Test.SubscribeResetStub, returning the decoded report. The connections open
-  # one at a time and nothing is prepopulated, which is what the stub's ordering relies on: this generator
-  # prepopulates on a connection of its own, which would take the stub's second place.
-  defp stream_on_reset_stub(ctx, mode, connections \\ 2) do
-    args =
-      ~w(--scenario stream --json --connections #{connections} --connect-strategy bounded --connect-concurrency 1) ++
-        ~w(--duration 1 --warmup 0 --prepopulate 0 --topic subscribe_reset)
-
-    SubscribeResetStub.with_stub(mode, fn port ->
-      assert {output, 0} = run_js(ctx, args, port: port)
-      Jason.decode!(output)
-    end)
   end
 
   describe "connections across the warmup" do
@@ -732,16 +750,17 @@ defmodule LoadtestJsTest do
         ~w(--scenario mixed --json --connections 2 --duration 1 --warmup 1 --prepopulate 50 --topic) ++ [topic()]
 
       assert {_output, 0} = run_js(ctx, args)
-      # Admin, the prepopulating producer (metadata and broker), the producing worker's two, the reader's one.
-      assert length(LoadtestProbes.successful_auths()) == 1 + 2 + 2 + 1
+      # Admin, the prepopulating producer (metadata and broker), then each worker's two: the producer's and
+      # the fetcher's.
+      assert length(LoadtestProbes.successful_auths()) == 1 + 2 + 2 + 2
     end
 
-    test "a stream run still reconnects after the warmup, since a subscription ends only with its socket", ctx do
+    test "a stream run keeps its consumers through the warmup too, reading on the same streams", ctx do
       args =
         ~w(--scenario stream --json --connections 2 --duration 1 --warmup 1 --prepopulate 50 --topic) ++ [topic()]
 
       assert {_output, 0} = run_js(ctx, args)
-      # Admin, the prepopulating producer's two, then every worker twice.
+      # Admin, the prepopulating producer's two, then each consumer's two (metadata and broker), once.
       assert length(LoadtestProbes.successful_auths()) == 1 + 2 + 2 * 2
     end
 
@@ -749,8 +768,8 @@ defmodule LoadtestJsTest do
       args = ~w(--scenario stream --json --connections 2 --duration 1 --prepopulate 50 --topic) ++ [topic()]
 
       assert {_output, 0} = run_js(ctx, args)
-      # Admin, the prepopulating producer's two, then each worker once.
-      assert length(LoadtestProbes.successful_auths()) == 1 + 2 + 2
+      # Admin, the prepopulating producer's two, then each consumer's two.
+      assert length(LoadtestProbes.successful_auths()) == 1 + 2 + 2 * 2
     end
   end
 end

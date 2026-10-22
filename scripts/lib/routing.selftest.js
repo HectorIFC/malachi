@@ -246,6 +246,15 @@ async function selfTest() {
     assert.strictEqual(one.closed, 1);
   });
 
+  await check('closed links connect to nothing more, metadata included', async () => {
+    const links = stubLinks(() => fakeClient());
+    await links.closeAll();
+    assert.strictEqual(await links.connection({ host: 'x', port: 1 }), null);
+    assert.strictEqual(await links._control(), null);
+    assert.strictEqual(links.attempts.size, 0, 'no connect was tried');
+    assert.strictEqual(links.stats.connect_failures, 0, 'and none counted as failed');
+  });
+
   await check('a topic whose routes failed is asked again once its backoff ends, not before', async () => {
     const links = new Links(routerWith([], []));
     let reads = 0;
@@ -290,6 +299,23 @@ async function selfTest() {
       const err = await client.clusterState().then(() => null, (e) => e);
       assert.ok(err && err.timeout === true && !err.transport);
       client.close();
+    } finally {
+      server.close();
+    }
+  });
+
+  await check('a deliberate close rejects what is pending at once and leaves no timer behind', async () => {
+    const server = await fakeServer(() => null);
+    try {
+      const client = await new MalachiClient({ host: '127.0.0.1', port: server.port, timeout: 60000 }).connect('u', 'p');
+      const pending = client.clusterState().then(() => null, (e) => e);
+      await tick();
+      const started = Date.now();
+      client.close();
+      const err = await pending;
+      assert.ok(err && err.transport, 'rejected as a closed connection');
+      assert.ok(Date.now() - started < 1000, 'at once, not at its 60 s timeout');
+      assert.strictEqual(client.pending.size, 0);
     } finally {
       server.close();
     }

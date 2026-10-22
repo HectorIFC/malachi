@@ -1,10 +1,12 @@
 'use strict';
 
 /**
- * A broker for the Node client's tests, in their own process: it answers `cluster_state`, `topic_routes`,
- * `open_stream` and `append` (keys 24 to 27) as the server does, by a policy the test sets, and lets the
- * test push what a server would (an `append_ack`, a `moved`, an error frame under a stream's correlation
- * id). The Node twin of test/support/stream_stub.ex. Never used outside tests.
+ * A broker for the Node client's tests, in their own process: it answers `create_topic`, `cluster_state`,
+ * `topic_routes`, `open_stream`, `append`, `open_consume`, `consume_ack` and `fetch_range` as the server
+ * does, by a policy the test sets, and lets the test push what a server would (an `append_ack`, a `moved`,
+ * an error frame under a stream's correlation id). What is appended is kept per range, in one source, and
+ * read back by `fetch_range` and the consume streams. The Node twin of test/support/stream_stub.ex. Never
+ * used outside tests.
  */
 
 const net = require('net');
@@ -82,6 +84,12 @@ class FakeBroker {
     this.opens = []; // every open asked: { topic, range, routes_version, window_appends, label }
     this.appends = []; // every append taken: { stream, sequence, values }
     this.unknownStream = 0; // appends answered unknown_stream: to a stream that moved, or one never opened
+    this.log = new Map(); // `${topic}/${range}` -> the values appended there, in order
+    this.consumes = []; // every consume opened: { id, topic, range, start }
+    this.acks = []; // every consume_ack: { stream, position, window }
+    // what an open_consume is answered: 'ok', { refuse: reason }, or { dropAfterMs } (answered, its first
+    // page pushed, and the connection closed that many ms later, once)
+    this.consumePolicy = () => 'ok';
     // what an open is answered: 'ok', { refuse: reason }, 'silent', or 'moved' (answered, and told it moved
     // in the same write, as a seal right behind the open would)
     this.openPolicy = () => 'ok';
@@ -173,6 +181,7 @@ class FakeBroker {
 
   _request(socket, apiKey, corr, payload) {
     const reply = (code, body) => socket.write(responseFrame(corr, code, body));
+    reply.socket = socket;
     if (apiKey === wire.API.auth) return reply(wire.OK, str('token'));
     if (apiKey === wire.API.clusterState) {
       if (this.clusterStateAnswer) return reply(...this.clusterStateAnswer);
@@ -218,6 +227,16 @@ class FakeBroker {
       return reply(wire.OK, Buffer.alloc(0));
     }
     if (apiKey === wire.API.openStream) return this._open(socket, corr, payload, reply);
+    if (apiKey === wire.API.openConsume) return this._openConsume(socket, corr, payload, reply);
+    if (apiKey === wire.API.fetchRange) return this._fetchRange(payload, reply);
+    if (apiKey === wire.API.consumeAck) {
+      const r = new Reader(payload);
+      const stream = r.u32();
+      const position = [r.buf.readUInt16BE(r.pos), Number(r.buf.readBigUInt64BE(r.pos + 2))];
+      r.pos += 10;
+      this.acks.push({ stream, position, window: r.u32() });
+      return;
+    }
     if (apiKey === wire.API.append) return this._append(corr, payload, reply);
     return reply(wire.ERROR, str('unsupported'));
   }
@@ -262,6 +281,8 @@ class FakeBroker {
     }
     const values = wire.decodeBatch(r.rest(), { maxInflatedBytes: 1 << 24 }).map((e) => e.record.value.toString('utf8'));
     this.appends.push({ stream: id, sequence, values });
+    const logKey = `${s.topic}/${s.range}`;
+    this.log.set(logKey, [...(this.log.get(logKey) || []), ...values]);
     const policy = this.appendPolicy({ stream: id, sequence, values });
     if (policy === 'silent') return;
     if (policy.refuse) return reply(wire.ERROR, str(policy.refuse));
@@ -269,5 +290,89 @@ class FakeBroker {
     this.ack(id, s.expected);
   }
 }
+
+// A start as Malachi.Wire encodes it: 0 earliest, 1 latest, 2 a position (source u16, offset u64).
+function readStart(r) {
+  const kind = r.u8();
+  if (kind === 0) return 'earliest';
+  if (kind === 1) return 'latest';
+  const position = [r.buf.readUInt16BE(r.pos), Number(r.buf.readBigUInt64BE(r.pos + 2))];
+  r.pos += 10;
+  return { position };
+}
+
+// A page of `values` from `offset` on, in the one source this broker keeps.
+function page(values, offset, max) {
+  const taken = values.slice(offset, offset + max);
+  const entries = taken.map((value, i) => ({ position: [0, offset + i], tombstone: false, record: { key: null, value, timestamp: 1 } }));
+  const next = Buffer.concat([u16(0), u64(offset + taken.length)]);
+  return Buffer.concat([next, u32(0), u64(values.length - offset - taken.length), u64(0), u8(0), wire.encodeBatch(entries, 'none', 'positioned')]);
+}
+
+const offsetOf = (start, values) => (start === 'earliest' ? 0 : start === 'latest' ? values.length : start.position[1]);
+
+FakeBroker.prototype._openConsume = function (socket, corr, payload, reply) {
+  const r = new Reader(payload);
+  const topic = r.str();
+  const range = r.u32();
+  r.u64();
+  const start = readStart(r);
+  r.u32();
+  const max = r.u32();
+  const id = this.nextStreamId++;
+  this.consumes.push({ id, topic, range, start });
+  const policy = this.consumePolicy({ topic, range, start });
+  if (policy === 'silent') return;
+  if (policy.refuse) return reply(wire.ERROR, str(policy.refuse));
+  // kept as a stream, so `moved` and `refuse` reach it
+  this.streams.set(id, { id, corr, socket, topic, range, expected: 0, moved: false, consume: true });
+  const values = this.log.get(`${topic}/${range}`) || [];
+  const offset = offsetOf(start, values);
+  // the answer and its first page in one write, so the client reads them together, as it can from a server
+  const answer = responseFrame(corr, wire.OK, Buffer.concat([u32(id), u16(0), u64(offset)]));
+  const first = offset < values.length ? [responseFrame(corr, wire.OK, Buffer.concat([u8(PUSH_KINDS.records), u32(id), page(values, offset, max)]))] : [];
+  socket.write(Buffer.concat([answer, ...first]));
+  if (policy.dropAfterMs !== undefined) {
+    this.consumePolicy = () => 'ok';
+    setTimeout(() => socket.destroy(), policy.dropAfterMs);
+  }
+};
+
+// Pushes a records page to consume stream `id`: the range's values from `offset`, at most `max`, the first
+// `skip` of them ones the reader already had.
+FakeBroker.prototype.pushRecords = function (id, offset, max = 1000, skip = 0) {
+  const s = this.streams.get(id);
+  const values = this.log.get(`${s.topic}/${s.range}`) || [];
+  const body = page(values, offset, max);
+  // the skip field sits after the next position (u16 + u64)
+  body.writeUInt32BE(skip, 10);
+  s.socket.write(responseFrame(s.corr, wire.OK, Buffer.concat([u8(PUSH_KINDS.records), u32(id), body])));
+};
+
+// Appends `values` to `topic`'s `range` directly, as records another producer wrote.
+FakeBroker.prototype.write = function (topic, range, values) {
+  const key = `${topic}/${range}`;
+  this.log.set(key, [...(this.log.get(key) || []), ...values]);
+};
+
+FakeBroker.prototype._fetchRange = function (payload, reply) {
+  const r = new Reader(payload);
+  const topic = r.str();
+  const range = r.u32();
+  r.u64();
+  const start = readStart(r);
+  const max = r.u32();
+  const values = this.log.get(`${topic}/${range}`) || [];
+  this.fetches = [...(this.fetches || []), { topic, range, start }];
+  const policy = (this.fetchPolicy || (() => 'ok'))({ topic, range, start });
+  if (policy.refuse) return reply(wire.ERROR, str(policy.refuse));
+  if (policy === 'drop') return reply.socket.destroy();
+  if (policy === 'silent') return;
+  const body = page(values, Math.min(offsetOf(start, values), values.length), max);
+  // a page whose first `skip` records the reader already had
+  if (policy.skip) body.writeUInt32BE(policy.skip, 10);
+  if (policy.delayMs) return setTimeout(() => reply(wire.OK, body), policy.delayMs);
+  reply(wire.OK, body);
+};
 
 module.exports = { FakeBroker };

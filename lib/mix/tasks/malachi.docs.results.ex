@@ -357,9 +357,9 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
     for {key, label} <- @latency_labels, do: {label, suffix(latency[key], " ms")}
   end
 
-  # The BEAM generator counts all of these; the Node one counts only the drops and reconnects of a stream
-  # run and writes null for them in any other scenario. A section with nothing counted would read as "no
-  # backpressure occurred" rather than "this tool does not measure it", so it is left out entirely instead.
+  # Both generators count the drops and the sheds; only the BEAM one has reconnects, of its legacy stream,
+  # and a row a result does not carry is left out (`table/2`). A section with nothing counted would read as
+  # "no backpressure occurred" rather than "this tool does not measure it", so it is left out entirely.
   defp backpressure_section(result) do
     rows = [
       {"Dropped connections", result["dropped"]},

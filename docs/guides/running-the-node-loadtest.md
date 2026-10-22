@@ -43,7 +43,7 @@ node loadtest.js --scenario fetch --prepopulate 50000 --max 200
 # stream: server-pushed delivery with a credit window
 node loadtest.js --scenario stream --connections 4 --window 500
 
-# mixed: produce and fetch interleaved on the same connections
+# mixed: half the workers produce, half fetch
 node loadtest.js --scenario mixed --connections 20 --record-size 512 --keys 1000
 ```
 
@@ -74,6 +74,25 @@ an op is one batch handed over, timed from its schedule to the acknowledgement o
 end of the run nothing more is sent and the appends still in flight are waited for, up to 15 seconds, and
 counted. The prepopulate of the backlog goes through a producer too, and fails the run if a step of it
 waits more than 30 seconds.
+
+## How it reads
+
+Reading goes through the routing readers, as in the Elixir generator. A fetch worker (`fetch`, and the
+odd workers of `mixed`) is a fetcher (`scripts/lib/fetcher.js`): one `fetch_range` of each range of the
+topic in turn, on the broker leading it, each moving that range's position past the page it read and
+sending it back to the start of the range's history once a page brings nothing new, so a worker keeps
+pulling the backlog. An op is one `fetch_range`, timed over its round trip alone. Under `--rate` a
+fetcher answers its fetches one at a time, so a request waits behind the ones before it and its latency,
+from its schedule, shows that wait. A fetch the broker refuses is counted under its reason, the sheds
+apart; one that served no page (a broker that took no connection, a dropped connection, routes held back
+or a redirect) is neither an op nor an error, in both loops.
+
+A stream worker is a consumer (`scripts/lib/consumer.js`): when the run starts it opens one consume stream
+per range, which the broker pushes pages on within `--window` records, and acks each page as it reads it.
+An op is one page with records, with no latency (a push carries no client-side start). The streams stay
+open from the warmup into the measured window. When a range splits or merges, its stream is told it moved
+and the ranges that replace it open from where it was read, so a record is read at least once and never
+lost. A range the broker refuses is counted once and not read again, nor a range a split makes of it.
 
 ## Payloads
 
@@ -213,12 +232,9 @@ anyone can check out.
 measurement of the failure, not of the server. Appends the broker shed are counted apart, in
 `overloaded` and `rate_limited`, and what routing did over the run in `moved`, `redirects` and
 `route_refreshes`, with the same names as the Elixir generator's report; `ops` is the count of operations.
-`dropped` counts the connections a producer lost (an append in flight on one may or may not have landed,
-and is not an error) and, in a stream run, the stream connections lost, which `reconnects` counts the
-reconnects of: a stream connection that is lost is reconnected and resubscribed within the window as the
-Elixir generator does, so a run with no errors can still have been losing connections. `reconnects` is
-null outside the stream scenario, and `dropped` in the fetch and mixed scenarios, whose reads count a lost
-connection in `errors` instead, once for every request that fails on it. `--warmup` excludes the opening seconds from the
+`dropped` counts the connections the workers lost, in every scenario: an append in flight on one may or
+may not have landed and is not an error, a fetch on one is tried again, and a consume stream on one opens
+again from where it read, so a run with no errors can still have been losing connections. `--warmup` excludes the opening seconds from the
 statistics, which matters because the first connections pay for topic creation and JIT warmup.
 
 `--self-test` validates the latency histogram against a brute-force reference without a server, and

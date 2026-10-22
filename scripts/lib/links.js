@@ -49,6 +49,7 @@ class Links {
     this.controlOpening = null; // the metadata connect in flight, shared by the reads that wait on it
     this.unroutable = new Map(); // topic -> { until, reason } while its routes back off
     this.stats = { refreshes: 0, connect_failures: 0, redirects: 0 };
+    this.closed = false; // set by closeAll: nothing connects again, so a call still on its way opens nothing
   }
 
   bump(stat) {
@@ -72,6 +73,7 @@ class Links {
   // closed: the client, or null with `connect_failures` counted. Callers asking at once share one connect,
   // and its failure too: each gets null, and it counts once.
   async connection(address) {
+    if (this.closed) return null;
     const key = addressKey(address);
     const held = this.conns.get(key);
     if (held) {
@@ -84,6 +86,11 @@ class Links {
     const opening = this.connect(address);
     this.conns.set(key, opening);
     const client = await opening;
+    // closed while it connected: closeAll took the map already, so this one is closed here
+    if (client && this.closed) {
+      client.close();
+      return null;
+    }
     if (!client) {
       if (this.conns.get(key) === opening) this.conns.delete(key);
       this.bump('connect_failures');
@@ -117,6 +124,7 @@ class Links {
 
   // Closes every connection, the metadata one included.
   async closeAll() {
+    this.closed = true;
     const held = [...this.conns.values()];
     this.conns.clear();
     for (const client of await Promise.all(held)) if (client) client.close();
@@ -166,6 +174,7 @@ class Links {
   // The metadata connection, opened when there is none (or the one held was closed). Reads that ask at once
   // share one connect, so no connection is opened that `closeAll` would not close.
   async _control() {
+    if (this.closed) return null;
     if (this.control && this.control.socket) return this.control;
     this.control = null;
     if (!this.controlOpening) {

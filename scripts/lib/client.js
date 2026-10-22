@@ -318,6 +318,12 @@ class MalachiClient {
     return wire.decodeTopicRoutesResp(await this._request(wire.API.topicRoutes, wire.encodeTopicRoutesReq(topic)));
   }
 
+  // One page of one range (`fetch_range`, key 31): `req` as encodeFetchRangeReq takes it. Resolves with the
+  // decoded page (its batch still encoded), or rejects with the refusal.
+  async fetchRange(req) {
+    return wire.decodePage(await this._request(wire.API.fetchRange, wire.encodeFetchRangeReq(req)));
+  }
+
   // Opens a stream (`open_stream` or `open_consume`, encoded by the caller) and resolves with
   // `{ correlationId, payload }`, the open's ok answer still encoded, or rejects with the refusal (a loss of
   // the connection before the answer included). From the answer on, the stream's frames reach `handlers`:
@@ -438,8 +444,16 @@ class MalachiClient {
     if (this.socket) this.socket.destroy();
   }
 
+  // Ends the connection gracefully. A request still pending is rejected now, its timer cleared, so nothing
+  // waits on an answer that cannot come and no timer keeps the process alive after its work is done.
   close() {
+    const pending = [...this.pending.values()];
+    this.pending.clear();
     this.closed = true;
+    for (const { reject, timer } of pending) {
+      clearTimeout(timer);
+      reject(transportError('connection closed'));
+    }
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.end();

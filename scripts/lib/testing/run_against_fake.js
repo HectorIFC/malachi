@@ -6,8 +6,10 @@
  *
  *   node scripts/lib/testing/run_against_fake.js POLICY -- LOADTEST ARGS...
  *
- * POLICY is JSON: { "open": "ok" | "silent" | { "refuse": reason }, "append": "ack" | "silent" }. Prints
- * { code, elapsedMs, stdout, stderr } as JSON once the generator exits.
+ * POLICY is JSON: { "open": "ok" | "silent" | { "refuse": reason }, "append": "ack" | "silent",
+ * "consume": "ok" | { "refuse": reason } | { "dropAfterMs": ms }, "fetch": "ok" | "silent" | "drop" }. Prints
+ * { code, elapsedMs, stdout, stderr, consumes } as JSON once the generator exits, `consumes` being where
+ * each consume stream the broker took was opened from.
  */
 
 const { spawn } = require('child_process');
@@ -20,6 +22,8 @@ const { FakeBroker } = require('./fake_broker');
   const broker = await new FakeBroker().start();
   broker.openPolicy = () => policy.open || 'ok';
   broker.appendPolicy = () => policy.append || 'ack';
+  broker.consumePolicy = () => policy.consume || 'ok';
+  broker.fetchPolicy = () => policy.fetch || 'ok';
   const started = Date.now();
   const child = spawn(process.execPath, [path.join(__dirname, '../../loadtest.js'), ...args], {
     env: { ...process.env, MALACHI_HOST: '127.0.0.1', MALACHI_PORT: String(broker.port), MALACHI_USER: 'u', MALACHI_PASS: 'p' },
@@ -30,6 +34,8 @@ const { FakeBroker } = require('./fake_broker');
   child.stderr.on('data', (d) => (stderr += d));
   child.on('exit', (code) => {
     broker.stop();
-    console.log(JSON.stringify({ code, elapsedMs: Date.now() - started, stdout, stderr }));
+    // and what the broker saw: where each consume stream was opened from
+    const consumes = broker.consumes.map((c) => c.start);
+    console.log(JSON.stringify({ code, elapsedMs: Date.now() - started, stdout, stderr, consumes }));
   });
 })();
