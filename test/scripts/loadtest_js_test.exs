@@ -7,6 +7,8 @@ defmodule LoadtestJsTest do
   # Not async: the authentication counts would pick up other tests' connections.
   use ExUnit.Case, async: false
 
+  import Malachi.Test.QuotaForensics, only: [within_one_window: 2]
+
   alias Malachi.BrokerServer
   alias Malachi.DataPlaneRouter
   alias Malachi.Loadtest.Payload
@@ -206,13 +208,17 @@ defmodule LoadtestJsTest do
 
       Application.put_env(:malachi, :publish_rate_limit, 20)
       Application.put_env(:malachi, :publish_rate_window_ms, 60_000)
-      user = "ltjs_quota_#{System.unique_integer([:positive])}"
-      :ok = Malachi.Auth.add_user(user, "Quota-Pass-1!", [:produce, :consume, :admin])
-      on_exit(fn -> Malachi.Auth.remove_user(user) end)
 
-      args = ~w(--scenario produce --json --connections 1 --batch 5 --duration 1 --topic) ++ [topic()]
-      assert {output, 0} = run_js(ctx, args, user: user, pass: "Quota-Pass-1!")
-      report = Jason.decode!(output)
+      # the window is fixed to the limiter's clock: a run that crossed a boundary would get a second quota,
+      # so it runs again, with a fresh user, until one fits inside a window
+      report =
+        within_one_window(60_000, fn ->
+          user = quota_user("ltjs_quota")
+          args = ~w(--scenario produce --json --connections 1 --batch 5 --duration 1 --topic) ++ [topic()]
+          assert {output, 0} = run_js(ctx, args, user: user, pass: "Quota-Pass-1!")
+          Jason.decode!(output)
+        end)
+
       assert %{"errors" => 0, "rate_limited" => limited, "records" => records} = report
       assert limited > 0 and records <= 20
     end
@@ -285,6 +291,14 @@ defmodule LoadtestJsTest do
       assert %{"ops" => 0, "mode" => "open-loop"} = Jason.decode!(run["stdout"])
       assert run["elapsedMs"] < 25_000
     end
+  end
+
+  # A fresh user, so its quota starts unspent: one for every run a quota test makes.
+  defp quota_user(prefix) do
+    user = "#{prefix}_#{System.unique_integer([:positive])}"
+    :ok = Malachi.Auth.add_user(user, "Quota-Pass-1!", [:produce, :consume, :admin])
+    on_exit(fn -> Malachi.Auth.remove_user(user) end)
+    user
   end
 
   # Every open producer stream of `topic` the server lists until `deadline`, polled.
