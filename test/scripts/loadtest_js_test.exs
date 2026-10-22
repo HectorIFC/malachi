@@ -371,6 +371,14 @@ defmodule LoadtestJsTest do
     Enum.map(records, & &1.value)
   end
 
+  describe "the JSON report" do
+    test "is the whole of stdout, a prepopulated backlog included", ctx do
+      args = ~w(--scenario fetch --json --connections 1 --duration 1 --prepopulate 10 --topic) ++ [topic()]
+      assert {output, 0} = run_js(ctx, args)
+      assert {:ok, %{"scenario" => "fetch"}} = Jason.decode(output)
+    end
+  end
+
   describe "error reasons" do
     test "a refused fetch is counted under the reason the broker gave", ctx do
       # May produce, so the topic is created, but may not consume.

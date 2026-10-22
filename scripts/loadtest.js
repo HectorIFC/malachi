@@ -514,7 +514,8 @@ async function prepopulate(opts) {
     done += n;
   }
   client.close();
-  console.log(colors.gray(`   prepopulated ${done} records`));
+  // a JSON report is the whole of stdout
+  if (!opts.json) console.log(colors.gray(`   prepopulated ${done} records`));
 }
 
 // ---- reproduce metadata ----
