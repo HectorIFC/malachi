@@ -167,8 +167,7 @@ index d09ae1f..cf60952 100644
      }
    end
  
-@@ -233,6 +236,8 @@ defmodule Malachi.Metadata do
-   def command_target_topic({:set_topic_policy, name, _policy}), do: name
+@@ -234,5 +237,7 @@ defmodule Malachi.Metadata do
    def command_target_topic({:bind_topic_policy, name, _policy}), do: name
    def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
 +  # UPGRADE CANARY (test/support/upgrade_canary.patch): routed to its topic, as the other topic commands are.

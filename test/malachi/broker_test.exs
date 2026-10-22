@@ -1692,7 +1692,7 @@ defmodule Malachi.BrokerTest do
     # a cluster object, injected here through the same seam production reads it with.
     defp broker_with_policy(policy, opts) do
       metadata =
-        [{:create_topic, "events", 4}, {:set_topic_policy, "events", "p"}]
+        [{:create_topic, "events", 4}, {:bind_topic_policy, "events", "p"}]
         |> Enum.reduce(Metadata.new(), fn command, metadata -> elem(Metadata.apply(metadata, command), 0) end)
 
       opts =
