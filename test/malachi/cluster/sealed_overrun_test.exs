@@ -2,7 +2,9 @@ defmodule Malachi.Cluster.SealedOverrunTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
+  alias Malachi.Cluster.Failover
   alias Malachi.Cluster.HealCoordinator
+  alias Malachi.Cluster.OrphanedFence
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.SealedOverrun
   alias Malachi.Log.Record
@@ -425,6 +427,122 @@ defmodule Malachi.Cluster.SealedOverrunTest do
       # Level triggered: the copy is still reported by the integrity probe, so the next pass tries again.
       ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
       assert_received {:attempted, ^segment_id, ^b}
+    end
+  end
+
+  # #248. A recorded `byte_size` below what a correct copy holds would make the settling pass report that
+  # copy on every pass forever, counting a fence it never gained. Both paths that seal from a fence answer
+  # must leave the recorded size agreeing with every copy the pass then leaves alone: one settles the
+  # surplus once, and the next pass has nothing to do.
+  describe "a seal recorded from a fence answer converges" do
+    # Counts the settling pass by its outcome, so a copy that is settled again on every pass shows up as
+    # a second event even though the bytes never change. The handler is VM-wide and this module is async,
+    # so it forwards only what the coordinator under test emits: a handler runs in the emitting process.
+    defp watch_settlements(coordinator) do
+      handler = {__MODULE__, System.unique_integer([:positive])}
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:malachi, :cluster, :sealed_copies_settled],
+          &__MODULE__.forward_settlement/4,
+          {self(), coordinator}
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    @doc false
+    def forward_settlement(_event, measurements, %{result: result}, {parent, coordinator}) do
+      if self() == coordinator, do: send(parent, {:settled, result, measurements.copies})
+    end
+
+    defp settled_events do
+      receive do
+        {:settled, result, copies} -> [{result, copies} | settled_events()]
+      after
+        0 -> []
+      end
+    end
+
+    defp apply_all(metadata, commands), do: Enum.reduce(commands, metadata, &elem(Metadata.apply(&2, &1), 0))
+
+    defp durable_probe(replicas, segment_id) do
+      for replica <- replicas, into: %{} do
+        {:ok, end_offset, bytes} = ReplicationServer.durable_stats(replica, segment_id, 0)
+        {replica, {end_offset, bytes}}
+      end
+    end
+
+    test "a failover seal lets the surplus on the old primary settle once, and no pass after it" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+
+      # `a` took one record more than the quorum before it dropped out, so failover seals at the
+      # quorum's end and the recorded size is what b and c hold.
+      {:ok, 2} = ReplicationServer.follow(a, segment_id, 0, records(["x", "y", "z"]))
+      for replica <- [b, c], do: {:ok, 1} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y"]))
+
+      probes = %{segment_id => durable_probe([b, c], segment_id)}
+      commands = Failover.plan(metadata, [b, c], probes, 0)
+      metadata = apply_all(metadata, commands)
+
+      segment = Metadata.get_segment(metadata, segment_id)
+      assert segment.length == 2
+      assert segment.byte_size == ReplicationServer.stored_bytes(b, segment_id)
+
+      {source, apply} = metadata_store(metadata)
+      coordinator = start_coordinator(live_brokers: fn -> [a, b, c] end, metadata_source: source, apply_command: apply)
+      watch_settlements(coordinator)
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert read_values(a, segment_id) == ["x", "y"]
+      assert ReplicationServer.stored_bytes(a, segment_id) == segment.byte_size
+      assert settled_events() == [{:trimmed, 1}]
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert settled_events() == []
+      assert read_values(b, segment_id) == ["x", "y"]
+      assert read_values(c, segment_id) == ["x", "y"]
+    end
+
+    test "an orphaned fence seal lets the surplus on a longer copy settle once, and no pass after it" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+
+      # The primary's store was fenced at two records, which is how an orphaned fence arises, while b
+      # holds a third that the fence never reached.
+      {:ok, 1} = ReplicationServer.follow(a, segment_id, 0, records(["x", "y"]))
+      {:ok, 1} = ReplicationServer.follow(c, segment_id, 0, records(["x", "y"]))
+      {:ok, 2} = ReplicationServer.follow(b, segment_id, 0, records(["x", "y", "z"]))
+      {:ok, end_offset, bytes} = ReplicationServer.seal(a, segment_id, 0)
+
+      answers = %{segment_id => {end_offset, bytes}}
+      metadata = apply_all(metadata, OrphanedFence.plan(metadata, answers, 0))
+
+      segment = Metadata.get_segment(metadata, segment_id)
+      assert segment.state == :sealed
+      assert segment.byte_size == bytes
+
+      {source, apply} = metadata_store(metadata)
+      coordinator = start_coordinator(live_brokers: fn -> [a, b, c] end, metadata_source: source, apply_command: apply)
+      watch_settlements(coordinator)
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert read_values(b, segment_id) == ["x", "y"]
+      assert ReplicationServer.stored_bytes(b, segment_id) == segment.byte_size
+      assert settled_events() == [{:trimmed, 1}]
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert settled_events() == []
     end
   end
 end
