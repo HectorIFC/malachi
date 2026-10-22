@@ -105,6 +105,7 @@ defmodule Malachi.Metrics.PrometheusTest do
     assert out =~ ~s(malachi_cluster_sealed_copies_settled_total{result="fenced"} 9)
     assert out =~ ~s(malachi_cluster_sealed_copies_settled_total{result="trimmed"} 1)
     assert out =~ ~s(malachi_cluster_sealed_copies_settled_total{result="failed"} 0)
+    assert out =~ ~s(malachi_cluster_sealed_copies_settled_total{result="recorded_size_below"} 2)
     assert out =~ "malachi_cluster_sealed_records_dropped_total 1"
 
     # One sample per server and kind, zero included: a series that appears only after the first drop can

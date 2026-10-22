@@ -319,8 +319,12 @@ defmodule Malachi.Cluster.SealedOverrunTest do
           replication_factor: 2
         )
 
+      watch_settlements(coordinator)
       log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
 
+      # Bytes equal to the recorded size after the trim are the routine case, and must not be reported as a
+      # recorded size below: this pins the `>` in the classification, not only that the copy was fenced.
+      assert settled_events() == [{:fenced, 1}]
       assert ReplicationServer.stored_bytes(b, segment_id) == bytes
       assert read_values(b, segment_id) == ["x", "y", "z"]
       assert fenced?(b, segment_id)
@@ -430,11 +434,11 @@ defmodule Malachi.Cluster.SealedOverrunTest do
     end
   end
 
-  # #248. A recorded `byte_size` below what a correct copy holds would make the settling pass report that
-  # copy on every pass forever, counting a fence it never gained. Both paths that seal from a fence answer
-  # must leave the recorded size agreeing with every copy the pass then leaves alone: one settles the
-  # surplus once, and the next pass has nothing to do.
-  describe "a seal recorded from a fence answer converges" do
+  # The settling pass converges on the seals the current paths record: a failover seal and an orphaned
+  # fence seal each settle their surplus copy once, and the next pass has nothing to do. The #248 state,
+  # where no correct copy agrees with the recorded size, is the test named "a recorded byte_size below
+  # every correct copy is reported as that, not as a fence".
+  describe "the settling pass converges on the seals the current paths record" do
     # Counts the settling pass by its outcome, so a copy that is settled again on every pass shows up as
     # a second event even though the bytes never change. The handler is VM-wide and this module is async,
     # so it forwards only what the coordinator under test emits: a handler runs in the emitting process.
@@ -543,6 +547,55 @@ defmodule Malachi.Cluster.SealedOverrunTest do
       ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
 
       assert settled_events() == []
+    end
+
+    # #248. Every copy holds exactly the records its seal names and measures above the recorded byte_size,
+    # which no pass can improve. Each pass reports them as a recorded size below what they hold, and never
+    # as a fence: the fence counter is what climbed forever before, and the counter is what the operator reads.
+    test "a recorded byte_size below every correct copy is reported as that, not as a fence" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+
+      for replica <- [a, b, c], do: {:ok, 1} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y"]))
+      bytes = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, bytes - 1, 0})
+
+      {source, apply} = metadata_store(metadata)
+      coordinator = start_coordinator(live_brokers: fn -> [a, b, c] end, metadata_source: source, apply_command: apply)
+      watch_settlements(coordinator)
+
+      for _pass <- 1..2 do
+        log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+        assert settled_events() == [{:recorded_size_below, 3}]
+        assert log =~ "measure more bytes than the recorded byte_size"
+      end
+
+      assert Enum.map([a, b, c], &read_values(&1, segment_id)) == [["x", "y"], ["x", "y"], ["x", "y"]]
+    end
+
+    # A copy holding fewer records than its seal names is not length-correct, whatever its bytes say. There is
+    # nothing to trim, so the pass reports it as not settled, and the log says it is still divergent.
+    test "a copy short of its seal is reported as not settled, never as length-correct" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+
+      for replica <- [a, b, c], do: {:ok, 0} = ReplicationServer.follow(replica, segment_id, 0, records(["x"]))
+      bytes = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, bytes - 1, 0})
+
+      {source, apply} = metadata_store(metadata)
+      coordinator = start_coordinator(live_brokers: fn -> [a, b, c] end, metadata_source: source, apply_command: apply)
+      watch_settlements(coordinator)
+
+      log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert settled_events() == [{:failed, 3}]
+      assert log =~ "still divergent"
+      assert Enum.map([a, b, c], &read_values(&1, segment_id)) == [["x"], ["x"], ["x"]]
     end
   end
 end

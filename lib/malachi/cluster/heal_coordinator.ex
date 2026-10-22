@@ -98,19 +98,22 @@ defmodule Malachi.Cluster.HealCoordinator do
   The other half of the same split, on SEALED segments: the control plane records a length and a copy
   on disk does not agree with it (`Malachi.Cluster.SealedOverrun` documents how a copy comes to hold
   more than the seal says, and why the recorded length is the one that wins). The copies to settle come
-  from the integrity probe `Malachi.Cluster.SelfHealing` already runs over every sealed segment, as its
+  from the integrity probe `Malachi.Cluster.SelfHealing` already runs over sealed segments whose replicas are
+  all live, as its
   `:unsettled` list, so this pass asks nothing of its own; `SealedOverrun.plan/3` turns that list into
   `seal_at` calls and the `:settle_copy` seam makes them.
 
-    * `:settle_copy` - `((replica, segment_id, base_offset, end_offset) -> {:ok, dropped} | :error)`,
-      how one copy is brought down to the recorded length and fenced there (default
+    * `:settle_copy` - `((replica, segment_id, base_offset, end_offset) ->
+      {:ok, dropped, byte_size, held_end} | :error)`,
+      how one copy is trimmed to the recorded length and fenced there, or fenced at its shorter length when it
+      holds fewer records (default
       `Malachi.Cluster.ReplicationServer.seal_at/5`). Unlike `:fence` it takes the length, because the
       whole point is that the number is the control plane's and not the replica's;
-    * `:settle_timeout` - ms for that call (default 5000, not `:probe_timeout`). It is the one seam
-      here that does real work: it opens the log, verifies the records it keeps and fsyncs. A probe's
+    * `:settle_timeout` - ms for that call (default 5000, not `:probe_timeout`). It bounds the trim
+      and fence, which open the log, check the records kept and fsync. A probe's
       one second would time out on a large segment and have the pass retry work it had already done;
     * `:settle_batch_size` - copies settled per pass (default 64). The FIRST pass after this ships
-      finds every sealed copy in the cluster unsettled at once, and an unbounded pass would put that
+      may find many sealed copies over their recorded size at once, and an unbounded pass would put that
       whole scan and fsync load on the disk the produce path is using. Separate from `:heal_opts`'
       `:batch_size`, which bounds how much a backfill copies, because the two answer different
       questions and tying them would make one of them unexplainable.
@@ -131,6 +134,7 @@ defmodule Malachi.Cluster.HealCoordinator do
   alias Malachi.Cluster.SealedOverrun
   alias Malachi.Cluster.SelfHealing
   alias Malachi.I18n
+  alias Malachi.Metadata
   alias Malachi.Telemetry
 
   @default_interval 5_000
@@ -177,7 +181,7 @@ defmodule Malachi.Cluster.HealCoordinator do
         # asked of every live replica of every active segment.
         failed_state: Keyword.get(opts, :failed_state, default_failed_state(Keyword.get(opts, :probe_timeout, 1_000))),
         discard_copy: Keyword.get(opts, :discard_copy, &ReplicationServer.delete/2),
-        # The fifth seam, and the only one here that WRITES. Its timeout and its batch are its own for
+        # The fifth seam, and one of the seams that WRITE. Its timeout and its batch are its own for
         # the reasons in the moduledoc: it opens and fsyncs where the others stat or look up a marker.
         settle_copy: Keyword.get(opts, :settle_copy, default_settle_copy(Keyword.get(opts, :settle_timeout, 5_000))),
         settle_batch_size: Keyword.get(opts, :settle_batch_size, @default_settle_batch_size)
@@ -387,28 +391,35 @@ defmodule Malachi.Cluster.HealCoordinator do
   end
 
   # Brings the copies of sealed segments that do not match their recorded length back to it. Level
-  # triggered like everything else here: a copy this pass could not settle, or one the batch left out,
-  # is still reported by the integrity probe next tick and simply settled then.
+  # triggered: a copy this pass could not settle is reported by the integrity probe again and retried next
+  # tick. A copy the batch leaves out waits for a later pass, and copies that never settle (see
+  # `report_settled/1`) keep their batch slots, so a full batch of them starves the rest. That is a known
+  # gap of issue #248, not something this pass avoids.
   defp settle_sealed_copies(state, metadata, unsettled) do
     metadata
     |> SealedOverrun.plan(unsettled, state.settle_batch_size)
     |> Enum.map(fn {replica, segment_id, base_offset, end_offset} ->
-      {segment_id, replica, state.settle_copy.(replica, segment_id, base_offset, end_offset)}
+      recorded = {Metadata.get_segment(metadata, segment_id).byte_size, end_offset}
+      {segment_id, replica, recorded, state.settle_copy.(replica, segment_id, base_offset, end_offset)}
     end)
     |> report_settled()
   end
 
-  # Counted and logged apart, because the two outcomes are not the same event wearing different
-  # numbers. A copy that only gained a marker is routine and happens in the thousands on the first
-  # pass; a copy that gave up records was holding data its segment's seal excludes, which is the defect
-  # this pass exists for, happening in production. Sharing a counter would bury the second in the first
-  # on the one pass that touches everything.
+  # Counted and logged apart, because the outcomes are not the same event wearing different numbers. A copy
+  # that only gained a marker is routine and happens in the thousands on the first pass; a copy that gave up
+  # records was holding data its segment's seal excludes, which is the defect this pass exists for. A copy
+  # that holds exactly the records its seal names, and still measures above the recorded `byte_size`, is a
+  # third case: the recorded size may be the low one, which the code cannot tell from the copy (issue #248).
+  # It is reported as that, not counted as a fence, or the fence count climbs on every pass for a copy
+  # nothing can improve.
   defp report_settled([]), do: :ok
 
   defp report_settled(results) do
-    trimmed = for {segment_id, replica, {:ok, dropped}} <- results, dropped > 0, do: {segment_id, replica, dropped}
-    fenced = Enum.count(results, &match?({_segment_id, _replica, {:ok, 0}}, &1))
-    unsettled = for {segment_id, replica, :error} <- results, do: {segment_id, replica}
+    outcomes = Enum.map(results, &classify/1)
+    trimmed = for {:trimmed, segment_id, replica, dropped} <- outcomes, do: {segment_id, replica, dropped}
+    below = for {:recorded_below, segment_id, replica} <- outcomes, do: {segment_id, replica}
+    fenced = Enum.count(outcomes, &match?({:fenced, _segment_id, _replica}, &1))
+    unsettled = for {:failed, segment_id, replica} <- outcomes, do: {segment_id, replica}
 
     if fenced > 0, do: Telemetry.sealed_copies_settled(:fenced, fenced, 0)
 
@@ -425,6 +436,11 @@ defmodule Malachi.Cluster.HealCoordinator do
       )
     end
 
+    if below != [] do
+      Telemetry.sealed_copies_settled(:recorded_size_below, length(below), 0)
+      Logger.warning(I18n.t(:heal_sealed_copy_recorded_below, count: length(below), copies: inspect(below)))
+    end
+
     # Retried next pass, but a copy that keeps refusing to settle stays divergent from what the control
     # plane promises, and a pass that said nothing about it is how this defect went unseen for so long.
     if unsettled != [] do
@@ -432,6 +448,22 @@ defmodule Malachi.Cluster.HealCoordinator do
       Logger.warning(I18n.t(:heal_sealed_copy_not_settled, count: length(unsettled), copies: inspect(unsettled)))
     end
   end
+
+  defp classify({segment_id, replica, _recorded, {:ok, dropped, _bytes, _held_end}}) when dropped > 0,
+    do: {:trimmed, segment_id, replica, dropped}
+
+  # A copy holding fewer records than its seal names is not length-correct, whatever its bytes say: there was
+  # nothing to trim, and this pass cannot repair it, so it is reported as not settled.
+  defp classify({segment_id, replica, {_recorded_bytes, end_offset}, {:ok, 0, _bytes, held_end}})
+       when held_end < end_offset,
+       do: {:failed, segment_id, replica}
+
+  defp classify({segment_id, replica, {recorded_bytes, _end_offset}, {:ok, 0, bytes, _held_end}})
+       when bytes > recorded_bytes,
+       do: {:recorded_below, segment_id, replica}
+
+  defp classify({segment_id, replica, _recorded, {:ok, 0, _bytes, _held_end}}), do: {:fenced, segment_id, replica}
+  defp classify({segment_id, replica, _recorded, :error}), do: {:failed, segment_id, replica}
 
   defp sealed_now?(metadata, {:seal_segment, segment_id, _length, _bytes, _at}) do
     match?(%{state: :sealed}, Map.get(metadata.segments, segment_id))
@@ -650,13 +682,13 @@ defmodule Malachi.Cluster.HealCoordinator do
     end
   end
 
-  # The only default here that changes a replica. It answers the DROPPED count rather than the pair the
-  # other seams answer: what the pass has to tell apart is a copy that merely gained a marker from one
-  # that gave up records, and the end offset it lands on is the same number either way.
+  # The default that trims a copy. It answers the dropped count, the bytes measured after the trim, and the
+  # offset the copy holds: what the pass has to tell apart is a copy that merely gained a marker from one
+  # that gave up records, and a copy short of its seal holds an offset below the sealed end.
   defp default_settle_copy(timeout) do
     fn replica, segment_id, base_offset, end_offset ->
       case ReplicationServer.seal_at(replica, segment_id, base_offset, end_offset, timeout) do
-        {:ok, _end_offset, _byte_size, dropped} -> {:ok, dropped}
+        {:ok, held_end, byte_size, dropped} -> {:ok, dropped, byte_size, held_end}
         {:error, _reason} -> :error
       end
     end

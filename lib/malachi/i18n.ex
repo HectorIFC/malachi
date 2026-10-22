@@ -706,6 +706,16 @@ defmodule Malachi.I18n do
           "and they are still divergent: %{copies}. A later pass tries again, but a copy that never " <>
           "settles is holding bytes its own seal excludes"
     },
+    heal_sealed_copy_recorded_below: %{
+      "pt_BR" =>
+        "%{count} cópia(s) de segmento selado guardam exatamente os registros do selo, mas medem mais bytes " <>
+          "do que o byte_size registrado: %{copies}. O comprimento está certo, e o tamanho gravado pode ser o " <>
+          "que está baixo; como um tamanho selado é imutável, nenhuma passagem consegue corrigi-lo",
+      "en_US" =>
+        "%{count} sealed segment copy(ies) hold exactly the records their seal names but measure more bytes " <>
+          "than the recorded byte_size: %{copies}. The length is right, and the recorded size may be the low one; " <>
+          "and because a sealed size is immutable no pass can correct it"
+    },
     heal_orphaned_fence_unrecorded: %{
       "pt_BR" =>
         "não foi possível registrar o seal de %{count} segmento(s) cercado(s): %{segments}. Os ranges " <>

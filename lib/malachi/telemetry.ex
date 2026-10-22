@@ -42,11 +42,14 @@ defmodule Malachi.Telemetry do
     * `[:malachi, :cluster, :fence_reconciled]`. `%{count}` / `%{}` - a heal pass finished the seal for
       `count` such segments, which is what unblocks their ranges.
     * `[:malachi, :cluster, :sealed_copies_settled]`. `%{copies, records}` / `%{result}` - a heal pass
-      brought `copies` copies of sealed segments to the length the control plane recorded. `result:
+      settled `copies` copies of sealed segments against the length the control plane recorded. `result:
       :fenced` is the routine case and only writes a marker; `result: :trimmed` gave up `records`
       records a copy held past its segment's sealed end, which is a defect that reached disk, so alert
       on it outside the first pass after an upgrade; `result: :failed` is a copy still divergent from
-      what the control plane promises.
+      what the control plane promises; `result: :recorded_size_below` is a copy holding exactly the
+      records its seal names that measures above the recorded `byte_size`, so the recorded size may be the
+      low one. A sealed size is immutable and no pass can clear it, so the copy is reported again on later
+      passes, and a full batch of such copies leaves others waiting (a known gap of issue #248).
     * `[:malachi, :cluster, :vnode_reconcile]`. `%{ring, hosted, leading, started, stopped}` /
       `%{placement: :ok | :unreadable}` - one reconcile pass of `Malachi.Cluster.VnodeCoordinatorManager`
       on a sharded control plane. `ring` is how many vnodes the live ring names, `hosted` how many of
@@ -183,11 +186,38 @@ defmodule Malachi.Telemetry do
   end
 
   @doc """
-  A heal pass brought `copies` copies of sealed segments to the length the control plane recorded:
+  A heal pass settled `copies` copies of sealed segments against the length the control plane recorded:
   `:fenced` wrote only a marker, `:trimmed` also gave up `records` records held past the sealed end,
-  and `:failed` could not settle the copy at all. `records` is 0 for anything but `:trimmed`.
+  `:recorded_size_below` is a copy holding exactly the records its seal names that measures above the
+  recorded `byte_size`, and `:failed` means the copy was not settled: either the seal did not complete, or
+  a copy holding fewer records than its seal names was fenced at its short length and reported as
+  `:failed`. A storage error latches the copy as failed in this process, and a heal pass replaces a latched
+  copy when a spare broker is available. Neither a copy whose directory cannot be listed nor one that
+  cannot be reached is latched. A copy that does not answer the byte-count probe is skipped by that pass
+  and left to the next heal pass, which settles by default at most 64 copies longer than their seals per
+  pass once the node's replication server answers; a copy past that cap waits for a later pass, and copies
+  that never settle can keep their slots (a known gap of issue #248). A copy missing records is attempted by
+  the heal pass when its segment has at least the replicas achievable (the lower of the replication factor
+  and the live brokers), every replica is live, no copy of the segment is latched as failed, and an intact
+  copy exists to copy from. A failed attempt that returns an error is reported as a failure; an attempt
+  whose copy cannot be reached is skipped without a report and tried again on a later pass. A copy whose
+  intact sources do not answer is reported as having no intact copy and is tried again on a later pass;
+  while another copy of its segment is latched as failed, the scrubber may repair it instead. A copy with
+  all records present and bytes short is recorded as a failure by the heal pass, and the scrubber finds it
+  on its own cycle, which verifies local copies; its repair is deferred while that server does not answer,
+  except an index rebuild, which is not deferred. One that fails between the probe and the settle is
+  counted as `:failed`, and a settle that times out is counted the same way even if the server trims
+  records afterwards, so those records are not counted as `:trimmed`. A directory that cannot be listed
+  reads as lost and goes to the repair path. Without a replacement, a copy trimmed but unfenced stays so
+  after a restart, unless its bytes are still above the recorded size, in which case the next pass selects
+  it again.
+  `records` is 0 for anything but `:trimmed`.
   """
-  @spec sealed_copies_settled(:fenced | :trimmed | :failed, non_neg_integer(), non_neg_integer()) :: :ok
+  @spec sealed_copies_settled(
+          :fenced | :trimmed | :failed | :recorded_size_below,
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: :ok
   def sealed_copies_settled(result, copies, records) do
     :telemetry.execute(
       [:malachi, :cluster, :sealed_copies_settled],
