@@ -1,56 +1,76 @@
 {
   "meta": {
-    "timestamp": "2026-10-22T09:27:28Z",
+    "timestamp": "2026-10-23T09:37:36Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "c52f7ed",
-    "git_ref_date": "2026-10-21T22:00:41Z",
-    "malachi_version": "0.22.1",
+    "git_ref": "dd04fb1",
+    "git_ref_date": "2026-10-22T19:23:25Z",
+    "malachi_version": "0.22.2",
     "hardware": {
       "cpu": "x86_64",
       "cores": 4,
-      "os": "Linux 7.0.0-1017-azure"
+      "os": "Linux 6.17.0-1022-azure"
     }
   },
   "certification": "UPGRADE AND ROLLBACK CERTIFICATION",
   "verdict": "failed",
   "replication_factor": 3,
   "events": [
-    "p1: rolling every node from OLD to NEW (pin 6)",
+    "p1: rolling every node from OLD to NEW (pin 7)",
     "p1: mixed cluster (node 3 on NEW, nodes 1 and 2 on OLD)",
     "p1: splitting the metadata ring from 4 to 5 vnodes on NEW",
-    "p2: rolling every node from NEW back to OLD (pin 6)",
-    "p3: rolling every node from OLD to NEW (pin 6)",
+    "p2: rolling every node from NEW back to OLD (pin 7)",
+    "p3: rolling every node from OLD to NEW (pin 7)",
     "p3: finalizing: the pin removed node by node",
     "p3: switching the canary flag on",
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 51981,
-    "post_chaos_records_per_s": 19133
+    "acked_writes": 16802,
+    "post_chaos_records_per_s": 33
   },
   "failures": [
-    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1752)",
-    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 5016)",
+    "malachi2 did not serve a clean produce of its own after p1: node 2 to NEW",
+    "the cluster did not reconverge after p2: node 3 back to OLD",
+    "no produce was acknowledged through p2: node 2 back to OLD, while malachi2 was down (stuck at 688)",
+    "the cluster did not reconverge after p2: node 2 back to OLD",
+    "no produce was acknowledged through p2: node 1 back to OLD, while malachi1 was down (stuck at 688)",
+    "the cluster did not reconverge after p2: node 1 back to OLD",
+    "phase 2 took 873s, past its 360s checker window; raise PHASE2_WINDOW_S",
+    "acked writes were lost (see verify output above)",
+    "cluster is not fully healthy at the end",
+    "no produce was acknowledged through p3: node 3 to NEW, while malachi3 was down (stuck at 0)",
+    "the cluster did not reconverge after p3: node 3 to NEW",
+    "no produce was acknowledged through p3: node 2 to NEW, while malachi2 was down (stuck at 0)",
+    "no produce was acknowledged through p3: node 1 to NEW, while malachi1 was down (stuck at 0)",
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 0)",
+    "no produce was acknowledged through p3: node 2 without the pin, while malachi2 was down (stuck at 0)",
+    "no produce was acknowledged through p3: node 1 without the pin, while malachi1 was down (stuck at 0)",
+    "the canary command did not apply at machine version 8: {:error, :no_such_topic} ",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 0)",
     "nodes 1 and 2 did not serve a clean produce while node 3 was down",
-    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 5016)"
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 0)",
+    "phase 3 took 920s, past its 900s checker window; raise PHASE3_WINDOW_S",
+    "checker acked nothing: no availability at any point",
+    "acked writes were lost (see verify output above)",
+    "a process crashed during the upgrade (see the logs above)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261022T085334Z-c52f7ed",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261023T084834Z-dd04fb1",
   "details": {
-    "old_ref": "v0.22.0",
-    "old_rule": "the newest release whose code differs from this tree, which is release v0.22.1's",
-    "old_sha": "5a48f8312e325b59fbe033bf959fbf8f0866a8bd",
-    "old_version": "0.22.0",
-    "old_machine_version": 6,
+    "old_ref": "v0.22.1",
+    "old_rule": "the newest release whose code differs from this tree, which is release v0.22.2's",
+    "old_sha": "6d0ede9d89f9e483269ab75be991b047f4ca5df3",
+    "old_version": "0.22.1",
+    "old_machine_version": 7,
     "old_patch": null,
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 18677,
-      "phase2": 12731,
-      "phase3": 20573
+      "phase1": 16114,
+      "phase2": 688,
+      "phase3": 0
     },
     "vnodes": 4,
-    "vnode_rule": "sharded: v0.22.0 resumes its vnode members after a restart",
+    "vnode_rule": "sharded: v0.22.1 resumes its vnode members after a restart",
     "vnodes_after_split": 5
   }
 }
