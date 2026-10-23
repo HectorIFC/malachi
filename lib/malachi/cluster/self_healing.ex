@@ -37,7 +37,9 @@ defmodule Malachi.Cluster.SelfHealing do
   for two very different reasons, one benign (a follower that never sealed its store still carries its
   preallocated tail) and one not (it holds a record the seal excludes), and the byte count alone cannot
   tell them apart. It does not have to: both end at the same place, and a copy that has been settled is
-  byte-exact and stops being reported. Nothing is repaired from this list, so mistaking the benign case
+  byte-exact and is no longer selected. The one exception is a copy that holds exactly its seal's records but
+  still measures above the recorded size: it is reported again on every pass, since a sealed size is
+  immutable. Nothing is repaired from this list, so mistaking the benign case
   for the other one costs a marker and an fsync, once per copy, ever.
 
   ## A copy that failed in storage
@@ -97,7 +99,9 @@ defmodule Malachi.Cluster.SelfHealing do
         heal_segment(segment, live_brokers, replication_factor, opts, failed_copies(failed, segment), acc)
       end)
 
-    integrity = repair_lost_copies(metadata, MapSet.new(to_heal), live_brokers, opts)
+    # Only a segment that is under-replicated is left to the membership pass. One held in `to_heal` just
+    # because of a latched copy still gets its integrity probe, with the latched replica left out of it.
+    integrity = repair_lost_copies(metadata, MapSet.new(under_replicated), live_brokers, failed, opts)
 
     finalize(%{
       applied: healed.applied,
@@ -207,7 +211,7 @@ defmodule Malachi.Cluster.SelfHealing do
   # being healed by the membership pass) and re-backfills any live replica whose stored bytes fall
   # short of the sealed byte_size. The replica set is unchanged, so no metadata command results;
   # repairs are reported for observability.
-  defp repair_lost_copies(metadata, under_replicated, live_brokers, opts) do
+  defp repair_lost_copies(metadata, under_replicated, live_brokers, failed, opts) do
     metadata.segments
     |> Map.values()
     |> Enum.filter(fn segment ->
@@ -215,11 +219,17 @@ defmodule Malachi.Cluster.SelfHealing do
         not MapSet.member?(under_replicated, segment.id) and
         Enum.all?(segment.replica_set, &(&1 in live_brokers))
     end)
-    |> Enum.reduce(%{repaired: [], failed: [], unsettled: []}, &probe_and_repair(&1, opts, &2))
+    |> Enum.reduce(%{repaired: [], failed: [], unsettled: []}, &probe_and_repair(&1, failed, opts, &2))
   end
 
-  defp probe_and_repair(segment, opts, acc) do
-    probes = Enum.map(segment.replica_set, &{&1, probe_stored_bytes(&1, segment.id)})
+  defp probe_and_repair(segment, failed, opts, acc) do
+    # A latched copy refuses every request, so it is not probed, is not a source, and is not repaired here.
+    # With a spare broker the heal pass replaces it; without one it stays behind the healthy replicas.
+    latched = failed_copies(failed, segment)
+
+    probes =
+      for replica <- segment.replica_set, replica not in latched, do: {replica, probe_stored_bytes(replica, segment.id)}
+
     lost = for {replica, {:ok, bytes}} <- probes, bytes < segment.byte_size, do: replica
     over = for {replica, {:ok, bytes}} <- probes, bytes > segment.byte_size, do: replica
 

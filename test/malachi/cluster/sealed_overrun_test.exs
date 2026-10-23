@@ -438,7 +438,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
   # fence seal each settle their surplus copy once, and the next pass has nothing to do. The #248 state,
   # where no correct copy agrees with the recorded size, is the test named "a recorded byte_size below
   # every correct copy is reported as that, not as a fence".
-  describe "the settling pass converges on the seals the current paths record" do
+  describe "the settling pass on the seals the current paths record" do
     # Counts the settling pass by its outcome, so a copy that is settled again on every pass shows up as
     # a second event even though the bytes never change. The handler is VM-wide and this module is async,
     # so it forwards only what the coordinator under test emits: a handler runs in the emitting process.

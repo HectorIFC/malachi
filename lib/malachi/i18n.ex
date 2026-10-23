@@ -704,7 +704,7 @@ defmodule Malachi.I18n do
       "en_US" =>
         "could not bring %{count} sealed segment copy(ies) to the length the control plane recorded, " <>
           "and they are still divergent: %{copies}. A later pass tries again, but a copy that never " <>
-          "settles is holding bytes its own seal excludes"
+          "settles is holding bytes its own seal excludes, or fewer records than its seal names"
     },
     heal_sealed_copy_recorded_below: %{
       "pt_BR" =>

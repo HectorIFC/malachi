@@ -422,6 +422,27 @@ defmodule Malachi.Cluster.SelfHealingTest do
       assert result == %{applied: [], failed: [{segment_id, :no_live_source}], repaired: [], unsettled: []}
     end
 
+    # A latched copy must not hide a short copy on another replica from the integrity pass, and the latched
+    # replica itself is not repaired, and its bytes are left untouched: it is replaced, not repaired.
+    test "a short copy is repaired from an intact peer even when another replica of the segment is latched" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+
+      {:ok, _} = ReplicationServer.follow(a, segment_id, 0, records(["x", "y"]))
+      {:ok, _} = ReplicationServer.follow(b, segment_id, 0, records(["x"]))
+      {:ok, _} = ReplicationServer.follow(c, segment_id, 0, records(["x"]))
+      byte_size = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, byte_size, 0})
+
+      result = SelfHealing.heal_sealed(metadata, [a, b, c], 3, failed: MapSet.new([{segment_id, c}]))
+
+      assert result.repaired == [{segment_id, b}]
+      assert read_values(b, segment_id) == ["x", "y"]
+      assert read_values(c, segment_id) == ["x"]
+    end
+
     test "a failed copy of a broker outside the set, of an active segment or of an unknown one changes nothing" do
       {metadata, segment_id} = sealed_metadata([:a, :b, :c])
       {active, active_id} = active_metadata([:a, :b, :c])
