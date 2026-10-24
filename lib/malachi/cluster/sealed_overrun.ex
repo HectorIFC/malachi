@@ -58,7 +58,9 @@ defmodule Malachi.Cluster.SealedOverrun do
   That argument is about active segments and does not carry over. Here the control plane has already
   sealed the segment, the length is immutable, no producer will ever write to it again, and there is no
   decision left for the pass to decline. Fencing every copy costs nothing it could regret, and it is
-  what lets the next pass skip a copy it has already settled: the marker is the memory.
+  what lets the next pass skip a copy it has already settled at the recorded length: the marker is the memory.
+  A copy whose bytes stay above the recorded size is probed again on every pass in which its segment is fully
+  live, not under-replicated and the copy is not latched, and settled again with it, within the batch.
 
   Repair still works on a fenced copy. `ReplicationServer.follow/4`, which `Malachi.Cluster.Catchup`
   uses to backfill a short copy, deliberately carries no fence check, so settling a copy that is short
@@ -80,27 +82,41 @@ defmodule Malachi.Cluster.SealedOverrun do
 
   `unsettled` is the `{segment_id, replica}` pairs whose stored bytes do not match their segment's
   recorded `byte_size` from above, which `Malachi.Cluster.SelfHealing`'s integrity probe already
-  measures for every sealed segment on every pass. That probe is the whole reason this policy asks for
-  nothing of its own: a copy that has been settled is byte-exact, so it stops appearing here, and the
-  question costs the pass no call it was not already making.
+  measures for every sealed segment whose replicas are all live and not under-replicated, on every pass. That
+  probe is the whole reason this policy asks for nothing of its own: a copy settled at the recorded length is
+  byte-exact and stops appearing here, unless its bytes stay above the recorded size, in which case it is
+  probed again while its segment stays fully live, not under-replicated and the copy is not latched. The question
+  costs the pass no call it was not already making.
 
-  Bounded because the FIRST pass after this ships finds every sealed copy in the cluster unsettled at
-  once. Each action opens a log, verifies its records and fsyncs, so an unbounded pass would put that
-  on the disk the produce path is using. The bound costs only time: the pass is level-triggered, so
-  what it leaves is simply picked up next tick.
+  Bounded because the FIRST pass after this ships may find many sealed copies unsettled at once. Each
+  action opens a log, verifies its records and fsyncs, so an unbounded pass would put that on the disk
+  the produce path is using. The pass is level-triggered, and `after_key` makes it take turns: it starts
+  just past the last copy the previous pass took, so a copy left out waits for its turn instead of
+  losing every pass to the same prefix.
 
   A segment that is no longer sealed in `metadata` is skipped rather than acted on: retention can drop
   a segment between the probe and this call, and a length that is not recorded is not a length to bring
   a copy down to.
   """
-  @spec plan(Metadata.t(), [{Metadata.segment_id(), Metadata.broker()}], pos_integer()) :: [action()]
-  def plan(%Metadata{} = metadata, unsettled, batch_size)
+  @spec plan(Metadata.t(), [{Metadata.segment_id(), Metadata.broker()}], pos_integer(), nil | {term(), term()}) ::
+          [action()]
+  def plan(%Metadata{} = metadata, unsettled, batch_size, after_key \\ nil)
       when is_list(unsettled) and is_integer(batch_size) and batch_size > 0 do
     unsettled
     |> Enum.sort()
     |> Enum.uniq()
+    |> rotate_after(after_key)
     |> Enum.flat_map(&settle(&1, metadata))
     |> Enum.take(batch_size)
+  end
+
+  # Starts the sorted list just past `after_key`, so the copy the previous pass took last is not the first one
+  # taken again. A key past every copy wraps to the start, and a nil key is the first pass ever.
+  defp rotate_after(sorted, nil), do: sorted
+
+  defp rotate_after(sorted, after_key) do
+    {through, past} = Enum.split_with(sorted, &(&1 <= after_key))
+    past ++ through
   end
 
   defp settle({segment_id, replica}, metadata) do

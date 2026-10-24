@@ -66,6 +66,18 @@ defmodule Malachi.Test.FaultySegmentStore do
   end
 
   @doc """
+  Every truncation under `directory` that the store accepts answers `reply` in place of the store's answer, until
+  `clear/1`. A cut at or past the end is accepted and removes nothing. A cut that the store refuses answers the
+  store's own error, and a cut that fails after it truncated (the sync or the index) may already be on disk: this
+  helper does not undo it. `fail/3` cannot show this, because it answers before the truncation runs.
+  """
+  @spec fail_after_truncate(Path.t(), term()) :: :ok
+  def fail_after_truncate(directory, reply) do
+    true = :ets.insert(@table, {{:rule, Path.expand(directory), :truncate_to_then}, reply})
+    :ok
+  end
+
+  @doc """
   From now on, a read under `directory` at or past `offset` answers `reply`; reads before `offset` still run.
   This is how a test makes a peer serve the first batches of a range and then fail, which `fail/3` cannot.
   """
@@ -143,8 +155,23 @@ defmodule Malachi.Test.FaultySegmentStore do
   def seal(handle), do: intercept(directory_of(handle), :seal, fn -> ElixirStore.seal(handle) end)
 
   @impl true
-  def truncate_to(handle, end_offset),
-    do: intercept(directory_of(handle), :truncate_to, fn -> ElixirStore.truncate_to(handle, end_offset) end)
+  def truncate_to(handle, end_offset) do
+    directory = Path.expand(directory_of(handle))
+
+    case rule_for(directory, :truncate_to_then) do
+      {:ok, reply} ->
+        bump(directory, :truncate_to)
+
+        # A cut the store refuses is not made to look accepted: its own error is the answer.
+        case ElixirStore.truncate_to(handle, end_offset) do
+          {:ok, _handle} -> reply
+          {:error, _reason} = refused -> refused
+        end
+
+      :none ->
+        intercept(directory, :truncate_to, fn -> ElixirStore.truncate_to(handle, end_offset) end)
+    end
+  end
 
   @impl true
   def verify(directory, segment_id, opts),

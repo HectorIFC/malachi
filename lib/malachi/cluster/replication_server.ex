@@ -1447,17 +1447,117 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
+  # The trim is counted where it happens: this node holds the copy and knows what it dropped, and a settle whose
+  # caller gave up still trims. A repeat seal finds nothing past the end and reports nothing.
+  defp report_trim(segment_id, dropped) when dropped > 0 do
+    Telemetry.sealed_copies_settled(:trimmed, 1, dropped)
+
+    Logger.warning(I18n.t(:replication_sealed_copy_trimmed, records: dropped, segment_id: inspect(segment_id)))
+    :ok
+  end
+
+  defp report_trim(_segment_id, _dropped), do: :ok
+
   # The write fence behind `seal/4`, `seal_async/5` and `seal_at/5`, answering what the sealed log
   # holds. `target` is `:whole` for the plain fence and an end offset for the one that first brings the
   # copy down to a length the control plane recorded.
   defp seal_segment(state, segment_id, base_offset, target) do
     with {:ok, state, log} <- open_segment(state, segment_id, base_offset),
          held = log.next_offset,
-         {:ok, state, log} <- run_log(state, segment_id, log, &trim_to(&1, target)),
+         {:ok, state, log} <- trim_copy(state, segment_id, log, target, held, base_offset),
          {:ok, state, log} <- run_log(state, segment_id, log, &Log.seal/1) do
       {{:ok, log.next_offset, bytes_on_disk(state, segment_id), max(held - log.next_offset, 0)}, state}
     else
       {:error, reason, state} -> {{:error, reason}, state}
+    end
+  end
+
+  # The trim is reported as soon as it has run, whether or not its call answers: a cut that removed records and
+  # then failed to sync has still removed them. A cut flushes the buffered records first, as the first step of
+  # the trim, so the logical end is the disk end by the time anything is removed. When the cut fails, the count is
+  # the logical end minus what the directory still holds, read without writing to it. Two exceptions: a directory
+  # with no segment files left counts every record from the segment's base (all of them are gone), and a directory
+  # that cannot be read counts nothing and says so in a warning.
+  defp trim_copy(state, segment_id, log, target, held, base_offset) do
+    if cut?(target, held),
+      do: cut_copy(state, segment_id, log, target, held, base_offset),
+      else: untouched_trim(state, segment_id, log, target, held)
+  end
+
+  # A trim that changes nothing (the plain fence, or a target at or past the end) removes nothing and is not measured.
+  defp cut?(:whole, _held), do: false
+  defp cut?(target, held), do: target < held
+
+  defp untouched_trim(state, segment_id, log, target, held) do
+    case run_log(state, segment_id, log, &trim_to(&1, target)) do
+      {:ok, state, log} ->
+        report_trim(segment_id, max(held - log.next_offset, 0))
+        {:ok, state, log}
+
+      {:error, reason, state} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp cut_copy(state, segment_id, log, target, held, base_offset) do
+    # A flush that fails removes nothing, so nothing is counted: the error is the answer.
+    case run_log(state, segment_id, log, &Log.sync/1) do
+      {:ok, state, log} ->
+        case run_log(state, segment_id, log, &trim_to(&1, target)) do
+          {:ok, state, log} ->
+            report_trim(segment_id, max(held - log.next_offset, 0))
+            {:ok, state, log}
+
+          {:error, reason, state} ->
+            report_trim(segment_id, removed_by_failed_cut(segment_id, held, base_offset, log))
+            {:error, reason, state}
+        end
+
+      {:error, reason, state} ->
+        {:error, reason, state}
+    end
+  end
+
+  # What the directory still holds decides what the cut removed. Nothing left at all means every record is gone.
+  defp removed_by_failed_cut(segment_id, held, base_offset, log) do
+    case remaining_end(log) do
+      {:ok, :none} ->
+        held - base_offset
+
+      {:ok, remaining} ->
+        max(held - remaining, 0)
+
+      {:error, reason} ->
+        Logger.warning(
+          I18n.t(:replication_trim_count_unknown, segment_id: inspect(segment_id), reason: inspect(reason))
+        )
+
+        0
+    end
+  end
+
+  # The end the directory still holds: the first record on disk plus the records it counts, or `:none` when no
+  # segment file is left. `first` is read from the directory, so it is the origin whatever the caller passed; the
+  # caller's `base_offset` is used only when no segment file is left, to count from the segment's first record.
+  # This reads the directory on the failure path only, inside the server process, so its cost grows with the
+  # segment's size: a documented limit, not a bound.
+  defp remaining_end(log) do
+    opts = [store: log.store] ++ log.segment_opts
+
+    case Log.segment_offsets(log.directory) do
+      {:ok, []} ->
+        {:ok, :none}
+
+      {:ok, [first | _]} ->
+        case Log.verify(log.directory, opts) do
+          {:ok, %{records: records}} -> {:ok, first + records}
+          # With files found above, an :enoent here means the directory became unreadable, or a segment was removed
+          # mid-read by retention. Both are unknowable from here, so both count zero with a warning.
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

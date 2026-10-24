@@ -684,27 +684,35 @@ defmodule Malachi.I18n do
           "them active: %{segments}. Their ranges were refusing every write until now, so a fence's " <>
           "seal failing to land is worth investigating upstream"
     },
-    heal_sealed_copy_trimmed: %{
+    replication_trim_count_unknown: %{
       "pt_BR" =>
-        "%{count} cópia(s) de segmento selado voltaram ao comprimento que o control plane registrou, " <>
-          "descartando %{records} registro(s) além do fim selado: %{copies}. Nenhum deles foi " <>
-          "reconhecido a um cliente nem servido em leitura, mas uma cópia à frente do selo veio de uma " <>
-          "escrita que perdeu o quórum, então vale investigar o failover daquele segmento",
-      "en_US" =>
-        "brought %{count} sealed segment copy(ies) back to the length the control plane recorded, " <>
-          "dropping %{records} record(s) past the sealed end: %{copies}. None was acknowledged to a " <>
-          "client or served to a read, but a copy ahead of its seal came from a write that lost quorum, " <>
-          "so that segment's failover is worth investigating"
+        "não foi possível contar os registros que um corte falho removeu do segmento " <>
+          "%{segment_id}: %{reason}",
+      "en_US" => "could not count the records a failed trim removed from segment %{segment_id}: %{reason}"
+    },
+    replication_sealed_copy_trimmed: %{
+      "pt_BR" => "segmento %{segment_id} descartou %{records} registro(s) além do fim selado",
+      "en_US" => "dropping %{records} record(s) past the sealed end on segment %{segment_id}"
     },
     heal_sealed_copy_not_settled: %{
       "pt_BR" =>
         "%{count} cópia(s) de segmento selado não puderam ser levadas ao comprimento que o control plane " <>
           "registrou e seguem divergentes: %{copies}. Uma passagem posterior tenta de novo, mas uma " <>
-          "cópia que nunca assenta guarda bytes que o selo dela exclui",
+          "cópia que nunca assenta guarda bytes que o selo dela exclui, ou menos registros do que o selo nomeia",
       "en_US" =>
         "could not bring %{count} sealed segment copy(ies) to the length the control plane recorded, " <>
           "and they are still divergent: %{copies}. A later pass tries again, but a copy that never " <>
-          "settles is holding bytes its own seal excludes"
+          "settles is holding bytes its own seal excludes, or fewer records than its seal names"
+    },
+    heal_sealed_copy_recorded_below: %{
+      "pt_BR" =>
+        "%{count} cópia(s) de segmento selado guardam exatamente os registros do selo, mas medem mais bytes " <>
+          "do que o byte_size registrado: %{copies}. O comprimento está certo, e o tamanho gravado pode ser o " <>
+          "que está baixo; como um tamanho selado é imutável, nenhuma passagem consegue corrigi-lo",
+      "en_US" =>
+        "%{count} sealed segment copy(ies) hold exactly the records their seal names but measure more bytes " <>
+          "than the recorded byte_size: %{copies}. The length is right, and the recorded size may be the low one; " <>
+          "and because a sealed size is immutable no pass can correct it"
     },
     heal_orphaned_fence_unrecorded: %{
       "pt_BR" =>

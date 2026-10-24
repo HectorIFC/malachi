@@ -133,6 +133,11 @@ defmodule Malachi.Telemetry.MetricsReporterTest do
     Telemetry.sealed_copies_settled(:failed, 1, 0)
 
     assert Metrics.get_system_metrics().operations.sealed_copies_unsettled == before.sealed_copies_unsettled + 1
+
+    Telemetry.sealed_copies_settled(:recorded_size_below, 4, 0)
+
+    assert Metrics.get_system_metrics().operations.sealed_copies_recorded_below ==
+             before.sealed_copies_recorded_below + 4
   end
 
   test "a degraded reconcile lands on the counter for its reason" do
