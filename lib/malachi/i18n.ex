@@ -684,6 +684,12 @@ defmodule Malachi.I18n do
           "them active: %{segments}. Their ranges were refusing every write until now, so a fence's " <>
           "seal failing to land is worth investigating upstream"
     },
+    replication_trim_count_unknown: %{
+      "pt_BR" =>
+        "não foi possível contar os registros que um corte falho removeu do segmento " <>
+          "%{segment_id}: %{reason}",
+      "en_US" => "could not count the records a failed trim removed from segment %{segment_id}: %{reason}"
+    },
     replication_sealed_copy_trimmed: %{
       "pt_BR" => "segmento %{segment_id} descartou %{records} registro(s) além do fim selado",
       "en_US" => "dropping %{records} record(s) past the sealed end on segment %{segment_id}"

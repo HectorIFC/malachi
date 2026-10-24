@@ -1355,6 +1355,82 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert ReplicationServer.failed_segments(server, [@segment]) == {:ok, MapSet.new([@segment])}
     end
 
+    # The cut lands on disk and the call that followed fails: the records are gone, so the trim is still counted,
+    # and counted as what the directory now holds rather than as what the call answered.
+    test "a trim whose cut lands and then fails still reports the records it removed" do
+      {server, directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      watch_trims(server)
+      FaultySegmentStore.fail_after_truncate(storage_dir(directory, @segment), {:error, :eio})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert ReplicationServer.seal_at(server, @segment, 0, 3) == {:error, {:storage, :eio}}
+      end)
+
+      assert_received {:trimmed, 1, 2}
+      assert ReplicationServer.failed_segments(server, [@segment]) == {:ok, MapSet.new([@segment])}
+    end
+
+    # The count does not depend on where the segment starts: a base offset above zero counts the same records.
+    test "a failed trim at a base offset above zero reports the records it removed" do
+      {server, directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 14} = ReplicationServer.append(server, @segment, [server], 10, records(["a", "b", "c", "d", "e"]))
+      watch_trims(server)
+      FaultySegmentStore.fail_after_truncate(storage_dir(directory, @segment), {:error, :eio})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert ReplicationServer.seal_at(server, @segment, 10, 13) == {:error, {:storage, :eio}}
+      end)
+
+      assert_received {:trimmed, 1, 2}
+    end
+
+    # The remaining files cannot be read after the cut lands: nothing is counted, and the operator is told why.
+    test "a failed cut whose remaining files cannot be read reports nothing and says so" do
+      {server, directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      watch_trims(server)
+      FaultySegmentStore.fail_after_truncate(storage_dir(directory, @segment), {:error, :eio})
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :verify, {:error, :eio})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, _reason} = ReplicationServer.seal_at(server, @segment, 0, 3)
+        end)
+
+      assert log =~ "could not count the records"
+      refute_received {:trimmed, _copies, _records}
+    end
+
+    # A cut below the segment's first offset fails before it removes anything, and the flush it starts first has
+    # already made the copy's records durable, so a flush afterwards still answers ok.
+    test "a cut below the segment's first offset leaves the flush answer ok" do
+      {server, _directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 14} = ReplicationServer.append(server, @segment, [server], 10, records(["a", "b", "c", "d", "e"]))
+      watch_trims(server)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, _reason} = ReplicationServer.seal_at(server, @segment, 0, 3)
+      end)
+
+      assert ReplicationServer.flush(server) == :ok
+      refute_received {:trimmed, _copies, _records}
+    end
+
+    # A cut that fails before it removes anything reports nothing: the count is what the disk lost, not what was asked.
+    test "a trim that fails before removing anything reports nothing" do
+      {server, directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      watch_trims(server)
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :sync, {:error, :eio})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert ReplicationServer.seal_at(server, @segment, 0, 3) == {:error, {:storage, :eio}}
+      end)
+
+      refute_received {:trimmed, _copies, _records}
+    end
+
     # A settle whose caller gave up still runs on the node that holds the copy, so its trim is counted there.
     test "a trim whose caller gave up is still reported, by the node that ran it" do
       server = start_broker()
