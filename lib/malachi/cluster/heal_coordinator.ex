@@ -443,25 +443,11 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   defp report_settled(results) do
     outcomes = Enum.map(results, &classify/1)
-    trimmed = for {:trimmed, segment_id, replica, dropped} <- outcomes, do: {segment_id, replica, dropped}
     below = for {:recorded_below, segment_id, replica} <- outcomes, do: {segment_id, replica}
     fenced = Enum.count(outcomes, &match?({:fenced, _segment_id, _replica}, &1))
     unsettled = for {:failed, segment_id, replica} <- outcomes, do: {segment_id, replica}
 
     if fenced > 0, do: Telemetry.sealed_copies_settled(:fenced, fenced, 0)
-
-    if trimmed != [] do
-      records = Enum.reduce(trimmed, 0, fn {_segment_id, _replica, dropped}, sum -> sum + dropped end)
-      Telemetry.sealed_copies_settled(:trimmed, length(trimmed), records)
-
-      Logger.warning(
-        I18n.t(:heal_sealed_copy_trimmed,
-          count: length(trimmed),
-          records: records,
-          copies: inspect(Enum.map(trimmed, fn {segment_id, replica, _dropped} -> {segment_id, replica} end))
-        )
-      )
-    end
 
     if below != [] do
       Telemetry.sealed_copies_settled(:recorded_size_below, length(below), 0)

@@ -684,17 +684,9 @@ defmodule Malachi.I18n do
           "them active: %{segments}. Their ranges were refusing every write until now, so a fence's " <>
           "seal failing to land is worth investigating upstream"
     },
-    heal_sealed_copy_trimmed: %{
-      "pt_BR" =>
-        "%{count} cópia(s) de segmento selado voltaram ao comprimento que o control plane registrou, " <>
-          "descartando %{records} registro(s) além do fim selado: %{copies}. Nenhum deles foi " <>
-          "reconhecido a um cliente nem servido em leitura, mas uma cópia à frente do selo veio de uma " <>
-          "escrita que perdeu o quórum, então vale investigar o failover daquele segmento",
-      "en_US" =>
-        "brought %{count} sealed segment copy(ies) back to the length the control plane recorded, " <>
-          "dropping %{records} record(s) past the sealed end: %{copies}. None was acknowledged to a " <>
-          "client or served to a read, but a copy ahead of its seal came from a write that lost quorum, " <>
-          "so that segment's failover is worth investigating"
+    replication_sealed_copy_trimmed: %{
+      "pt_BR" => "segmento %{segment_id} descartou %{records} registro(s) além do fim selado",
+      "en_US" => "dropping %{records} record(s) past the sealed end on segment %{segment_id}"
     },
     heal_sealed_copy_not_settled: %{
       "pt_BR" =>

@@ -1447,6 +1447,17 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
+  # The trim is counted where it happens: this node holds the copy and knows what it dropped, and a settle whose
+  # caller gave up still trims. A repeat seal finds nothing past the end and reports nothing.
+  defp report_trim(segment_id, dropped) when dropped > 0 do
+    Telemetry.sealed_copies_settled(:trimmed, 1, dropped)
+
+    Logger.warning(I18n.t(:replication_sealed_copy_trimmed, records: dropped, segment_id: inspect(segment_id)))
+    :ok
+  end
+
+  defp report_trim(_segment_id, _dropped), do: :ok
+
   # The write fence behind `seal/4`, `seal_async/5` and `seal_at/5`, answering what the sealed log
   # holds. `target` is `:whole` for the plain fence and an end offset for the one that first brings the
   # copy down to a length the control plane recorded.
@@ -1454,6 +1465,8 @@ defmodule Malachi.Cluster.ReplicationServer do
     with {:ok, state, log} <- open_segment(state, segment_id, base_offset),
          held = log.next_offset,
          {:ok, state, log} <- run_log(state, segment_id, log, &trim_to(&1, target)),
+         # The records are gone from disk once the trim lands, whether or not the seal that follows succeeds.
+         :ok <- report_trim(segment_id, max(held - log.next_offset, 0)),
          {:ok, state, log} <- run_log(state, segment_id, log, &Log.seal/1) do
       {{:ok, log.next_offset, bytes_on_disk(state, segment_id), max(held - log.next_offset, 0)}, state}
     else

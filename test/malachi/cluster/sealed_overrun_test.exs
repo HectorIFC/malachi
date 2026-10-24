@@ -328,7 +328,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
           replication_factor: 2
         )
 
-      watch_settlements(coordinator)
+      watch_settlements(coordinator, [a, b])
       log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
 
       # Bytes equal to the recorded size after the trim are the routine case, and must not be reported as a
@@ -486,6 +486,67 @@ defmodule Malachi.Cluster.SealedOverrunTest do
       assert log =~ "could not bring 1 sealed segment copy"
     end
 
+    # A pass with nothing to settle keeps the turn. The cursor rests on p after the pass that settles it last, so
+    # the empty pass in between must keep it there: a reset would start the next pass at p instead of q.
+    test "a pass with nothing to settle keeps the turn, so the next pass starts past the last copy settled" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_everywhere([a, b, c], ["x", "y"])
+      for replica <- [a, b, c], do: {:ok, 2} = ReplicationServer.follow(replica, segment_id, 2, records(["surplus"]))
+      [p, q, r] = Enum.sort([a, b, c])
+      {source, apply} = metadata_store(metadata)
+      hold = start_supervised!({Agent, fn -> MapSet.new([p]) end}, id: {:hold, System.unique_integer([:positive])})
+      owner = self()
+
+      settle = fn replica, segment, base, end_offset ->
+        send(owner, {:settled, replica})
+
+        if Agent.get(hold, &MapSet.member?(&1, replica)) do
+          :error
+        else
+          case ReplicationServer.seal_at(replica, segment, base, end_offset, 5_000) do
+            {:ok, held_end, byte_size, dropped} -> {:ok, dropped, byte_size, held_end}
+            {:error, _reason} -> :error
+          end
+        end
+      end
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          settle_batch_size: 2,
+          settle_copy: settle
+        )
+
+      drain = fn drain, acc ->
+        receive do
+          {:settled, replica} -> drain.(drain, [replica | acc])
+        after
+          0 -> Enum.reverse(acc)
+        end
+      end
+
+      pass = fn ->
+        ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+        drain.(drain, [])
+      end
+
+      # p is held, so it is attempted and left; q settles, and the cursor rests on q.
+      assert pass.() == [p, q]
+
+      # p is released. r and p settle, and p is the last copy attempted, so the cursor rests on p.
+      Agent.update(hold, fn _held -> MapSet.new() end)
+      assert pass.() == [r, p]
+
+      # Nothing is divergent now, so this pass is empty and must keep the cursor on p.
+      assert pass.() == []
+
+      # Divergence returns on every copy. From p, the next pass takes q and r, not p and q.
+      for replica <- [p, q, r], do: {:ok, 2} = ReplicationServer.follow(replica, segment_id, 2, records(["again"]))
+      assert pass.() == [q, r]
+    end
+
     # A replica that does not answer the settle stops the pass: the copies after it wait for the next tick,
     # so a silent replica costs one timeout per pass rather than one per copy in the batch.
     test "an unanswered settle stops the pass, and the copies after it wait" do
@@ -583,23 +644,26 @@ defmodule Malachi.Cluster.SealedOverrunTest do
     # Counts the settling pass by its outcome, so a copy that is settled again on every pass shows up as
     # a second event even though the bytes never change. The handler is VM-wide and this module is async,
     # so it forwards only what the coordinator under test emits: a handler runs in the emitting process.
-    defp watch_settlements(coordinator) do
+    # The coordinator reports the outcomes it classifies, and each server reports the trims it performs, so the
+    # watch takes both. The filter is by emitting process: the handler runs where the event is emitted.
+    defp watch_settlements(coordinator, brokers) do
       handler = {__MODULE__, System.unique_integer([:positive])}
+      emitters = [coordinator | Enum.map(brokers, &GenServer.whereis/1)]
 
       :ok =
         :telemetry.attach(
           handler,
           [:malachi, :cluster, :sealed_copies_settled],
           &__MODULE__.forward_settlement/4,
-          {self(), coordinator}
+          {self(), emitters}
         )
 
       on_exit(fn -> :telemetry.detach(handler) end)
     end
 
     @doc false
-    def forward_settlement(_event, measurements, %{result: result}, {parent, coordinator}) do
-      if self() == coordinator, do: send(parent, {:settled, result, measurements.copies})
+    def forward_settlement(_event, measurements, %{result: result}, {parent, emitters}) do
+      if self() in emitters, do: send(parent, {:settled, result, measurements.copies})
     end
 
     defp settled_events do
@@ -640,7 +704,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
 
       {source, apply} = metadata_store(metadata)
       coordinator = start_coordinator(live_brokers: fn -> [a, b, c] end, metadata_source: source, apply_command: apply)
-      watch_settlements(coordinator)
+      watch_settlements(coordinator, [a, b, c])
 
       ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
 
@@ -677,7 +741,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
 
       {source, apply} = metadata_store(metadata)
       coordinator = start_coordinator(live_brokers: fn -> [a, b, c] end, metadata_source: source, apply_command: apply)
-      watch_settlements(coordinator)
+      watch_settlements(coordinator, [a, b, c])
 
       ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
 
@@ -705,7 +769,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
 
       {source, apply} = metadata_store(metadata)
       coordinator = start_coordinator(live_brokers: fn -> [a, b, c] end, metadata_source: source, apply_command: apply)
-      watch_settlements(coordinator)
+      watch_settlements(coordinator, [a, b, c])
 
       for _pass <- 1..2 do
         log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
@@ -730,7 +794,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
 
       {source, apply} = metadata_store(metadata)
       coordinator = start_coordinator(live_brokers: fn -> [a, b, c] end, metadata_source: source, apply_command: apply)
-      watch_settlements(coordinator)
+      watch_settlements(coordinator, [a, b, c])
 
       log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
 

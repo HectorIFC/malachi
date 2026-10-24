@@ -211,10 +211,14 @@ defmodule Malachi.Telemetry do
   among the heal pass's failures, not counted under this event's failed result, and the scrubber finds it on
   its own cycle, which verifies local copies; its repair waits for a later cycle while that server does not
   answer, except an index rebuild, which is not deferred. One that fails between the probe and the settle is counted as
-  `:failed`, and a settle that times out is counted the same way even if the server trims records afterwards,
-  so those records are not counted as `:trimmed`. A directory that cannot be listed reads as lost and goes to
-  the repair path. Without a replacement, a copy trimmed but unfenced stays so after a restart, unless its
-  bytes are still above the recorded size, in which case the next pass selects it again.
+  `:failed` by the coordinator, and a trim is counted by the node that performs it, so a settle that times out
+  is still counted as `:trimmed` when the server trims records afterwards. Those are two reports, which can come
+  from one node or two, so one copy can appear under both results in the same pass. A directory that cannot be
+  listed reads as lost, and the repair path leaves it alone while the directory cannot be listed. A copy trimmed
+  but unfenced stays so after a restart, unless
+  its bytes are still above the recorded size, in which case a pass selects it again while its segment is fully
+  live, not under-replicated, the copy is not latched, its segment's latch state was readable this tick, and its
+  own probe answers that tick.
   `records` is 0 for anything but `:trimmed`.
   """
   @spec sealed_copies_settled(

@@ -1304,7 +1304,71 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     end
   end
 
+  @doc false
+  def forward_trim(_event, measurements, %{result: :trimmed}, {parent, server}) do
+    if self() == server, do: send(parent, {:trimmed, measurements.copies, measurements.records})
+  end
+
+  # Forwards the trims the server emits, and only those: the handler runs in the emitting process, so the filter
+  # keeps other tests' servers from reaching this test's mailbox.
+  defp watch_trims(server) do
+    handler = {__MODULE__, System.unique_integer([:positive])}
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:malachi, :cluster, :sealed_copies_settled],
+        &__MODULE__.forward_trim/4,
+        {self(), GenServer.whereis(server)}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
   describe "seal_at/5 (the fence that brings a copy down to a recorded length)" do
+    # The trim is counted by the node that performs it, once: a repeat seal finds nothing past the end.
+    test "a trim is reported by the node that performed it, and a repeat reports nothing" do
+      server = start_broker()
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      watch_trims(server)
+
+      assert {:ok, 3, _bytes, 2} = ReplicationServer.seal_at(server, @segment, 0, 3)
+      assert_received {:trimmed, 1, 2}
+
+      assert {:ok, 3, _bytes, 0} = ReplicationServer.seal_at(server, @segment, 0, 3)
+      refute_received {:trimmed, _copies, _records}
+    end
+
+    # The trim is removed from disk before the seal is attempted, so a seal the device refuses still removed the
+    # records, and that removal must still be counted.
+    test "a trim before a refused seal is still reported, because the records are already gone" do
+      {server, directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      watch_trims(server)
+      FaultySegmentStore.fail(storage_dir(directory, @segment), :seal, {:error, :eio})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert ReplicationServer.seal_at(server, @segment, 0, 3) == {:error, {:storage, :eio}}
+      end)
+
+      assert_received {:trimmed, 1, 2}
+      assert ReplicationServer.failed_segments(server, [@segment]) == {:ok, MapSet.new([@segment])}
+    end
+
+    # A settle whose caller gave up still runs on the node that holds the copy, so its trim is counted there.
+    test "a trim whose caller gave up is still reported, by the node that ran it" do
+      server = start_broker()
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      watch_trims(server)
+
+      :sys.suspend(server)
+      assert {:error, :unreachable} = ReplicationServer.seal_at(server, @segment, 0, 3, 50)
+      :sys.resume(server)
+
+      assert_receive {:trimmed, 1, 2}, 2_000
+      assert read_values(server, @segment) == ["a", "b", "c"]
+    end
+
     test "a copy holding more than the recorded length is trimmed to it and fenced there" do
       # The defect this exists for: an old primary wrote locally, lost quorum, and the segment was
       # sealed at a shorter length on the replicas that answered. Nothing else brings this copy back,
