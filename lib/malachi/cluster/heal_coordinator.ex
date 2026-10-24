@@ -67,9 +67,13 @@ defmodule Malachi.Cluster.HealCoordinator do
       `Malachi.Cluster.ReplicationServer.fenced_segments/3`, answering `%{}` on any error). See the
       orphaned-fence pass below; the failover pass also asks it, batched per follower, about the few
       candidates a suspected broker's answer would otherwise drop;
-    * `:failed_state` - `((replica, [segment_id]) -> MapSet.t(segment_id))`, which of a replica's
+    * `:failed_state` - `((replica, [segment_id]) -> MapSet.t(segment_id) | :unknown)`, which of a replica's
       segments have a copy that FAILED there in storage (default
-      `Malachi.Cluster.ReplicationServer.failed_segments/3`, answering an empty set on any error). An
+      `Malachi.Cluster.ReplicationServer.failed_segments/3`, answering `:unknown` on any error, which leaves
+      those segments out of the integrity pass for that tick; while a live replica stays silent, its segments
+      wait there, which is a deliberate trade for never probing a copy that may be latched. The membership
+      pass is not held back by this, so it may backfill from a replica whose latch was not read; that backfill
+      then fails for the tick and is retried). An
       active one becomes a failover candidate (see "A copy that failed" in `Malachi.Cluster.Failover`); a
       sealed one is a lost replica `Malachi.Cluster.SelfHealing` replaces on another broker;
     * `:discard_copy` - `((replica, segment_id) -> any)`, how a failed copy that was replaced is removed
@@ -99,20 +103,22 @@ defmodule Malachi.Cluster.HealCoordinator do
   on disk does not agree with it (`Malachi.Cluster.SealedOverrun` documents how a copy comes to hold
   more than the seal says, and why the recorded length is the one that wins). The copies to settle come
   from the integrity probe `Malachi.Cluster.SelfHealing` already runs over sealed segments whose replicas are
-  all live, as its
-  `:unsettled` list, so this pass asks nothing of its own; `SealedOverrun.plan/3` turns that list into
-  `seal_at` calls and the `:settle_copy` seam makes them.
+  all live, not under-replicated, and whose latch state was readable this tick, as its `:unsettled` list, so
+  this pass asks nothing of its own;
+  `SealedOverrun.plan/3` turns that list into `seal_at` calls and the `:settle_copy` seam makes them.
 
     * `:settle_copy` - `((replica, segment_id, base_offset, end_offset) ->
-      {:ok, dropped, byte_size, held_end} | :error)`,
+      {:ok, dropped, byte_size, held_end} | :unreachable | :error)`,
       how one copy is trimmed to the recorded length and fenced there, or fenced at its shorter length when it
       holds fewer records (default
-      `Malachi.Cluster.ReplicationServer.seal_at/5`). Unlike `:fence` it takes the length, because the
+      `Malachi.Cluster.ReplicationServer.seal_at/5`). `:unreachable` stops the pass, so the copies after it wait
+      for the next tick. Unlike `:fence` it takes the length, because the
       whole point is that the number is the control plane's and not the replica's;
     * `:settle_timeout` - ms for that call (default 5000, not `:probe_timeout`). It bounds the trim
       and fence, which open the log, check the records kept and fsync. A probe's
       one second would time out on a large segment and have the pass retry work it had already done;
-    * `:settle_batch_size` - copies settled per pass (default 64). The FIRST pass after this ships
+    * `:settle_batch_size` - copies attempted per pass (default 64), taken in turn: each pass starts just past the
+      last copy the previous one attempted. The FIRST pass after this ships
       may find many sealed copies over their recorded size at once, and an unbounded pass would put that
       whole scan and fsync load on the disk the produce path is using. Separate from `:heal_opts`'
       `:batch_size`, which bounds how much a backfill copies, because the two answer different
@@ -184,7 +190,10 @@ defmodule Malachi.Cluster.HealCoordinator do
         # The fifth seam, and one of the seams that WRITE. Its timeout and its batch are its own for
         # the reasons in the moduledoc: it opens and fsyncs where the others stat or look up a marker.
         settle_copy: Keyword.get(opts, :settle_copy, default_settle_copy(Keyword.get(opts, :settle_timeout, 5_000))),
-        settle_batch_size: Keyword.get(opts, :settle_batch_size, @default_settle_batch_size)
+        settle_batch_size: Keyword.get(opts, :settle_batch_size, @default_settle_batch_size),
+        # The last copy a settle pass attempted. Not persisted: a restart of the process starts the rotation at the
+        # beginning of the list, which costs time and nothing else, since the pass is level-triggered.
+        settle_after: nil
       })
 
     PeriodicWorker.schedule(state)
@@ -237,8 +246,14 @@ defmodule Malachi.Cluster.HealCoordinator do
 
     # Asked first, because both halves below act on it: a failed copy of an active segment is a failover
     # candidate, and one of a sealed segment is a lost replica to replace.
-    failed = probe_failures(state, metadata, live)
-    heal_opts = state.heal_opts |> put_spread(state.spread.()) |> Keyword.put(:failed, failed)
+    {failed, unknown_failed} = probe_failures(state, metadata, live)
+
+    heal_opts =
+      state.heal_opts
+      |> put_spread(state.spread.())
+      |> Keyword.put(:failed, failed)
+      |> Keyword.put(:unknown_failed, unknown_failed)
+
     healed = SelfHealing.heal_sealed(metadata, live, state.replication_factor, heal_opts)
     seals = Failover.plan(metadata, live, probe_candidates(state, metadata, live, failed), now_ms, failed)
     # A segment this pass seals for failover may have a primary it just fenced, which the orphaned-fence
@@ -255,7 +270,7 @@ defmodule Malachi.Cluster.HealCoordinator do
 
     discard_replaced_copies(state, replaced_copies(healed.applied, failed))
     report_orphans(orphans, state)
-    settle_sealed_copies(state, metadata, healed.unsettled)
+    state = settle_sealed_copies(state, metadata, healed.unsettled)
 
     # A heal that cannot complete leaves the cluster under-replicated; the periodic tick used to
     # discard the result, making persistent failures invisible until something else broke.
@@ -392,17 +407,29 @@ defmodule Malachi.Cluster.HealCoordinator do
 
   # Brings the copies of sealed segments that do not match their recorded length back to it. Level
   # triggered: a copy this pass could not settle is reported by the integrity probe again and retried next
-  # tick. A copy the batch leaves out waits for a later pass, and copies that never settle (see
-  # `report_settled/1`) keep their batch slots, so a full batch of them starves the rest. That is a known
-  # gap of issue #248, not something this pass avoids.
+  # tick. A copy the batch leaves out waits for a later pass, and the batch takes turns through the cursor,
+  # so a copy that never settles (see `report_settled/1`) cannot keep the only slot.
+  #
+  # The batch takes turns: the cursor is the last copy this pass attempted, so the next pass starts just past
+  # it. A replica that does not answer stops the pass, as it does for the commands, and the copies after it
+  # wait for the next tick, so one silent replica costs one timeout per pass rather than one per copy.
   defp settle_sealed_copies(state, metadata, unsettled) do
-    metadata
-    |> SealedOverrun.plan(unsettled, state.settle_batch_size)
-    |> Enum.map(fn {replica, segment_id, base_offset, end_offset} ->
-      recorded = {Metadata.get_segment(metadata, segment_id).byte_size, end_offset}
-      {segment_id, replica, recorded, state.settle_copy.(replica, segment_id, base_offset, end_offset)}
-    end)
-    |> report_settled()
+    planned = SealedOverrun.plan(metadata, unsettled, state.settle_batch_size, state.settle_after)
+
+    results =
+      Enum.reduce_while(planned, [], fn {replica, segment_id, base_offset, end_offset}, acc ->
+        recorded = {Metadata.get_segment(metadata, segment_id).byte_size, end_offset}
+        outcome = state.settle_copy.(replica, segment_id, base_offset, end_offset)
+        acc = [{segment_id, replica, recorded, outcome} | acc]
+        if outcome == :unreachable, do: {:halt, acc}, else: {:cont, acc}
+      end)
+
+    report_settled(Enum.reverse(results))
+
+    case results do
+      [{segment_id, replica, _recorded, _outcome} | _] -> %{state | settle_after: {segment_id, replica}}
+      [] -> state
+    end
   end
 
   # Counted and logged apart, because the outcomes are not the same event wearing different numbers. A copy
@@ -463,7 +490,9 @@ defmodule Malachi.Cluster.HealCoordinator do
        do: {:recorded_below, segment_id, replica}
 
   defp classify({segment_id, replica, _recorded, {:ok, 0, _bytes, _held_end}}), do: {:fenced, segment_id, replica}
-  defp classify({segment_id, replica, _recorded, :error}), do: {:failed, segment_id, replica}
+
+  defp classify({segment_id, replica, _recorded, outcome}) when outcome in [:error, :unreachable],
+    do: {:failed, segment_id, replica}
 
   defp sealed_now?(metadata, {:seal_segment, segment_id, _length, _bytes, _at}) do
     match?(%{state: :sealed}, Map.get(metadata.segments, segment_id))
@@ -512,12 +541,16 @@ defmodule Malachi.Cluster.HealCoordinator do
   # Asks every live replica which of its segments have a copy that failed there, as the
   # `{segment_id, replica}` pairs `Failover` and `SelfHealing` take. Read-only and batched per replica, like
   # `probe_fences/3`.
+  # Returns `{failed, unknown}`: the latched copies that were seen, and the segments whose latch state could
+  # not be read this tick. Those segments are left out of the integrity pass, never probed on a guess.
   defp probe_failures(state, metadata, live) do
     metadata
     |> Failover.failure_probes(live)
-    |> Enum.reduce(MapSet.new(), fn {replica, segment_ids}, acc ->
-      state.failed_state.(replica, segment_ids)
-      |> Enum.reduce(acc, &MapSet.put(&2, {&1, replica}))
+    |> Enum.reduce({MapSet.new(), MapSet.new()}, fn {replica, segment_ids}, {failed, unknown} ->
+      case state.failed_state.(replica, segment_ids) do
+        :unknown -> {failed, MapSet.union(unknown, MapSet.new(segment_ids))}
+        seen -> {Enum.reduce(seen, failed, &MapSet.put(&2, {&1, replica})), unknown}
+      end
     end)
   end
 
@@ -671,13 +704,15 @@ defmodule Malachi.Cluster.HealCoordinator do
     end
   end
 
-  # Same rule as `default_seal_state/1`: no answer means nothing learned, so an unreachable replica reports
-  # no failed copy rather than stalling or crashing the pass.
+  # Unlike `default_seal_state/1`, an error here does not mean "no failed copy": the latch state is UNKNOWN,
+  # not empty, so it is not stalled or crashed on either.
+  # On an error the latch state is UNKNOWN, not empty: a latched copy that cannot be seen would be probed and
+  # could be used as a source. The segment is then left out of the integrity pass for this tick.
   defp default_failed_state(timeout) do
     fn replica, segment_ids ->
       case ReplicationServer.failed_segments(replica, segment_ids, timeout) do
         {:ok, failed} -> failed
-        {:error, _reason} -> MapSet.new()
+        {:error, _reason} -> :unknown
       end
     end
   end
@@ -689,6 +724,7 @@ defmodule Malachi.Cluster.HealCoordinator do
     fn replica, segment_id, base_offset, end_offset ->
       case ReplicationServer.seal_at(replica, segment_id, base_offset, end_offset, timeout) do
         {:ok, held_end, byte_size, dropped} -> {:ok, dropped, byte_size, held_end}
+        {:error, :unreachable} -> :unreachable
         {:error, _reason} -> :error
       end
     end

@@ -84,6 +84,15 @@ defmodule Malachi.Cluster.SealedOverrunTest do
       assert SealedOverrun.plan(metadata, Enum.reverse(unsettled), 2) == [{:a, id, 0, 5}, {:b, id, 0, 5}]
     end
 
+    test "a pass that starts after the last copy it took does not take that copy again" do
+      {metadata, [id]} = topic_with([{0, [:a, :b, :c], 0, 5}])
+      unsettled = [{id, :a}, {id, :b}, {id, :c}]
+
+      assert SealedOverrun.plan(metadata, unsettled, 1, {id, :a}) == [{:b, id, 0, 5}]
+      assert SealedOverrun.plan(metadata, unsettled, 1, {id, :c}) == [{:a, id, 0, 5}]
+      assert SealedOverrun.plan(metadata, unsettled, 2, {id, :b}) == [{:c, id, 0, 5}, {:a, id, 0, 5}]
+    end
+
     test "the same copy reported twice is settled once" do
       {metadata, [id]} = topic_with([{0, [:a], 0, 3}])
 
@@ -370,6 +379,138 @@ defmodule Malachi.Cluster.SealedOverrunTest do
 
       ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
       assert Enum.count([b, c], &(read_values(&1, segment_id) == ["x", "y"])) == 2
+    end
+
+    # The copy that never settles is the first one sorted, so without a cursor it would take the only slot
+    # on every pass and the other copy would never be reached.
+    test "a copy that never settles does not keep the batch slot on the next pass" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_everywhere([a, b, c], ["x", "y"])
+      for replica <- [b, c], do: {:ok, 2} = ReplicationServer.follow(replica, segment_id, 2, records(["surplus"]))
+      [first, second] = Enum.sort([b, c])
+      {source, apply} = metadata_store(metadata)
+      owner = self()
+
+      settle = fn replica, segment, base, end_offset ->
+        send(owner, {:settled, replica})
+
+        if replica == first do
+          :error
+        else
+          case ReplicationServer.seal_at(replica, segment, base, end_offset, 5_000) do
+            {:ok, held_end, byte_size, dropped} -> {:ok, dropped, byte_size, held_end}
+            {:error, _reason} -> :error
+          end
+        end
+      end
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          settle_batch_size: 1,
+          settle_copy: settle
+        )
+
+      settled =
+        for _pass <- 1..2 do
+          ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+          assert_received {:settled, replica}
+          replica
+        end
+
+      assert settled == [first, second]
+    end
+
+    # Three copies, a batch of two, and copies that stay divergent so every pass attempts the same set: the batch
+    # takes turns, and each pass starts just past the last copy the previous one attempted. The cursor is the
+    # last attempted copy, so the order is the sorted order rotated by one batch each time.
+    test "the batch takes turns over copies that stay divergent, starting past the last one attempted" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_everywhere([a, b, c], ["x", "y"])
+      for replica <- [a, b, c], do: {:ok, 2} = ReplicationServer.follow(replica, segment_id, 2, records(["surplus"]))
+      {source, apply} = metadata_store(metadata)
+      owner = self()
+
+      settle = fn replica, _segment, _base, _end ->
+        send(owner, {:settled, replica})
+        :error
+      end
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          settle_batch_size: 2,
+          settle_copy: settle
+        )
+
+      drain = fn drain, acc ->
+        receive do
+          {:settled, replica} -> drain.(drain, [replica | acc])
+        after
+          0 -> Enum.reverse(acc)
+        end
+      end
+
+      passes =
+        for _pass <- 1..3 do
+          ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+          drain.(drain, [])
+        end
+
+      [x, y, z] = Enum.sort([a, b, c])
+      assert passes == [[x, y], [z, x], [y, z]]
+    end
+
+    # The default seam with no injected settle: a settle that gets no answer in time exits inside `seal_at/5`,
+    # and the default turns that into `:unreachable`, which stops the pass after the copy it hit. Only one copy
+    # is reported as not settled, where a pass that carried on would report both.
+    test "a settle the default seam gives up on stops the pass after one copy" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_everywhere([a, b, c], ["x", "y"])
+      for replica <- [b, c], do: {:ok, 2} = ReplicationServer.follow(replica, segment_id, 2, records(["surplus"]))
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          settle_timeout: 0
+        )
+
+      log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+      assert log =~ "could not bring 1 sealed segment copy"
+    end
+
+    # A replica that does not answer the settle stops the pass: the copies after it wait for the next tick,
+    # so a silent replica costs one timeout per pass rather than one per copy in the batch.
+    test "an unanswered settle stops the pass, and the copies after it wait" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_everywhere([a, b, c], ["x", "y"])
+      for replica <- [b, c], do: {:ok, 2} = ReplicationServer.follow(replica, segment_id, 2, records(["surplus"]))
+      {source, apply} = metadata_store(metadata)
+      owner = self()
+
+      settle = fn replica, _segment, _base, _end ->
+        send(owner, {:settled, replica})
+        :unreachable
+      end
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          settle_copy: settle
+        )
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+      assert_received {:settled, _first}
+      refute_received {:settled, _second}
     end
 
     # The same failure through the REAL seam rather than an injected one, which is the only way to

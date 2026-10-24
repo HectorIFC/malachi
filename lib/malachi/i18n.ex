@@ -700,7 +700,7 @@ defmodule Malachi.I18n do
       "pt_BR" =>
         "%{count} cópia(s) de segmento selado não puderam ser levadas ao comprimento que o control plane " <>
           "registrou e seguem divergentes: %{copies}. Uma passagem posterior tenta de novo, mas uma " <>
-          "cópia que nunca assenta guarda bytes que o selo dela exclui",
+          "cópia que nunca assenta guarda bytes que o selo dela exclui, ou menos registros do que o selo nomeia",
       "en_US" =>
         "could not bring %{count} sealed segment copy(ies) to the length the control plane recorded, " <>
           "and they are still divergent: %{copies}. A later pass tries again, but a copy that never " <>
