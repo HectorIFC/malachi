@@ -52,7 +52,9 @@ review_build_tree() {
     review_is_generated "$name" && review_git "$index" rm -q --cached -- "$name" 2> /dev/null
   done < <(git ls-files -z --others --exclude-standard 2> /dev/null)
 
-  grep 'unable to index file' "$work/errors" 2> /dev/null > "$work/unreadable" || true
+  # An untracked directory git cannot open is only a warning, and its files then leave the tree silently:
+# both messages count as unreadable.
+grep -E 'unable to index file|could not open directory' "$work/errors" 2> /dev/null > "$work/unreadable" || true
   tree=$(review_git "$index" write-tree 2> /dev/null) || return 1
   printf '%s\n' "$tree"
 }

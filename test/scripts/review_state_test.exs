@@ -337,6 +337,50 @@ defmodule ReviewStateTest do
       {status, 0} = System.cmd("git", ["status", "--porcelain"], cd: ctx.repo, env: @env)
       assert status == "M  a.ex\n?? new.ex\n"
     end
+
+    test "begin run from a subdirectory records the whole checkout, not only that directory", ctx do
+      # From sub/, git add would take in sub's paths alone, and a.ex would keep its HEAD content in the tree
+      # the round records. The recorded blob must be the edit made in the root.
+      File.mkdir!(Path.join(ctx.repo, "sub"))
+      write(ctx, "a.ex", "changed-root\n")
+
+      assert {_, 0} = state_in(ctx, Path.join(ctx.repo, "sub"), ["begin"])
+      assert {_, 0} = state(ctx, ["done"])
+      reviewed = reviewed(ctx)
+
+      assert {"changed-root\n", 0} = System.cmd("git", ["show", "#{reviewed}:a.ex"], cd: ctx.repo, env: @env)
+    end
+
+    test "an untracked directory git cannot open stops the round from being recorded", ctx do
+      # git only warns about it and its files leave the tree silently, so the tree would look complete.
+      dir = Path.join(ctx.repo, "hidden")
+      File.mkdir!(dir)
+      File.write!(Path.join(dir, "h.ex"), "secret\n")
+      File.chmod!(dir, 0o000)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+      assert_unlistable!(dir)
+
+      assert {out, 0} = begin_round(ctx)
+      assert out =~ "could not be read"
+      assert {_, 0} = state(ctx, ["done"])
+      assert {"", 0} = state(ctx, ["reviewed"])
+    end
+
+    test "a delta stops with exit 1 rather than skip an untracked directory it cannot open", ctx do
+      assert {_, 0} = begin_round(ctx)
+      assert {_, 0} = state(ctx, ["done"])
+      reviewed = reviewed(ctx)
+
+      dir = Path.join(ctx.repo, "hidden")
+      File.mkdir!(dir)
+      File.write!(Path.join(dir, "h.ex"), "changed\n")
+      File.chmod!(dir, 0o000)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+      assert_unlistable!(dir)
+
+      assert {1, _files, text} = delta(ctx, reviewed)
+      assert text =~ "could not open directory"
+    end
   end
 
   describe "the reminder" do
@@ -432,6 +476,14 @@ defmodule ReviewStateTest do
   end
 
   # The per-test env wins over @env: a map keeps the last value given for a name.
+  defp state_in(ctx, dir, args) do
+    System.cmd("bash", [@state | args], cd: dir, env: @env, stderr_to_stdout: true)
+  end
+
+  defp assert_unlistable!(dir) do
+    assert {:error, :eacces} = File.ls(dir), "#{dir} still lists after chmod 000; is the suite running as root?"
+  end
+
   defp state(ctx, args, env \\ []) do
     env = (@env ++ env) |> Map.new() |> Enum.to_list()
     System.cmd("bash", [@state | args], cd: ctx.repo, env: env, stderr_to_stdout: true)

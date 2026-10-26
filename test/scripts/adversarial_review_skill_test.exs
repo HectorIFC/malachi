@@ -102,6 +102,18 @@ defmodule AdversarialReviewSkillTest do
     assert before_done =~ "present every finding"
   end
 
+  test "the round label follows the pin step 1 made, not the round number" do
+    # A later round with no reviewed tree pins the whole branch: labelled as a delta, its reviewers would
+    # apply the delta's scope rule to lines the branch changed and drop findings there.
+    skill = File.read!(@skill)
+
+    assert skill =~ "when step 1 pinned the whole branch"
+    assert skill =~ "when step 1 pinned the delta"
+    assert skill =~ "according to the pin step 1 made"
+    refute skill =~ "after it in later rounds"
+    refute skill =~ "in a later round, or"
+  end
+
   test "prepare-commits asks for the status and starts round 1 when none has run" do
     prepare = File.read!(@prepare)
 

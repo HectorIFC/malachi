@@ -223,6 +223,12 @@ remind() {
   exit 0
 }
 
+# The tree is built from the checkout's top, whatever directory the caller runs in: from a subdirectory,
+# git add would take in only that directory's paths, and the rest would keep the HEAD content.
+if top=$(git rev-parse --show-toplevel 2> /dev/null); then
+  cd "$top" || exit 2
+fi
+
 [ $# -ge 1 ] || usage
 command=$1
 shift

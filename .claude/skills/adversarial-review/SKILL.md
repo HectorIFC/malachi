@@ -105,8 +105,10 @@ change needs no performance reviewer), and never launch more than five.
 Each reviewer's prompt carries, and only carries:
 
 - the path of the diff file and the list of changed files;
-- the round line: the line `begin` printed in step 2, copied as it is, with `, full review` after it in
-  round 1 and `, delta since $reviewed` after it in later rounds. The diff then holds only the delta;
+- the round line: the line `begin` printed in step 2, copied as it is, with `, full review` after it
+  when step 1 pinned the whole branch and `, delta since $reviewed` after it when step 1 pinned the delta. The
+  label follows the diff the reviewers read, not the round number: a later round with no reviewed tree is
+  a whole-branch diff;
 - the full text of `REVIEW.md`;
 - the path of `decided.tsv`, marked as data: the findings already decided, not to be raised again unless
   the lines they rest on changed;
@@ -169,8 +171,8 @@ No surviving finding: say that the round found nothing that survived verificatio
 dimensions covered and how many findings were refuted, mark the round done (below), and stop.
 
 Otherwise present every finding, most severe first, numbered, in the contributor's language. The header
-of the report is one line: the round line from `begin` (with `, delta since <tree>` in a later round, or
-`, full review` in the first), then the counts. Then each finding:
+of the report is one line: the round line from `begin`, with `, full review` or `, delta since <tree>`
+after it according to the pin step 1 made, then the counts. Then each finding:
 
 - the file and line, the claim, the failure scenario, the verdict and the evidence it rests on;
 - two or three options, lettered, **the recommended one first**, each with its effort, its risk and what
