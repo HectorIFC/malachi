@@ -422,93 +422,6 @@ defmodule Malachi.MetadataTest do
     end
   end
 
-  describe "storage policies" do
-    test "define_policy stores a named policy; get_policy reads it (last write wins)" do
-      state = Metadata.new()
-      assert Metadata.get_policy(state, "durable") == nil
-
-      {state, :ok} =
-        Metadata.apply(state, {:define_policy, "durable", %{retention: %{max_age_ms: 1_000}, spread_by: "rack"}})
-
-      assert Metadata.get_policy(state, "durable") == %{retention: %{max_age_ms: 1_000}, spread_by: "rack"}
-
-      {state, :ok} = Metadata.apply(state, {:define_policy, "durable", %{spread_by: "dc"}})
-      assert Metadata.get_policy(state, "durable") == %{spread_by: "dc"}
-    end
-
-    test "define_policy rejects an invalid name or policy" do
-      state = Metadata.new()
-      assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:define_policy, "", %{}})
-      assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:define_policy, 123, %{}})
-      assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:define_policy, "p", :not_a_map})
-    end
-
-    test "define_policy rejects a policy whose contents would silently never fire" do
-      state = Metadata.new()
-
-      # A bound the retention rule compares with `>`: against a binary that comparison never matches,
-      # so the policy would be stored, read back and do nothing forever.
-      assert {^state, {:error, :invalid_policy}} =
-               Metadata.apply(state, {:define_policy, "p", %{retention: %{max_bytes: "10GB"}}})
-
-      assert {^state, {:error, :invalid_policy}} =
-               Metadata.apply(state, {:define_policy, "p", %{retention: %{max_age_ms: -1}}})
-
-      # A plausible typo for `:retention`, which would be kept and never read.
-      assert {^state, {:error, :invalid_policy}} =
-               Metadata.apply(state, {:define_policy, "p", %{retention_ms: 1_000}})
-
-      assert {^state, {:error, :invalid_policy}} =
-               Metadata.apply(state, {:define_policy, "p", %{retention: :always}})
-
-      # `nil` stays valid: it is how a policy turns one of the two rules off.
-      assert {_state, :ok} = Metadata.apply(state, {:define_policy, "p", %{retention: %{max_bytes: nil}}})
-    end
-
-    test "set_topic_policy binds a policy NAME to a topic; nil detaches" do
-      {state, _root} = create_topic()
-      {state, :ok} = apply!(state, {:define_policy, "durable", %{retention: %{max_bytes: 500}}})
-      assert Metadata.topic_policy_name(state, "events") == nil
-
-      {state, :ok} = apply!(state, {:set_topic_policy, "events", "durable"})
-      # The binding is what lives here and travels with the topic across a vnode split. What the policy
-      # SAYS is one definition for the cluster (`Malachi.Cluster.PolicyStore`).
-      assert Metadata.topic_policy_name(state, "events") == "durable"
-
-      {state, :ok} = apply!(state, {:set_topic_policy, "events", nil})
-      assert Metadata.topic_policy_name(state, "events") == nil
-    end
-
-    test "a topic keeps its policy across a vnode split, which is what moving the definitions out fixed" do
-      {state, _root} = create_topic()
-      {state, :ok} = apply!(state, {:define_policy, "durable", %{retention: %{max_bytes: 500}}})
-      {state, :ok} = apply!(state, {:set_topic_policy, "events", "durable"})
-
-      # What a split does: export from one vnode, insert into another (which has no definitions of its
-      # own, and needs none).
-      {_source, export} = Metadata.extract_topic(state, "events")
-      destination = Metadata.insert_topic(Metadata.new(), export)
-
-      assert Metadata.topic_policy_name(destination, "events") == "durable"
-    end
-
-    test "set_topic_policy errors on an unknown topic or a name that cannot name a policy" do
-      {state, _root} = create_topic()
-      assert {^state, {:error, :no_such_topic}} = Metadata.apply(state, {:set_topic_policy, "nope", "durable"})
-      assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:set_topic_policy, "events", ""})
-      assert {^state, {:error, :invalid_policy}} = Metadata.apply(state, {:set_topic_policy, "events", :durable})
-    end
-
-    test "a name no definition backs is accepted here, because a vnode cannot see the cluster's policies" do
-      {state, _root} = create_topic()
-
-      # The definitions live in `Malachi.Cluster.PolicyStore`, which a ra machine may not read. Refusing
-      # the binding here would refuse every binding; resolving to no policy is the documented fallback.
-      assert {state, :ok} = Metadata.apply(state, {:set_topic_policy, "events", "ghost"})
-      assert Metadata.topic_policy_name(state, "events") == "ghost"
-    end
-  end
-
   describe "bind_topic_policy (the binding an operator emits, machine version 4)" do
     test "binds a policy NAME to a topic, and nil detaches" do
       {state, _root} = create_topic()
@@ -545,10 +458,24 @@ defmodule Malachi.MetadataTest do
       assert Metadata.topic_policy_name(Metadata.insert_topic(Metadata.new(), export), "events") == "durable"
     end
 
-    test "is introduced at version 4, and the legacy binding stays at 0 with nothing emitting it" do
-      table = Metadata.command_versions()
-      assert table[{:bind_topic_policy, 3}] == 4
-      assert table[{:set_topic_policy, 3}] == 0
+    test "is introduced at version 4" do
+      assert Metadata.command_versions()[{:bind_topic_policy, 3}] == 4
+    end
+
+    test "a name no definition backs is accepted here, because a vnode cannot see the cluster's policies" do
+      {state, _root} = create_topic()
+
+      # The definitions live in `Malachi.Cluster.PolicyRegistry`, which a ra machine may not read. Refusing
+      # the binding here would refuse every binding; resolving to no policy is the documented fallback.
+      assert {state, :ok} = Metadata.apply(state, {:bind_topic_policy, "events", "ghost"})
+      assert Metadata.topic_policy_name(state, "events") == "ghost"
+    end
+
+    test "the retired shapes are refused as unknown, leaving the state alone" do
+      {state, _root} = create_topic()
+
+      assert {^state, {:error, :unknown_command}} = Metadata.apply(state, {:define_policy, "p", %{}})
+      assert {^state, {:error, :unknown_command}} = Metadata.apply(state, {:set_topic_policy, "events", "p"})
     end
 
     test "the compare-and-swap form enters at the version after the last release, so an older member refuses it" do
@@ -919,8 +846,7 @@ defmodule Malachi.MetadataTest do
     end
 
     test "returns nil where there is no range/segment to check, and never raises on an odd id shape" do
-      # define_policy and the migration commands are not range-scoped, so the mismatch guard skips them.
-      assert Metadata.command_target_topic({:define_policy, "p", %{}}) == nil
+      # The migration commands are not range-scoped, so the mismatch guard skips them.
       assert Metadata.command_target_topic({:begin_migration, "events"}) == nil
       # A string segment id (some tests use these) carries no topic: nil, not a crash.
       assert Metadata.command_target_topic({:seal_segment, "s1", 1, 2, 3}) == nil

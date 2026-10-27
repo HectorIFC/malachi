@@ -76,7 +76,7 @@ defmodule Malachi.Cluster.RetentionTest do
     # The topic points at a name (its own state, in its vnode); the definitions come from the cluster's
     # policy store, which the sweep resolves once per pass and hands in.
     defp with_policy(metadata, topic) do
-      {metadata, :ok} = Metadata.apply(metadata, {:set_topic_policy, topic, "p"})
+      {metadata, :ok} = Metadata.apply(metadata, {:bind_topic_policy, topic, "p"})
       metadata
     end
 
@@ -170,7 +170,7 @@ defmodule Malachi.Cluster.RetentionTest do
       metadata =
         Enum.reduce(names, Metadata.new(), fn topic, metadata ->
           {metadata, {:ok, _root}} = Metadata.apply(metadata, {:create_topic, topic, 4})
-          {metadata, :ok} = Metadata.apply(metadata, {:set_topic_policy, topic, "p"})
+          {metadata, :ok} = Metadata.apply(metadata, {:bind_topic_policy, topic, "p"})
           metadata
         end)
 
@@ -240,7 +240,7 @@ defmodule Malachi.Cluster.RetentionTest do
         policies = %{"p" => policy}
 
         bound_metadata =
-          if bound, do: elem(Metadata.apply(base, {:set_topic_policy, "t", bound}), 0), else: base
+          if bound, do: elem(Metadata.apply(base, {:bind_topic_policy, "t", bound}), 0), else: base
 
         reported = Retention.effective(bound, policies, global, backstop).retention
         as_global = Map.new(reported, fn {key, {value, _origin}} -> {key, value} end)

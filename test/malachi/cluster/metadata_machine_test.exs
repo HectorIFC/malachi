@@ -30,4 +30,17 @@ defmodule Malachi.Cluster.MetadataMachineTest do
   test "replaying the same log on another replica, or after a restart, stamps the same opening time" do
     assert replay(log()) == replay(log())
   end
+
+  # No log can contain these shapes, so no replay reaches them. A member that is handed one anyway refuses
+  # it by its tag, with the state unchanged, the same on every replica.
+  test "refuses the retired policy commands as unknown, leaving the state alone" do
+    state = replay(log())
+    effective = MachineVersion.version()
+
+    assert {^state, {:error, {:unknown_command, {:define_policy, 3}, ^effective}}} =
+             MetadataMachine.apply(meta(3, 3_000), {:define_policy, "p", %{}}, state)
+
+    assert {^state, {:error, {:unknown_command, {:set_topic_policy, 3}, ^effective}}} =
+             MetadataMachine.apply(meta(3, 3_000), {:set_topic_policy, "events", "p"}, state)
+  end
 end

@@ -29,7 +29,9 @@ defmodule Malachi.Cluster.MachineVersion do
   own entry at the new version, and older members refuse it instead of raising on it or skipping it. With `all`, the command is
   then refused identically on every member until the last one runs and advertises the new version.
   Existing commands stay at the version they were introduced at forever: nothing takes a release
-  cursor, so every command ever written is replayed on restart and must stay appliable.
+  cursor, so every command ever written is replayed on restart and must stay appliable. The one exit is
+  a shape that no release has ever emitted into any log: no replay can reach it, so the command leaves
+  the table and a member refuses its tag as unknown, the same refusal on every replica.
 
   The eight machines share one version number. That keeps one pin meaningful for all of them, and
   bumping it for one machine only costs the others a no-op `{:machine_version, n - 1, n}`. Version 2

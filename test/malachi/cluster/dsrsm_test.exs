@@ -168,8 +168,7 @@ defmodule Malachi.Cluster.DSRSMTest do
       dsrsm = DSRSM.single()
       {dsrsm, {:ok, _root}} = DSRSM.command(dsrsm, "events", {:create_topic, "events", 4})
       {dsrsm, :ok} = DSRSM.command(dsrsm, "events", {:commit_offset, "g", "events", %{{"events", 0} => 7}})
-      {dsrsm, :ok} = DSRSM.command(dsrsm, "events", {:define_policy, "p", %{spread_by: "rack"}})
-      {dsrsm, :ok} = DSRSM.command(dsrsm, "events", {:set_topic_policy, "events", "p"})
+      {dsrsm, :ok} = DSRSM.command(dsrsm, "events", {:bind_topic_policy, "events", "p"})
 
       assert DSRSM.committed_offsets(dsrsm, "g", "events") == %{{"events", 0} => 7}
       assert DSRSM.committed_offsets(dsrsm, "g", "other") == %{}
