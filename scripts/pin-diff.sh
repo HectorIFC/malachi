@@ -10,7 +10,8 @@
 #        modified, and what is untracked, apart from the files the prepare-commits skill generates at the
 #        root (commit_message.sh, commit_<n>.patch, commit_message.txt, commit_message_<n>.txt), dropped
 #        by exact name and only while untracked: a file of that name the project committed is its own.
-#        Writes <outdir>/diff.patch, <outdir>/files.txt (one path per line) and <outdir>/base.txt.
+#        Writes <outdir>/diff.patch, <outdir>/files.txt (one path per line), <outdir>/base.txt and
+#        <outdir>/tree.txt, the tree this pin read, which review-state.sh begin checks before it counts a round.
 #        Without a merge base with origin/main it pins only what is uncommitted and says so on stderr.
 #        With --since <tree> it pins the delta instead: what the working tree holds now against that tree
 #        (a tree review-state.sh reviewed before), with the same untracked, deleted, mode and generated
@@ -49,18 +50,17 @@ usage() {
 # The delta: what the working tree holds now, against the tree a complete round reviewed. Built the way
 # the whole tree is, so the untracked, deleted, mode and generated handling is the full pin's. Exit 1 when
 # a file cannot be read, as the full pin does: the delta then would silently skip it.
-pin_since() {
-  local since=$1 outdir=$2 work tree
-  git cat-file -e "$since^{tree}" 2> /dev/null || {
-    echo "pin-diff: --since is not a tree in this repository" >&2
-    exit 2
-  }
+# The tree this pin reads, written to <outdir>/tree.txt. review-state.sh begin checks the working tree against
+# it before it counts a round, so a change made between the pin and the round cannot be recorded as reviewed.
+# Exit 1 when a file cannot be read, as the rest of the pin does.
+pin_record_tree() {
+  local outdir=$1 work tree
   work=$(mktemp -d "${TMPDIR:-/tmp}/malachi-pin.XXXXXX" 2> /dev/null) || {
     echo "pin-diff: no temporary directory to build the tree in" >&2
     exit 1
   }
-  # Expanded now, as in review-state.sh: the local is gone when the trap runs.
-  # shellcheck disable=SC2064 # expanded now on purpose: the local is gone when the trap runs
+  # Expanded now: the local is gone when the trap runs, and set -u would fail on it.
+  # shellcheck disable=SC2064 # expanded now on purpose, as above
   trap "rm -rf \"$work\"" EXIT
   tree=$(review_build_tree "$work" 2> /dev/null) || {
     echo "pin-diff: git could not build the working tree" >&2
@@ -70,12 +70,23 @@ pin_since() {
     cat "$work/unreadable" >&2
     exit 1
   fi
+  printf '%s\n' "$tree" > "$outdir/tree.txt"
+}
+
+pin_since() {
+  local since=$1 outdir=$2 tree
+  git cat-file -e "$since^{tree}" 2> /dev/null || {
+    echo "pin-diff: --since is not a tree in this repository" >&2
+    exit 2
+  }
+  pin_record_tree "$outdir"
+  tree=$(cat "$outdir/tree.txt")
 
   printf '%s\n' "$since" > "$outdir/base.txt"
   local g=(git -c core.quotePath=false -c diff.suppressBlankEmpty=false)
   local d=(diff --no-ext-diff --no-color --src-prefix=a/ --dst-prefix=b/)
   "${g[@]}" "${d[@]}" "$since" "$tree" -- > "$outdir/diff.patch" || exit 1
-  "${g[@]}" diff --no-ext-diff --name-only -z "$since" "$tree" -- | tr '\0' '\n' > "$outdir/files.txt"
+  "${g[@]}" diff --no-ext-diff --no-renames --name-only -z "$since" "$tree" -- | tr '\0' '\n' > "$outdir/files.txt"
   [ "${PIPESTATUS[0]}" -eq 0 ] || exit 1
 
   [ -s "$outdir/files.txt" ] || exit 3
@@ -155,6 +166,7 @@ pin() {
     base=$(git hash-object -t tree /dev/null)
   fi
   printf '%s\n' "$base" > "$outdir/base.txt"
+  pin_record_tree "$outdir"
 
   # The same diff whatever the contributor's git config says. Each setting that could change it is
   # overridden once, and test/scripts/pin_diff_test.exs guards each: --no-color (color.ui, color.diff),
@@ -167,7 +179,7 @@ pin() {
   local d=(diff --no-ext-diff --no-color --src-prefix=a/ --dst-prefix=b/)
 
   "${g[@]}" "${d[@]}" "$base" -- > "$outdir/diff.patch" || exit 1
-  "${g[@]}" diff --no-ext-diff --name-only -z "$base" -- | tr '\0' '\n' > "$outdir/files.txt"
+  "${g[@]}" diff --no-ext-diff --no-renames --name-only -z "$base" -- | tr '\0' '\n' > "$outdir/files.txt"
   [ "${PIPESTATUS[0]}" -eq 0 ] || exit 1
 
   # git ls-files only warns about an untracked directory it cannot open, and succeeds, so its warnings are

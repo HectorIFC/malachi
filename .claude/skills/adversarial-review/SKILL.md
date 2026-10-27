@@ -60,18 +60,20 @@ and `$S/base.txt`. Every subagent reads `$S/diff.patch`, so they all read the sa
 Only now, after the diff is pinned, does a round start. It is counted and its tree recorded:
 
 ```
-ROUND=$("$ROOT/scripts/review-state.sh" begin); rc=$?
+ROUND=$("$ROOT/scripts/review-state.sh" begin --pinned "$(cat "$S/tree.txt")"); rc=$?
 ```
 
 - `rc` 4: the cap is reached for this base. Do not review. Show the open and follow-up
   findings from the last rounds as follow-up for the pull request review, and ask once, with
   `AskUserQuestion`, whether to run one extra round. The options: stop here (recommended), or one extra
-  round, labelled as an extra. Only on a yes run `"$ROOT/scripts/review-state.sh" begin --extra`, and keep
+  round, labelled as an extra. Only on a yes run `"$ROOT/scripts/review-state.sh" begin --extra --pinned "$(cat "$S/tree.txt")"`, and keep
   the word "extra" in the report.
+- `rc` 5: the working tree changed after the pin, so the diff the reviewers would read is not the one the
+  round would record. Nothing was counted. Stop, say so, and pin again from step 1.
 - `begin` prints the round (`round N of <cap>`, or `extra round N, past the cap of <cap>`). The cap is the
   script's, and nothing else repeats it. Put that line in the report and in every reviewer's prompt.
 - A warning on stderr from `begin` (nowhere to count, or a tree that could not be recorded) goes into the
-  report. The next round is then a full review, and the report says so.
+  report. The next round is then a full review when no reviewed tree is kept, and a delta from the last complete tree when one is; the report says which.
 
 Record what was decided before, for the reviewers to read as data:
 

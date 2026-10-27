@@ -64,6 +64,9 @@ run for its base:
   part of the changes this skill then groups.
 - `rounds` above 0: say the status in one line and go on. A later round is a delta and is asked for by
   name, not started here.
+- No `rounds:` line at all: the script could not keep the count and said so on stderr, so the review state
+  is unknown. Stop before step 1 and report that a writable state location is needed. Do not group commits
+  on a state that is not known.
 
 ## 1. Inventory every change
 

@@ -550,6 +550,38 @@ defmodule PinDiffTest do
     end
   end
 
+  describe "tree.txt" do
+    # begin checks the working tree against this id before it counts a round, so it must be the tree the pin
+    # read, in both shapes of pin.
+    test "a full pin and a delta pin both write the tree they read", ctx do
+      File.write!(Path.join(ctx.repo, "a.ex"), "changed\n")
+      commit!(ctx.repo, "work")
+      head_tree = rev!(ctx.repo, "HEAD^{tree}")
+
+      assert {_, 0} = pin(ctx)
+      assert String.trim(File.read!(Path.join(ctx.out, "tree.txt"))) == head_tree
+
+      assert {_, 3} = pin(ctx, ["--since", head_tree])
+      assert String.trim(File.read!(Path.join(ctx.out, "tree.txt"))) == head_tree
+    end
+  end
+
+  describe "renames" do
+    # A rename is a removal and an addition. With rename detection on, --name-only lists only the new path,
+    # so a reviewer scoping by files.txt never sees the old one go. Both pins must list both.
+    test "the full pin and the delta both list the old path of a renamed file", ctx do
+      since = rev!(ctx.repo, "HEAD^{tree}")
+      git!(ctx.repo, ["mv", "a.ex", "b.ex"])
+      commit!(ctx.repo, "rename a to b")
+
+      assert {_, 0} = pin(ctx)
+      assert Enum.sort(files(ctx)) == ["a.ex", "b.ex"]
+
+      assert {_, 0} = pin(ctx, ["--since", since])
+      assert Enum.sort(files(ctx)) == ["a.ex", "b.ex"]
+    end
+  end
+
   defp base(ctx), do: ctx.out |> Path.join("base.txt") |> File.read!() |> String.trim()
 
   # The per-test env wins over the defaults above: a map keeps the last value given for a name.

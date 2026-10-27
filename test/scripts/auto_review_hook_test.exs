@@ -151,6 +151,25 @@ defmodule AutoReviewHookTest do
     assert Bitwise.band(mode, 0o111) != 0
   end
 
+  # The hook stays silent when there is nowhere to keep the round count: a reminder it cannot make
+  # consistent (it would repeat on every stop, with nothing recorded) is not worth the noise. The state
+  # script's exit code is in review_state_test.exs; this is the hook's side of the same case.
+  test "with nowhere to keep the round count it stays silent, on a branch with commits ahead", ctx do
+    commit_feature!(ctx)
+    read_only_git_dir!(ctx)
+
+    assert run(ctx, env: [{"TMPDIR", Path.join(ctx.dir, "missing")}]) == {"", 0}
+  end
+
+  defp read_only_git_dir!(ctx) do
+    git_dir = Path.join(ctx.repo, ".git")
+    {_out, 0} = System.cmd("chmod", ["-R", "a-w", git_dir])
+    on_exit(fn -> System.cmd("chmod", ["-R", "u+w", git_dir]) end)
+
+    assert {:error, :eacces} = File.write(Path.join([git_dir, "objects", "probe"]), ""),
+           "#{git_dir} still takes writes after chmod -R a-w; is the suite running as root?"
+  end
+
   defp commit_feature!(ctx) do
     File.write!(Path.join(ctx.repo, "b.ex"), "b\n")
     commit!(ctx.repo, "feature work")

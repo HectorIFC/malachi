@@ -92,8 +92,9 @@ A review whose prompt names no round is the first round. It applies every criter
 documentation guarantees included. The managed Code Review on a pull request is always that: a pull
 request is reviewed once, in full, whatever was pushed before it.
 
-A reviewer whose prompt says a round is under way (the local skill writes "Round N of CAP, delta since
-<tree>") applies the criteria above and these rules from round 2 on:
+A reviewer whose prompt says a round is under way (the local skill passes the line `begin` prints,
+`round N of <cap>`, with `, delta since <tree>` after it when the diff is a delta) applies the criteria
+above and these rules from round 2 on:
 
 - Only behaviour is important. Of the list under Severity, the item about documentation that promises a
   guarantee the code does not deliver is a nit from round 2 on. The other items stay as they are.

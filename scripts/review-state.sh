@@ -5,8 +5,11 @@
 # commits ahead of origin/main has been reviewed at all.
 #
 #   review-state.sh status            base, rounds, the cap, the reviewed tree, whether the reminder was given
-#   review-state.sh begin [--extra]   start a round: count it, and record the tree it reviews. Exit 4 when
-#                                     the cap is reached and --extra was not given
+#   review-state.sh begin [--extra] [--pinned <tree>]
+#                                     start a round: count it, and record the tree it reviews. With --pinned,
+#                                     the working tree must be that tree (the pin wrote it to tree.txt), or
+#                                     nothing is counted. Exit 4 when the cap is reached and --extra was not
+#                                     given; exit 5 when the tree is not the pinned one
 #   review-state.sh done              the round finished: the tree it recorded becomes the reviewed one
 #   review-state.sh reviewed          print the reviewed tree; nothing when there is none
 #   review-state.sh decide <status> <file> <anchor> <title>
@@ -24,7 +27,8 @@
 # read-only mount) they go under TMPDIR, in a directory of this user's own, and when that cannot be
 # used either nothing is counted: the round still runs, and says so.
 #
-# Exit: 0 done; 1 remind had nothing to say, or a decision could not be stored; 2 usage; 4 begin refused.
+# Exit: 0 done; 1 remind had nothing to say, or a decision could not be stored; 2 usage; 4 begin refused (cap);
+# 5 begin refused (the working tree is not the pinned one).
 set -uo pipefail
 
 # git reads these ahead of the directory it runs in, so a session started from inside a git hook would
@@ -42,7 +46,7 @@ PENDING=refs/worktree/malachi-pending
 REVIEWED=refs/worktree/malachi-reviewed
 
 usage() {
-  echo "usage: review-state.sh status | begin [--extra] | done | reviewed | decide <status> <file> <anchor> <title> | decisions | remind" >&2
+  echo "usage: review-state.sh status | begin [--extra] [--pinned <tree>] | done | reviewed | decide <status> <file> <anchor> <title> | decisions | remind" >&2
   exit 2
 }
 
@@ -93,6 +97,16 @@ sync_base() {
   state_set base "$base" && state_set rounds 0 && state_set reminded 0
 }
 
+# What the next round is, for a warning that a round's tree could not be recorded. A reviewed tree that is
+# still kept makes the next round a delta from it, whatever this round's failure was.
+next_round_wording() {
+  if git rev-parse --verify --quiet "$REVIEWED^{tree}" > /dev/null; then
+    echo "the next round is a delta from the last complete tree"
+  else
+    echo "the next round is a full review"
+  fi
+}
+
 rounds_run() {
   local rounds
   rounds=$(state_get rounds)
@@ -114,13 +128,19 @@ status() {
 }
 
 begin() {
-  local extra=0 rounds work tree commit
-  case "${1:-}" in
-    --extra) extra=1 ;;
-    '') ;;
-    *) usage ;;
-  esac
-  [ $# -le 1 ] || usage
+  local extra=0 pinned="" pinned_given=0 rounds work tree commit
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --extra) extra=1; shift ;;
+      --pinned)
+        [ $# -ge 2 ] && [ -n "$2" ] || usage
+        pinned=$2
+        pinned_given=1
+        shift 2
+        ;;
+      *) usage ;;
+    esac
+  done
 
   if locate; then
     sync_base
@@ -148,14 +168,21 @@ begin() {
       tree=""
     fi
   fi
+  # The round reviews the diff its pin cut. A working tree that has moved since the pin (or that cannot be
+  # built at all) is not that diff, so nothing is recorded and nothing is counted.
+  if [ "$pinned_given" -eq 1 ] && [ "$tree" != "$pinned" ]; then
+    echo "review-state: the working tree is not the one the pin read; pin again. Nothing was counted." >&2
+    exit 5
+  fi
+
   if [ -n "$tree" ]; then
     commit=$(GIT_AUTHOR_NAME=malachi-review GIT_AUTHOR_EMAIL=review@malachi.invalid \
       GIT_COMMITTER_NAME=malachi-review GIT_COMMITTER_EMAIL=review@malachi.invalid \
       git commit-tree "$tree" -m "adversarial review round" 2> /dev/null) \
       && git update-ref "$PENDING" "$commit" 2> /dev/null \
-      || echo "review-state: the tree of this round could not be recorded; the next round is a full review" >&2
+      || echo "review-state: the tree of this round could not be recorded; $(next_round_wording)" >&2
   else
-    echo "review-state: the tree of this round could not be recorded; the next round is a full review" >&2
+    echo "review-state: the tree of this round could not be recorded; $(next_round_wording)" >&2
   fi
 
   if [ "$extra" -eq 1 ] && [ "$rounds" -ge "$CAP" ]; then
@@ -171,7 +198,7 @@ begin() {
 done_round() {
   [ $# -eq 0 ] || usage
   if ! locate; then
-    echo "review-state: nowhere to keep the reviewed tree; the next round is a full review" >&2
+    echo "review-state: nowhere to keep the reviewed tree; $(next_round_wording)" >&2
     return 0
   fi
   sync_base

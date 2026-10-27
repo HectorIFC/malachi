@@ -198,6 +198,61 @@ defmodule ReviewStateTest do
       assert {"", 0} = state(ctx, ["reviewed"])
     end
 
+    test "a round that cannot record its tree says what the next round is, by whether a reviewed tree is kept", ctx do
+      # With no reviewed tree the next round is a full review. With one kept, it is a delta from that tree,
+      # and calling it a full review would send the reviewers the wrong instructions.
+      secret = Path.join(ctx.repo, "secret.ex")
+      File.write!(secret, "secret\n")
+      File.chmod!(secret, 0o000)
+      on_exit(fn -> File.chmod(secret, 0o644) end)
+      assert_unreadable!(secret)
+
+      assert {out, 0} = begin_round(ctx)
+      assert out =~ "the next round is a full review"
+      assert {_, 0} = state(ctx, ["done"])
+
+      File.chmod!(secret, 0o644)
+      assert {_, 0} = begin_round(ctx)
+      assert {_, 0} = state(ctx, ["done"])
+      assert reviewed(ctx) != ""
+
+      File.chmod!(secret, 0o000)
+      assert_unreadable!(secret)
+      assert {out, 0} = begin_round(ctx)
+      assert out =~ "the next round is a delta from the last complete tree"
+      refute out =~ "full review"
+    end
+
+    test "begin --pinned refuses a working tree that moved since the pin, and counts nothing", ctx do
+      # The reviewers read the pin's diff. A round recorded over a tree the pin never saw would mark what
+      # nobody read as reviewed, so the round is refused and the counter stays where it was.
+      write(ctx, "a.ex", "one\n")
+      {out_dir, 0} = pin_full(ctx)
+      pinned = pinned_tree(out_dir)
+
+      write(ctx, "a.ex", "two\n")
+
+      assert {out, 5} = begin_round(ctx, ["--pinned", pinned])
+      assert out =~ "pin again"
+      assert {status, 0} = state(ctx, ["status"])
+      assert status =~ "rounds: 0 of 3"
+      assert {"", 0} = state(ctx, ["reviewed"])
+    end
+
+    test "begin --pinned records the round when the working tree is the one the pin read", ctx do
+      write(ctx, "a.ex", "one\n")
+      {out_dir, 0} = pin_full(ctx)
+
+      assert {"round 1 of 3\n", 0} = begin_round(ctx, ["--pinned", pinned_tree(out_dir)])
+      assert {_, 0} = state(ctx, ["done"])
+      assert reviewed(ctx) != ""
+    end
+
+    test "begin --pinned with no value is a usage error, not a silent skip of the check", ctx do
+      assert {_, 2} = begin_round(ctx, ["--pinned", ""])
+      assert {_, 2} = begin_round(ctx, ["--pinned"])
+    end
+
     test "done with no round begun says so and changes nothing", ctx do
       assert {out, 0} = state(ctx, ["done"])
       assert out =~ "no round was recorded"
@@ -415,6 +470,14 @@ defmodule ReviewStateTest do
       assert rows == "1\tfixed\ta.ex\tx\tfirst\n2\tfollowup\ta.ex\ty\tsecond\n"
     end
 
+    test "decide with nowhere to keep the decision says so and exits 1, never as if it were recorded", ctx do
+      read_only_git_dir!(ctx)
+      env = [{"TMPDIR", Path.join(ctx.dir, "missing")}]
+
+      assert {out, 1} = state(ctx, ["decide", "fixed", "a.ex", "x", "t"], env)
+      assert out =~ "it is not recorded"
+    end
+
     test "a status outside the four is a usage error and records nothing", ctx do
       assert {_, 2} = state(ctx, ["decide", "maybe", "a.ex", "x", "t"])
       assert {"", 0} = state(ctx, ["decisions"])
@@ -507,6 +570,16 @@ defmodule ReviewStateTest do
   end
 
   defp write(ctx, name, content), do: File.write!(Path.join(ctx.repo, name), content)
+
+  # A full pin of the branch, as the skill runs it: {output directory, exit code}.
+  defp pin_full(ctx) do
+    out = Path.join(ctx.dir, "pin-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(out)
+    {_text, code} = System.cmd("bash", [@pin, "pin", out], cd: ctx.repo, env: @env, stderr_to_stdout: true)
+    {out, code}
+  end
+
+  defp pinned_tree(out_dir), do: out_dir |> Path.join("tree.txt") |> File.read!() |> String.trim()
   defp assert_file_exists!(path), do: assert(File.exists?(path), "#{path} is missing")
 
   # Proven, not assumed: as root a chmod stops nothing, and the test would then check a case that never came.

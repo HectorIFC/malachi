@@ -37,6 +37,8 @@ defmodule AdversarialReviewSkillTest do
     assert review =~ "## Rounds"
     refute review =~ "## Re-review"
     assert review =~ "A review whose prompt names no round is the first round"
+    # The round line the skill passes is the one begin prints; REVIEW.md must quote that form, not a guess.
+    assert review =~ "`round N of <cap>`"
     assert review =~ "always that: a pull"
   end
 
@@ -90,9 +92,24 @@ defmodule AdversarialReviewSkillTest do
   test "the skill gives the verifiers the plan and the reviewers not" do
     skill = File.read!(@skill)
 
+    # Whole-file substrings would pass if the plan were added to the reviewers' prompt. So the reviewers'
+    # prompt is cut out by its two markers and checked on its own.
+    [_, from] = String.split(skill, "Each reviewer's prompt carries, and only carries:", parts: 2)
+    [reviewer_prompt, _] = String.split(from, "It never carries", parts: 2)
+
+    refute reviewer_prompt =~ ~r/\bplan\b/i
     assert skill =~ "issue-section.sh\" plan"
-    assert skill =~ "goes only to the verifiers"
     assert skill =~ "the plan file if one is given"
+  end
+
+  test "the skill begins a round with the tree its own pin recorded, and stops when it moved" do
+    # Without the pinned tree, begin records whatever the working tree is at that moment, which can be a tree
+    # the pin never saw. Both the extra round and the first one must pass it.
+    skill = File.read!(@skill)
+
+    assert skill =~ ~s|begin --pinned "$(cat "$S/tree.txt")"|
+    assert skill =~ ~s|begin --extra --pinned "$(cat "$S/tree.txt")"|
+    assert skill =~ "`rc` 5"
   end
 
   test "the skill marks the round done after its report, so the reviewed tree is the one it read" do
@@ -112,6 +129,20 @@ defmodule AdversarialReviewSkillTest do
     assert skill =~ "according to the pin step 1 made"
     refute skill =~ "after it in later rounds"
     refute skill =~ "in a later round, or"
+  end
+
+  test "the next-round wording of a failed record is stated by whether a reviewed tree is kept" do
+    skill = File.read!(@skill)
+
+    assert skill =~ "a delta from the last complete tree"
+    refute skill =~ "The next round is then a full review, and the report says so."
+  end
+
+  test "prepare-commits stops before grouping when the status has no rounds line" do
+    prepare = File.read!(@prepare)
+
+    assert prepare =~ "No `rounds:` line"
+    assert prepare =~ "a writable state location"
   end
 
   test "prepare-commits asks for the status and starts round 1 when none has run" do

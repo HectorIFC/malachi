@@ -14,6 +14,8 @@
 #   - the session is in plan mode, where nothing is implemented yet;
 #   - the directory is not a git work tree, has no commit, or has no origin/main to compare with;
 #   - nothing is committed on the branch since it left origin/main;
+#   - there is nowhere to keep the round count (a read-only git directory and no usable TMPDIR): the
+#     reminder would repeat on every stop with nothing recorded, so it is left out rather than repeated;
 #   - a round has already run for this base, or the reminder was given (review-state.sh remind).
 #
 # Reads the hook input on stdin. Always exits 0: a hook that fails must not wedge the session.
