@@ -1,0 +1,261 @@
+<!-- @dsCard group="Website" viewport="1440x900" name="Malachi landing page" subtitle="Hook, guarantees, model, 3D topic, how it works, vs, CTA" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Malachi: open source reimplementation of LinkedIn's NorthGuard</title>
+<meta name="description" content="Malachi is an open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28 and MIT licensed. Ranges split and merge; writes are acknowledged by a majority of copies. In active development and not production-ready; the quickstart is plaintext on localhost only, so configure TLS before serving real traffic.">
+<link rel="alternate" type="text/plain" href="llms.txt" title="llms.txt">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"Malachi","description":"Open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28. In active development and not production-ready. The quickstart runs plaintext on localhost only; configure TLS before serving real traffic.","codeRepository":"https://github.com/HectorIFC/malachi","license":"https://opensource.org/licenses/MIT","programmingLanguage":"Elixir (Erlang/OTP 28)","runtimePlatform":"Erlang/OTP 28"}</script>
+<script>(function(){try{var v=localStorage.getItem("malachi-theme")||"system";var d=v==="dark"||(v==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("dark",d)}catch(e){}})()</script>
+<link rel="preload" href="../../assets/fonts/bricolage-grotesque-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../../styles.css">
+<link rel="stylesheet" href="../../tokens/marketing.css">
+<link rel="stylesheet" href="site.css">
+<noscript><style>.js-only{display:none!important}</style></noscript>
+<script src="site.js" defer></script>
+<script src="scenes.js" defer></script>
+<script src="model.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top wrap">
+<a class="brand" href="#" aria-label="Malachi home"><img src="../../assets/logo-mark.svg" width="28" height="28" alt=""><span>malachi</span></a>
+<nav class="top-nav" aria-label="Primary">
+<a class="hide-sm" href="https://github.com/HectorIFC/malachi/tree/main/docs">Docs</a>
+<a class="hide-sm" href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">Benchmarks</a>
+<a href="https://github.com/HectorIFC/malachi">GitHub</a>
+</nav>
+</header>
+<main id="main">
+<section class="hero wrap" aria-labelledby="hero-title">
+<div class="hook" data-scene="hook">
+<div class="hook-text">
+<p class="story"><span>A node just failed.</span> <span>How many orders were lost?</span> <span class="none">None.</span></p>
+<p class="story"><span>A topic split in two.</span> <span>How many records were copied?</span> <span class="none">None.</span></p>
+<p class="story"><span>A node restarted.</span> <span>How many cursors broke?</span> <span class="none">None.</span></p>
+</div>
+<div class="hook-viz js-only" data-desc="Three copies of a range take orders. node-2 stops answering and its state becomes unknown; node-1 and node-3 keep every acknowledged order. node-2 comes back behind, catches up and returns to active">
+<div class="viz" data-desc="Three copies of a range take orders. node-2 stops answering and its state becomes unknown; node-1 and node-3 keep every acknowledged order. node-2 comes back behind, catches up and returns to active">
+<div class="nodes" aria-hidden="true">
+<div class="node"><div class="node-head"><span class="mono">node-1</span><span class="st"><span class="sh sh-active"></span><span>active</span></span></div><canvas></canvas></div>
+<div class="node is-down" data-node="2"><div class="node-head"><span class="mono">node-2</span><span class="st"><span class="sh sh-unknown" data-shape></span><span data-word>unknown</span></span></div><canvas></canvas></div>
+<div class="node"><div class="node-head"><span class="mono">node-3</span><span class="st"><span class="sh sh-active"></span><span>active</span></span></div><canvas></canvas></div>
+</div>
+</div>
+<div class="viz viz-box" data-desc="One range takes records. It splits at the midpoint of its keyspace: its records are sealed where they are and two child ranges take new writes. No record moves"><canvas aria-hidden="true"></canvas></div>
+<div class="viz viz-box" data-desc="Three consumers read with cursors. node-2 restarts; the cursor reading through it waits, then resumes at the same position. The other two never stop"><canvas aria-hidden="true"></canvas></div>
+</div>
+</div>
+<div class="hero-copy">
+<h1 id="hero-title">Open source reimplementation of LinkedIn's NorthGuard</h1>
+<p class="lead">Clients speak topics, keys and opaque cursors, never partitions or offsets, so Malachi can split, merge and restripe its storage underneath without breaking them.</p>
+<div class="actions">
+<a class="btn btn-primary" href="https://github.com/HectorIFC/malachi/tree/main/docs">Read the docs</a>
+<a class="btn" href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">Benchmarks</a>
+<a class="btn" href="https://github.com/HectorIFC/malachi">GitHub</a>
+</div>
+</div>
+</section>
+<section class="wrap block" id="guarantees" aria-labelledby="guarantees-title">
+<h2 id="guarantees-title">What the code promises.</h2>
+<ul class="gs">
+<li class="g g-node"><svg viewBox="0 0 120 40" aria-hidden="true"><circle class="a" cx="20" cy="20" r="8"></circle><g class="x"><circle class="a" cx="60" cy="20" r="8"></circle></g><circle class="a" cx="100" cy="20" r="8"></circle></svg><h3>A node fails. Nothing acknowledged is lost.</h3><p>Malachi acknowledges a write only after a majority of the segment's copies have fsynced it. With three copies, one node can fail and every acknowledged record is still on the other two.</p></li>
+<li class="g g-split"><svg viewBox="0 0 120 40" aria-hidden="true"><rect class="l" x="10" y="14" width="50" height="12" rx="2"></rect><rect class="r" x="60" y="14" width="50" height="12" rx="2"></rect><line class="m" x1="60" y1="6" x2="60" y2="34"></line></svg><h3>Split a hot range without copying data.</h3><p>A split seals the range's active segment and gives each half of its keyspace to a new child. It is a metadata change: no segment is copied or rewritten, and merges happen only between buddy halves.</p></li>
+<li class="g g-cursor"><svg viewBox="0 0 120 40" aria-hidden="true"><rect class="s" x="8" y="15" width="10" height="10"></rect><rect class="s" x="24" y="15" width="10" height="10"></rect><rect class="s" x="40" y="15" width="10" height="10"></rect><circle class="a" cx="65" cy="20" r="5"></circle><circle class="a" cx="81" cy="20" r="5"></circle><circle class="a" cx="97" cy="20" r="5"></circle><line class="c" x1="4" y1="6" x2="4" y2="34"></line></svg><h3>Your client's cursor never changes shape.</h3><p>Clients hold topics, keys and an opaque cursor. Splits and merges happen underneath; a read drains the parent's sealed data before the child's, so records with the same key stay in order.</p></li>
+<li class="g g-raft"><svg viewBox="0 0 120 40" aria-hidden="true"><line class="k" x1="30" y1="28" x2="60" y2="10"></line><line class="k" x1="60" y1="10" x2="90" y2="28"></line><line class="k" x1="30" y1="28" x2="90" y2="28"></line><circle class="n n1" cx="60" cy="10" r="6"></circle><circle class="n n2" cx="30" cy="28" r="6"></circle><circle class="n n3" cx="90" cy="28" r="6"></circle></svg><h3>Metadata agreed by Raft.</h3><p>Topic, range and segment metadata lives in Raft groups on <code>ra</code>, inside each node. Records stay out of Raft: the primary ships them to its followers in batches.</p></li>
+</ul>
+<div class="g-foot">
+<a class="btn" href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">See the benchmarks and how they are measured</a>
+</div>
+</section>
+<section class="thesis block-gap" id="thesis" aria-labelledby="thesis-title">
+<div class="wrap">
+<p class="label">The model</p>
+<h2 id="thesis-title">A range grows, divides, and seals what it leaves behind.</h2>
+</div>
+<figure class="thesis-fig">
+<div class="canvas-box" data-desc="Animation of one topic's keyspace over time" aria-describedby="thesis-desc"><canvas aria-hidden="true"></canvas></div>
+<figcaption class="wrap thesis-cap">
+<p id="thesis-desc">Each dot is a record landing on a key; the keyspace runs top to bottom, time runs left to right. A range takes appends into its active segment. When its load passes a threshold it splits into two buddy halves of the keyspace, and the parent's segment is sealed first, behind a fence, before either child takes a write. When load falls, buddies merge back. The cursor a client holds never changes shape.</p>
+<ul class="legend" aria-label="Legend">
+<li><span class="sh sh-active" aria-hidden="true"></span>active segment</li>
+<li><span class="sh sh-sealed" aria-hidden="true"></span>sealed segment</li>
+<li><span class="sh sh-fence" aria-hidden="true"></span>seal fence</li>
+<li><span class="sh sh-bound" aria-hidden="true"></span>range boundary</li>
+</ul>
+</figcaption>
+</figure>
+</section>
+<section class="wrap block" id="model" aria-labelledby="model-title">
+<p class="label">Inside a topic</p>
+<h2 id="model-title">See where every record lives.</h2>
+<div class="model">
+<div class="model-stage">
+<canvas class="js-only" tabindex="0" role="img" aria-label="3D model of topic orders: one sealed range split into two active ranges, each a row of segments made of record frames. Drag or use the arrow keys to rotate."></canvas>
+</div>
+<div class="model-side">
+<fieldset class="seg levels js-only" hidden>
+<legend class="label">Highlight</legend>
+<label><input type="radio" name="level" value="topic" checked><span>Topic</span></label>
+<label><input type="radio" name="level" value="range"><span>Range</span></label>
+<label><input type="radio" name="level" value="segment"><span>Segment</span></label>
+<label><input type="radio" name="level" value="record"><span>Record</span></label>
+</fieldset>
+<div class="level" data-level="topic"><h3>Topic</h3><p>A topic is a keyspace divided into ranges. Its active ranges cover the keyspace exactly once, and they split and merge at runtime. Here, range 1 split into ranges 2 and 3.</p></div>
+<div class="level" data-level="range"><h3>Range</h3><p>A range owns one block of the keyspace. Every record whose key lands in that block is appended to it, in a sequence of segments. After a split the sealed parent stays as history its children read through.</p></div>
+<div class="level" data-level="segment"><h3>Segment</h3><p>The unit of replication. The active segment takes appends at its write position; a sealed segment is immutable, and retention deletes the oldest first.</p></div>
+<div class="level" data-level="record"><h3>Record</h3><p>A record frame: a short header, then the payload its CRC32 covers: key, value and headers. Malachi does not interpret the value.</p></div>
+<ul class="legend" aria-label="Legend">
+<li><span class="sh sh-active" aria-hidden="true"></span>active</li>
+<li><span class="sh sh-sealed" aria-hidden="true"></span>sealed</li>
+<li><span class="sh sh-accent" aria-hidden="true"></span>write position · split point</li>
+</ul>
+</div>
+</div>
+</section>
+<section class="wrap block" id="features" aria-labelledby="features-title">
+<p class="label">What you get</p>
+<h2 id="features-title">The NorthGuard shape, on the BEAM.</h2>
+<div class="tabs" data-tabs>
+<div class="tablist" role="tablist" aria-label="Features" hidden>
+<button role="tab" id="tab-ranges" aria-controls="p-ranges" type="button">Ranges instead of partitions</button>
+<button role="tab" id="tab-segments" aria-controls="p-segments" type="button">Segments with a lifecycle</button>
+<button role="tab" id="tab-raft" aria-controls="p-raft" type="button">A Raft control plane</button>
+<button role="tab" id="tab-auth" aria-controls="p-auth" type="button">Auth and ACLs</button>
+</div>
+<article class="panel" id="p-ranges">
+<h3>Ranges instead of partitions</h3>
+<p>A record's key hashes to a position in the topic's keyspace, and that position falls in exactly one range. Split and merge are metadata operations: segments are never physically combined or copied, and a merge happens only between buddy ranges. Same-key ordering survives resharding.</p>
+<dl class="facts">
+<div><dt>Children per split</dt><dd>2 buddies</dd></div>
+<div><dt>Segments copied by a split or merge</dt><dd>0</dd></div>
+<div><dt>Wire nouns</dt><dd>topic · key · cursor</dd></div>
+</dl>
+</article>
+<article class="panel" id="p-segments">
+<h3>Segments with a lifecycle</h3>
+<p>A segment is the unit of replication. It takes appends while active and becomes immutable once sealed, by size, by age, or on failure. Every record frame carries a checksum, and a scrubber re-verifies sealed segments and rebuilds a damaged copy from a replica that still verifies.</p>
+<dl class="facts">
+<div><dt>Seals at</dt><dd>1 GB · 1 h · on failure</dd></div>
+<div><dt>Checksum per record frame</dt><dd>CRC32</dd></div>
+<div><dt>Before every ack</dt><dd>fsync</dd></div>
+</dl>
+</article>
+<article class="panel" id="p-raft">
+<h3>A Raft control plane</h3>
+<p>Topic, range and segment metadata lives in vnodes, each a Raft group on <code>ra</code>, sharded on a hash ring by topic. Records do not go through Raft: the primary ships batches to its followers and acknowledges a write once a quorum has fsynced it.</p>
+<dl class="facts">
+<div><dt>Replication factor (default)</dt><dd>3</dd></div>
+<div><dt>Slow or unreachable followers tolerated</dt><dd>⌊(N−1)/2⌋ · 1 at RF 3</dd></div>
+<div><dt>Group commit triggers</dt><dd>10 ms · 20k records · 10 MB</dd></div>
+</dl>
+</article>
+<article class="panel" id="p-auth">
+<h3>Auth and ACLs</h3>
+<p>Every producer and consumer authenticates. Users and per-topic ACLs are replicated across the cluster in their own Raft group. Passwords are hashed with Argon2, TLS is required in production, nodes can talk over mutual TLS, and failed logins lock an account out progressively.</p>
+<dl class="facts">
+<div><dt>TLS versions</dt><dd>1.3 · 1.2</dd></div>
+<div><dt>Failed attempts before lockout</dt><dd>5</dd></div>
+<div><dt>Auth attempts per IP</dt><dd>10 / 60 s</dd></div>
+<div><dt>Minimum password length</dt><dd>12</dd></div>
+</dl>
+</article>
+</div>
+</section>
+<section class="wrap block" id="how" aria-labelledby="how-title">
+<p class="label">How it works</p>
+<h2 id="how-title">Three steps, one cursor.</h2>
+<ol class="how">
+<li class="step">
+<div class="step-copy"><p class="n mono">01</p><h3>Produce to a range</h3><p>The key routes each record to the one range that owns its slice of the keyspace. When a range gets busy it splits at the midpoint of its keyspace: its segment is sealed, and each half goes to a new child range.</p></div>
+<figure class="scene" data-scene="split"><div class="scene-box" data-desc="Animation: a busy range splits at its midpoint" aria-describedby="cap-split"><canvas aria-hidden="true"></canvas></div><figcaption class="cap-row"><span class="muted small" id="cap-split">Records land on keys (circles). The busy range splits at its midpoint (accent line); its records are sealed (squares) and the two halves take new writes.</span></figcaption></figure>
+</li>
+<li class="step">
+<div class="step-copy"><p class="n mono">02</p><h3>Replicate and seal</h3><p>The primary ships each batch to its followers and acknowledges it once a majority has fsynced it. A full, old or failed segment is sealed on every copy and never edited again.</p><pre class="code"><code>active ─ 1 GB · 1 h · failure ─▶ sealed</code></pre></div>
+<figure class="scene" data-scene="replicate"><div class="scene-box" data-desc="Animation: a primary replicates records to two followers and seals a full segment" aria-describedby="cap-replicate"><canvas aria-hidden="true"></canvas></div><figcaption class="cap-row"><span class="muted small" id="cap-replicate">Top row: the primary; below, two followers. A record turns solid on the primary once a second copy has it. A full segment seals on all three.</span></figcaption></figure>
+</li>
+<li class="step">
+<div class="step-copy"><p class="n mono">03</p><h3>Consume from a cursor</h3><p>A fetch returns records and an opaque cursor; pass it back to resume. After a split, the read drains the parent's sealed records first, then follows its key into the child.</p></div>
+<figure class="scene" data-scene="cursor"><div class="scene-box" data-desc="Animation: a cursor reads a sealed parent range, then its child" aria-describedby="cap-cursor"><canvas aria-hidden="true"></canvas></div><figcaption class="cap-row"><span class="muted small" id="cap-cursor">The cursor (accent line) reads the sealed parent, stops, resumes where it left off, and continues into the child range.</span></figcaption></figure>
+</li>
+</ol>
+</section>
+<section class="wrap block" id="vs" aria-labelledby="vs-title">
+<p class="label">Compared</p>
+<h2 id="vs-title">How Malachi differs from the logs you know.</h2>
+<div class="tabs" data-tabs>
+<div class="tablist" role="tablist" aria-label="Comparisons" hidden>
+<button role="tab" id="tab-kafka" aria-controls="p-kafka" type="button">vs Apache Kafka</button>
+<button role="tab" id="tab-redpanda" aria-controls="p-redpanda" type="button">vs Redpanda</button>
+<button role="tab" id="tab-pulsar" aria-controls="p-pulsar" type="button">vs Apache Pulsar</button>
+</div>
+<article class="vs-panel" id="p-kafka">
+<h3>Grow a hot topic without moving its keys.</h3>
+<figure class="scene" data-scene="kafka"><div class="vs-heads" aria-hidden="true"><span>Kafka partitions</span><span>Malachi ranges</span></div><div class="scene-box" data-desc="Animation: adding a Kafka partition compared with splitting a Malachi range" aria-describedby="cap-kafka"><canvas aria-hidden="true"></canvas></div><figcaption class="cap-row"><span class="muted small" id="cap-kafka">One key in accent. Left: a fourth partition is added and the key's new records go elsewhere. Right: the range splits and the key stays in the half that contains it.</span></figcaption></figure>
+<div class="vs-cols">
+<div><h4>Apache Kafka</h4><ul><li>Partitions can be added but not removed.</li><li>Adding partitions does not move existing records, so a key's new records can go to a different partition than its old ones.</li><li>Consumers track one offset per partition.</li><li>A write commits once every in-sync replica (ISR) has it.</li></ul></div>
+<div><h4>Malachi</h4><ul><li>Ranges split and merge at runtime.</li><li>A key always maps to the one range that contains it, and reads drain the parent before the child.</li><li>Clients hold an opaque cursor.</li><li>A write is acknowledged once a majority of copies have fsynced it.</li></ul></div>
+</div>
+<p class="src small">Sources: <a href="https://kafka.apache.org/43/operations/basic-kafka-operations/">Kafka docs, Basic operations</a> · <a href="https://kafka.apache.org/43/design/design/">Kafka docs, Design</a> · <a href="https://docs.confluent.io/platform/current/kafka/post-deployment.html">Confluent Platform docs</a></p>
+</article>
+<article class="vs-panel" id="p-redpanda">
+<h3>Shrink back when traffic drops.</h3>
+<figure class="scene" data-scene="redpanda"><div class="vs-heads" aria-hidden="true"><span>Redpanda partitions</span><span>Malachi ranges</span></div><div class="scene-box" data-desc="Animation: Redpanda partitions compared with Malachi ranges as traffic rises and falls" aria-describedby="cap-redpanda"><canvas aria-hidden="true"></canvas></div><figcaption class="cap-row"><span class="muted small" id="cap-redpanda">Traffic rises, then falls. Left: two partitions are added and stay after traffic falls. Right: the range splits, then the cold halves merge back.</span></figcaption></figure>
+<div class="vs-cols">
+<div><h4>Redpanda</h4><ul><li>Speaks the Kafka API: a keyed record goes to the partition its key hashes to.</li><li>Partitions can be added; existing records are not redistributed to them.</li><li>The partition count of a topic cannot be reduced.</li></ul></div>
+<div><h4>Malachi</h4><ul><li>Cold buddy ranges merge back, as a metadata change.</li><li>No segment is copied by a split or a merge.</li><li>Clients do not see either.</li></ul></div>
+</div>
+<p class="src small">Source: <a href="https://docs.redpanda.com/current/develop/config-topics/">Redpanda docs, Manage Topics</a></p>
+</article>
+<article class="vs-panel" id="p-pulsar">
+<h3>One system to run.</h3>
+<figure class="scene" data-scene="pulsar"><div class="vs-heads" aria-hidden="true"><span>Pulsar: brokers, bookies, metadata store</span><span>Malachi: nodes</span></div><div class="scene-box" data-desc="Animation: the write path in Pulsar compared with Malachi" aria-describedby="cap-pulsar"><canvas aria-hidden="true"></canvas></div><figcaption class="cap-row"><span class="muted small" id="cap-pulsar">Left: a write goes to a broker, which stores it on bookies and coordinates through a separate metadata store. Right: a write goes to a primary node, which copies it to two others; metadata runs inside the same nodes.</span></figcaption></figure>
+<div class="vs-cols">
+<div><h4>Apache Pulsar</h4><ul><li>A cluster runs brokers, BookKeeper bookies and a metadata store (Oxia is recommended for new clusters; ZooKeeper is supported).</li><li>Classic partitioned topics only grow, and resizing them can remap keys.</li><li>Since Pulsar 5.0 (released October 5, 2026), scalable topics split and merge key ranges, for clients on the v5 API (Java today).</li></ul></div>
+<div><h4>Malachi</h4><ul><li>Each node runs one Elixir application; the Raft control plane runs inside it.</li><li>Ranges split and merge for every client.</li><li>Clients hold topics, keys and a cursor.</li></ul></div>
+</div>
+<p class="src small">Sources: <a href="https://pulsar.apache.org/docs/4.0.x/concepts-architecture-overview/">Pulsar docs, Architecture</a> · <a href="https://pulsar.apache.org/docs/next/admin-api-topics/">Pulsar docs, Manage topics</a> · <a href="https://pulsar.apache.org/docs/5.0.x/concepts-scalable-topics/">Pulsar 5.0 docs, Scalable topics</a> · <a href="https://pulsar.apache.org/blog/2026/10/05/announcing-apache-pulsar-5-0/">Pulsar 5.0 release announcement</a></p>
+</article>
+</div>
+<p class="muted small vs-note">Apache Kafka, Apache Pulsar and Redpanda are trademarks of their owners. Malachi is not affiliated with or endorsed by them. Every claim above was checked against the linked documentation.</p>
+</section>
+<section class="wrap block cta" aria-labelledby="cta-title">
+<h2 id="cta-title">Run Malachi on your machine.</h2>
+<p class="lead">Malachi listens on 4040 and the dashboard on 4041. It is in active development and not production-ready.</p>
+<div class="quick">
+<div class="code-head"><span class="label">Quickstart</span><button class="copy js-only" type="button" data-copy="qs">Copy</button></div>
+<pre class="code" id="qs"><code>docker run \
+  -p 127.0.0.1:4040:4040 \
+  -p 127.0.0.1:4041:4041 \
+  -e MALACHI_ADMIN_PASS=change_me \
+  -e MALACHI_REQUIRE_TLS=false \
+  hectorcardoso/malachi:latest</code></pre>
+</div>
+<div class="actions">
+<a class="btn btn-primary" href="https://github.com/HectorIFC/malachi">Open the repository</a>
+<a class="btn" href="https://github.com/HectorIFC/malachi/blob/main/docs/ARCHITECTURE.md">Read the architecture</a>
+</div>
+</section>
+</main>
+<footer class="foot">
+<div class="wrap foot-in">
+<div class="foot-brand"><span class="brand"><img src="../../assets/logo-mark.svg" width="28" height="28" alt=""><span>malachi</span></span><p class="muted small">MIT license. Not production-ready.</p></div>
+<nav class="foot-nav" aria-label="Footer">
+<a href="https://github.com/HectorIFC/malachi/tree/main/docs">Docs</a>
+<a href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">Benchmarks</a>
+<a href="https://github.com/HectorIFC/malachi">GitHub</a>
+<a href="https://hub.docker.com/r/hectorcardoso/malachi">Docker Hub</a>
+<a href="https://github.com/HectorIFC/malachi/releases">Releases</a>
+</nav>
+<fieldset class="seg js-only">
+<legend class="label">Theme</legend>
+<label><input type="radio" name="theme" value="system" checked><span>System</span></label>
+<label><input type="radio" name="theme" value="light"><span>Light</span></label>
+<label><input type="radio" name="theme" value="dark"><span>Dark</span></label>
+</fieldset>
+</div>
+</footer>
+</body>
+</html>

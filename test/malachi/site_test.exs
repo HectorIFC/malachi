@@ -17,14 +17,14 @@ defmodule Malachi.SiteTest do
   @redirect ~s(<meta http-equiv="refresh" content="0; url=introduction.html">)
 
   setup %{tmp_dir: root} do
-    write(root, "site/index.html", """
+    write(root, "site/ui_kits/website/index.html", """
     <!doctype html>
     <html><head><meta name="malachi:landing" content="1"><title>Malachi {{version}}</title></head>
     <body><a href="introduction.html">Docs</a><p>{{license_name}} ({{license}}) at {{base_url}}</p>
     <a href="api.html">API</a><link href="fonts/bricolage.woff2"></body></html>
     """)
 
-    write(root, "site/llms.txt", """
+    write(root, "site/ui_kits/website/llms.txt", """
     # Malachi
 
     > Summary for version {{version}}.
@@ -32,8 +32,9 @@ defmodule Malachi.SiteTest do
     - [Docs]({{base_url}}/introduction.html)
     """)
 
-    write(root, "site/fonts/bricolage.woff2", "font-bytes")
-    write(root, "site/fonts/OFL.txt", "SIL Open Font License")
+    write(root, "site/assets/fonts/bricolage.woff2", "font-bytes")
+    write(root, "site/assets/fonts/OFL.txt", "SIL Open Font License")
+    write_page_kit(root)
 
     write(root, "doc/index.html", @redirect)
     write(root, "doc/introduction.html", "<h1>Introduction</h1>")
@@ -42,6 +43,15 @@ defmodule Malachi.SiteTest do
     write(root, "doc/llms.txt", "# Malachi API\n\n- [Module](api.html)\n")
 
     %{root: root}
+  end
+
+  # The page files the kit ships beside the landing page. Their content is not checked here, only that they are staged.
+  defp write_page_kit(root) do
+    for rel <- ~w(ui_kits/website/site.css ui_kits/website/site.js ui_kits/website/scenes.js ui_kits/website/model.js
+                  styles.css tokens/base.css tokens/colors.css tokens/effects.css tokens/marketing.css
+                  tokens/spacing.css tokens/typography.css assets/logo-mark.svg assets/logo.svg) do
+      write(root, "site/" <> rel, "/* #{rel} */")
+    end
   end
 
   defp write(root, path, content) do
@@ -122,16 +132,16 @@ defmodule Malachi.SiteTest do
     end
 
     test "refuses, naming the file, when the source page cannot be read, and leaves doc/ as it was", %{root: root} do
-      File.rm!(Path.join(root, "site/index.html"))
+      File.rm!(Path.join(root, "site/ui_kits/website/index.html"))
       before = snapshot(root)
 
       error = assert_raise Mix.Error, fn -> stage!(root) end
-      assert error.message =~ "site/index.html: cannot be read"
+      assert error.message =~ "site/ui_kits/website/index.html: cannot be read"
       assert snapshot(root) == before
     end
 
-    test "refuses when site/fonts is absent, and leaves doc/ as it was", %{root: root} do
-      File.rm_rf!(Path.join(root, "site/fonts"))
+    test "refuses when site/assets/fonts is absent, and leaves doc/ as it was", %{root: root} do
+      File.rm_rf!(Path.join(root, "site/assets/fonts"))
       before = snapshot(root)
 
       error = assert_raise Mix.Error, fn -> stage!(root) end
@@ -139,9 +149,9 @@ defmodule Malachi.SiteTest do
       assert snapshot(root) == before
     end
 
-    test "refuses when site/fonts holds no font file", %{root: root} do
-      File.rm!(Path.join(root, "site/fonts/bricolage.woff2"))
-      File.rm!(Path.join(root, "site/fonts/OFL.txt"))
+    test "refuses when site/assets/fonts holds no font file", %{root: root} do
+      File.rm!(Path.join(root, "site/assets/fonts/bricolage.woff2"))
+      File.rm!(Path.join(root, "site/assets/fonts/OFL.txt"))
 
       assert_raise Mix.Error, ~r/holds no font/, fn -> stage!(root) end
     end
@@ -736,12 +746,12 @@ defmodule Malachi.SiteTest do
     end
 
     test "a fonts path that cannot be listed is reported, not read as an empty folder", %{root: root} do
-      File.rm_rf!(Path.join(root, "site/fonts"))
-      File.write!(Path.join(root, "site/fonts"), "not a directory")
+      File.rm_rf!(Path.join(root, "site/assets/fonts"))
+      File.write!(Path.join(root, "site/assets/fonts"), "not a directory")
 
       error = assert_raise Mix.Error, fn -> stage!(root) end
-      assert error.message =~ "site/fonts: cannot be listed"
-      assert_raise Mix.Error, ~r/site\/fonts: cannot be listed/, fn -> Site.verify(root, @config) end
+      assert error.message =~ "site/assets/fonts: cannot be listed"
+      assert_raise Mix.Error, ~r/site\/assets\/fonts: cannot be listed/, fn -> Site.verify(root, @config) end
     end
 
     test "a dangling .html symbolic link is not a page, so the sitemap does not list it", %{root: root} do
@@ -764,18 +774,18 @@ defmodule Malachi.SiteTest do
     end
 
     test "two fonts with the same file name in different folders are refused, not overwritten", %{root: root} do
-      File.mkdir_p!(Path.join(root, "site/fonts/a"))
-      File.mkdir_p!(Path.join(root, "site/fonts/b"))
-      File.write!(Path.join(root, "site/fonts/a/x.woff2"), "one")
-      File.write!(Path.join(root, "site/fonts/b/x.woff2"), "two")
+      File.mkdir_p!(Path.join(root, "site/assets/fonts/a"))
+      File.mkdir_p!(Path.join(root, "site/assets/fonts/b"))
+      File.write!(Path.join(root, "site/assets/fonts/a/x.woff2"), "one")
+      File.write!(Path.join(root, "site/assets/fonts/b/x.woff2"), "two")
 
       error = assert_raise Mix.Error, fn -> stage!(root) end
       assert error.message =~ "x.woff2"
     end
 
-    test "a unique font in a subfolder of site/fonts is copied to doc/fonts", %{root: root} do
-      File.mkdir_p!(Path.join(root, "site/fonts/sub"))
-      File.write!(Path.join(root, "site/fonts/sub/extra.woff2"), "extra-bytes")
+    test "a unique font in a subfolder of site/assets/fonts is copied to doc/fonts", %{root: root} do
+      File.mkdir_p!(Path.join(root, "site/assets/fonts/sub"))
+      File.write!(Path.join(root, "site/assets/fonts/sub/extra.woff2"), "extra-bytes")
 
       stage!(root)
 
@@ -787,7 +797,7 @@ defmodule Malachi.SiteTest do
     # test_helper excludes `:non_root` under root, and the run reports them as excluded.
     @tag :non_root
     test "a font that cannot be read is refused before anything is written", %{root: root} do
-      bricolage = Path.join(root, "site/fonts/bricolage.woff2")
+      bricolage = Path.join(root, "site/assets/fonts/bricolage.woff2")
       File.chmod!(bricolage, 0o000)
       on_exit(fn -> File.chmod(bricolage, 0o644) end)
       before = snapshot(root)
@@ -797,16 +807,19 @@ defmodule Malachi.SiteTest do
       assert snapshot(root) == before
     end
 
-    test "a symbolic link in site/fonts is not a font of the source, and is not staged", %{root: root} do
-      File.ln_s!(Path.join(root, "site/fonts/bricolage.woff2"), Path.join(root, "site/fonts/linked.woff2"))
+    test "a symbolic link in site/assets/fonts is not a font of the source, and is not staged", %{root: root} do
+      File.ln_s!(
+        Path.join(root, "site/assets/fonts/bricolage.woff2"),
+        Path.join(root, "site/assets/fonts/linked.woff2")
+      )
 
       assert stage!(root) == :ok
       refute File.exists?(Path.join(root, "doc/fonts/linked.woff2"))
     end
 
     @tag :non_root
-    test "a folder inside site/fonts that cannot be searched is an error, not an empty folder", %{root: root} do
-      locked = Path.join(root, "site/fonts/locked")
+    test "a folder inside site/assets/fonts that cannot be searched is an error, not an empty folder", %{root: root} do
+      locked = Path.join(root, "site/assets/fonts/locked")
       File.mkdir_p!(locked)
       File.write!(Path.join(locked, "extra.woff2"), "extra-bytes")
       File.chmod!(locked, 0o644)
@@ -817,10 +830,10 @@ defmodule Malachi.SiteTest do
     end
 
     test "two fonts whose names differ only in case are refused, since one file would hold both", %{root: root} do
-      File.mkdir_p!(Path.join(root, "site/fonts/a"))
-      File.mkdir_p!(Path.join(root, "site/fonts/b"))
-      File.write!(Path.join(root, "site/fonts/a/Inter.woff2"), "AAAA")
-      File.write!(Path.join(root, "site/fonts/b/inter.woff2"), "BBBB")
+      File.mkdir_p!(Path.join(root, "site/assets/fonts/a"))
+      File.mkdir_p!(Path.join(root, "site/assets/fonts/b"))
+      File.write!(Path.join(root, "site/assets/fonts/a/Inter.woff2"), "AAAA")
+      File.write!(Path.join(root, "site/assets/fonts/b/inter.woff2"), "BBBB")
 
       error = assert_raise Mix.Error, fn -> stage!(root) end
       assert error.message =~ "nter.woff2"
@@ -1059,7 +1072,9 @@ defmodule Malachi.SiteTest do
              )
     end
 
-    test "a font withdrawn from site/fonts is removed from doc/fonts when the page is staged again", %{root: root} do
+    test "a font withdrawn from site/assets/fonts is removed from doc/fonts when the page is staged again", %{
+      root: root
+    } do
       stage!(root)
       write(root, "doc/fonts/Old.woff2", "old-bytes")
 
@@ -1316,6 +1331,36 @@ defmodule Malachi.SiteTest do
       assert "doc/llms.txt links to API.html, which is not in doc/" in Site.verify(root, @config)
     end
 
+    test "the kit's landing page is staged at the root of doc/, with its paths relative to that root and the marker", %{
+      root: root
+    } do
+      write(
+        root,
+        "site/ui_kits/website/index.html",
+        ~s[<!doctype html><html><head><link rel="stylesheet" href="../../styles.css"><link href="../../assets/fonts/bricolage.woff2"></head><body></body></html>]
+      )
+
+      stage!(root)
+      staged = read(root, "doc/index.html")
+
+      assert staged =~ ~s(<meta name="malachi:landing" content="1">)
+      assert staged =~ ~s(href="styles.css")
+      assert staged =~ ~s(href="fonts/bricolage.woff2")
+      refute staged =~ "../../"
+    end
+
+    test "the page files the kit ships are staged beside doc/index.html, and a missing one is reported", %{root: root} do
+      stage!(root)
+
+      assert File.exists?(Path.join(root, "doc/styles.css"))
+      assert File.exists?(Path.join(root, "doc/tokens/colors.css"))
+      assert File.exists?(Path.join(root, "doc/site.css"))
+      assert File.exists?(Path.join(root, "doc/assets/logo-mark.svg"))
+
+      File.rm!(Path.join(root, "doc/tokens/colors.css"))
+      assert "doc/tokens/colors.css is missing" in Site.verify(root, @config)
+    end
+
     test "the :non_root tests are excluded only when the suite runs as root" do
       {uid, 0} = System.cmd("id", ["-u"])
       excluded = Keyword.get(ExUnit.configuration(), :exclude, [])
@@ -1323,8 +1368,8 @@ defmodule Malachi.SiteTest do
       assert :non_root in excluded == (String.trim(uid) == "0")
     end
 
-    test "a dot-named file in site/fonts, such as .DS_Store, is not a font", %{root: root} do
-      File.write!(Path.join(root, "site/fonts/.DS_Store"), "junk")
+    test "a dot-named file in site/assets/fonts, such as .DS_Store, is not a font", %{root: root} do
+      File.write!(Path.join(root, "site/assets/fonts/.DS_Store"), "junk")
 
       assert stage!(root) == :ok
       refute File.exists?(Path.join(root, "doc/fonts/.DS_Store"))

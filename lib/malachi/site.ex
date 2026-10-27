@@ -27,6 +27,27 @@ defmodule Malachi.Site do
   """
 
   @source "site"
+  # The source is the design kit, laid out as the design project has it. The landing page is the kit's page.
+  @landing_source "ui_kits/website/index.html"
+  @llms_source "ui_kits/website/llms.txt"
+  @fonts_source "assets/fonts"
+  # The page loads its stylesheets, scripts and logo by paths relative to the kit, so they are staged beside
+  # doc/index.html under the names the page uses, and its `../../` prefix is dropped (see stage_paths/1).
+  @page_sources [
+    "ui_kits/website/site.css",
+    "ui_kits/website/site.js",
+    "ui_kits/website/scenes.js",
+    "ui_kits/website/model.js",
+    "styles.css",
+    "tokens/base.css",
+    "tokens/colors.css",
+    "tokens/effects.css",
+    "tokens/marketing.css",
+    "tokens/spacing.css",
+    "tokens/typography.css",
+    "assets/logo-mark.svg",
+    "assets/logo.svg"
+  ]
   @landing_marker ~s(<meta name="malachi:landing" content="1">)
   @summary_begin "<!-- malachi:summary begin -->"
   @summary_end "<!-- malachi:summary end -->"
@@ -139,8 +160,9 @@ defmodule Malachi.Site do
       Mix.raise("doc/#{main} is missing, so the landing page would link to nothing. Run mix docs first.")
     end
 
-    landing = fill(read!(root, "index.html"), meta)
-    llms = merge_llms(summary_block(fill(read!(root, "llms.txt"), meta)), Path.join(doc, "llms.txt"))
+    landing = root |> read!(@landing_source) |> fill(meta) |> stage_paths() |> with_marker()
+    llms = merge_llms(summary_block(fill(read!(root, @llms_source), meta)), Path.join(doc, "llms.txt"))
+    pages = for rel <- @page_sources, do: {dest_of(rel), read!(root, rel)}
     fonts = font_files!(root)
     sitemap_xml = sitemap(doc, meta)
 
@@ -153,10 +175,31 @@ defmodule Malachi.Site do
     remove_stale_fonts(doc, fonts)
     write!(doc, "index.html", landing)
     write!(doc, "llms.txt", llms)
+    for {dest, text} <- pages, do: write!(doc, dest, text)
     write!(doc, "robots.txt", robots(meta))
     write!(doc, "sitemap.xml", sitemap_xml)
     :ok
   end
+
+  # The landing page's paths to the kit name `../../`, which is the kit's own folder depth. Staged at the root of
+  # doc/, the page's font is `fonts/`, and everything else is at the root too.
+  defp stage_paths(html) do
+    html
+    |> String.replace("../../assets/fonts/", "fonts/")
+    |> String.replace("../../", "")
+  end
+
+  # The marker tells the staged page apart from the ExDoc redirect that `mix docs` writes to doc/index.html.
+  defp with_marker(html) do
+    if String.contains?(html, @landing_marker),
+      do: html,
+      else: String.replace(html, "<head>", "<head>\n" <> @landing_marker, global: false)
+  end
+
+  # Where a page file of the kit is staged: the page's own folder is flattened to the root of doc/, and the rest keeps
+  # its path.
+  defp dest_of("ui_kits/website/" <> name), do: name
+  defp dest_of(rel), do: rel
 
   @doc """
   Returns every problem in a staged `root/doc`, or `[]` when it is correct. See the moduledoc for what is checked.
@@ -168,10 +211,16 @@ defmodule Malachi.Site do
     doc = Path.join(root, "doc")
 
     index_errors(doc, meta) ++
+      page_errors(doc) ++
       ensure_file(doc, "robots.txt") ++
       staged_font_errors(root, doc) ++
       sitemap_errors(doc, meta) ++
       llms_errors(doc, meta)
+  end
+
+  # The files the staged page loads by path. A page without them renders unstyled, so each one must be staged.
+  defp page_errors(doc) do
+    for rel <- @page_sources, not File.exists?(Path.join(doc, dest_of(rel))), do: "doc/#{dest_of(rel)} is missing"
   end
 
   defp index_errors(doc, meta) do
@@ -505,7 +554,9 @@ defmodule Malachi.Site do
     files =
       case source_fonts(root) do
         [] ->
-          Mix.raise("#{@source}/fonts holds no font, so the landing page would reference fonts it does not ship.")
+          Mix.raise(
+            "#{@source}/#{@fonts_source} holds no font, so the landing page would reference fonts it does not ship."
+          )
 
         found ->
           found
@@ -525,7 +576,7 @@ defmodule Malachi.Site do
         duplicates = names |> Enum.filter(&(String.downcase(&1) in clashing)) |> Enum.uniq()
 
         Mix.raise(
-          "#{@source}/fonts has more than one font named #{Enum.join(duplicates, ", ")}, " <>
+          "#{@source}/#{@fonts_source} has more than one font named #{Enum.join(duplicates, ", ")}, " <>
             "and they would overwrite each other in doc/fonts"
         )
     end
@@ -540,7 +591,7 @@ defmodule Malachi.Site do
     end
   end
 
-  defp source_fonts(root), do: list_files(Path.join([root, @source, "fonts"]))
+  defp source_fonts(root), do: list_files(Path.join([root, @source, @fonts_source]))
 
   # The regular files under a directory, found by listing it rather than by a glob, so a path that holds `[`, `{`,
   # `*` or `?` is read as the directory it is. A glob would match nothing under such a path, silently.
@@ -664,7 +715,11 @@ defmodule Malachi.Site do
     Malachi.SourceFile.read!(Path.join([root, @source, name]), "#{@source}/#{name}")
   end
 
-  defp write!(dir, name, content), do: replace!(Path.join(dir, name), &File.write!(&1, content))
+  defp write!(dir, name, content) do
+    path = Path.join(dir, name)
+    File.mkdir_p!(Path.dirname(path))
+    replace!(path, &File.write!(&1, content))
+  end
 
   # Writes a file under a temporary name beside `path` and renames it into place, so `path` is never left
   # half-written. A failure removes the temporary file, so a failed run leaves no stray `.tmp` in doc/.

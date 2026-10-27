@@ -1,0 +1,141 @@
+/* Transcribed from docs/design/design-tokens.json v2.0.0 (HectorIFC/malachi@main), checked against assets/src/styles/tokens.css. OKLCH is the source space.
+   Light on :root; dark on .dark / [data-theme="dark"]. "auto" = consumer adds .dark via prefers-color-scheme. */
+:root{
+--background:oklch(0.985 0.002 265);
+--foreground:oklch(0.210 0.006 265);
+--card:oklch(1.000 0.000 0);
+--card-foreground:oklch(0.210 0.006 265);
+--popover:oklch(1.000 0.000 0);
+--popover-foreground:oklch(0.210 0.006 265);
+--primary:oklch(0.278 0.010 265);
+--primary-foreground:oklch(0.985 0.002 265);
+--secondary:oklch(0.958 0.003 265);
+--secondary-foreground:oklch(0.278 0.010 265);
+--muted:oklch(0.958 0.003 265);
+--muted-foreground:oklch(0.536 0.013 265);
+--accent:oklch(0.958 0.003 265);
+--accent-foreground:oklch(0.278 0.010 265);
+--destructive:oklch(0.577 0.222 27.3);
+--destructive-foreground:oklch(0.985 0.002 265);
+--border:oklch(0.920 0.004 265);
+--input:oklch(0.654 0.004 265);
+--ring:oklch(0.634 0.011 265);
+
+--brand-accent:oklch(0.769 0.157 70.1);
+--brand-accent-soft:oklch(0.769 0.157 70.1 / 0.14);
+
+--state-active:oklch(0.627 0.165 149.2);
+--state-sealed:oklch(0.546 0.129 244.3);
+--state-fenced:oklch(0.661 0.155 70.7);
+--state-damaged:oklch(0.577 0.222 27.3);
+--state-behind:oklch(0.654 0.152 90.1);
+--state-ahead:oklch(0.559 0.230 302.7);
+--state-blocked:oklch(0.458 0.199 19.8);
+--state-unknown:oklch(0.551 0.013 265);
+
+--severity-ok:var(--state-active);
+--severity-info:var(--state-sealed);
+--severity-warning:var(--state-fenced);
+--severity-error:var(--state-damaged);
+
+--chart-1:oklch(0.646 0.222 41.1);
+--chart-2:oklch(0.600 0.118 184.7);
+--chart-3:oklch(0.398 0.070 227.4);
+--chart-4:oklch(0.450 0.150 45.0);
+--chart-5:oklch(0.540 0.200 270.0);
+
+/* Cluster identity: operator-picked, same in both themes. Never a state, never a series. Text on a swatch uses --cluster-foreground. */
+--cluster-teal:oklch(0.600 0.118 184.7);
+--cluster-orange:oklch(0.770 0.140 40.1);
+--cluster-violet:oklch(0.627 0.170 303.0);
+--cluster-rose:oklch(0.670 0.190 1.0);
+--cluster-foreground:oklch(0.161 0.004 265);
+
+--sidebar:oklch(0.985 0.002 265);
+--sidebar-foreground:oklch(0.210 0.006 265);
+--sidebar-primary:oklch(0.278 0.010 265);
+--sidebar-primary-foreground:oklch(0.985 0.002 265);
+--sidebar-accent:oklch(0.958 0.003 265);
+--sidebar-accent-foreground:oklch(0.278 0.010 265);
+--sidebar-border:oklch(0.920 0.004 265);
+--sidebar-ring:oklch(0.634 0.011 265);
+
+/* Logo only: navy tile (#0a0e27) and cyan mark (#00d9ff) from docs/logo.svg. */
+--logo-tile:oklch(0.177 0.051 273.2);
+--logo-mark:oklch(0.816 0.146 216.5);
+
+--overlay:oklch(0.000 0.000 0 / 0.5);
+--shadow-color-faint:oklch(0.000 0.000 0 / 0.05);
+--shadow-color-strong:oklch(0.000 0.000 0 / 0.1);
+
+/* Semantic aliases */
+--surface-page:var(--background);
+--surface-card:var(--card);
+--surface-popover:var(--popover);
+--surface-muted:var(--muted);
+--surface-hover:var(--accent);
+--text-body:var(--foreground);
+--text-muted:var(--muted-foreground);
+--text-on-primary:var(--primary-foreground);
+--border-default:var(--border);
+--focus-ring:var(--ring);
+/* Decoration beside a focused element only; the focus indicator is --focus-ring. */
+--focus-accent:var(--brand-accent);
+color-scheme:light;
+}
+.dark,[data-theme="dark"]{
+--background:oklch(0.161 0.004 265);
+--foreground:oklch(0.962 0.002 265);
+--card:oklch(0.208 0.005 265);
+--card-foreground:oklch(0.962 0.002 265);
+--popover:oklch(0.234 0.006 265);
+--popover-foreground:oklch(0.962 0.002 265);
+--primary:oklch(0.925 0.003 265);
+--primary-foreground:oklch(0.208 0.005 265);
+--secondary:oklch(0.271 0.006 265);
+--secondary-foreground:oklch(0.962 0.002 265);
+--muted:oklch(0.271 0.006 265);
+--muted-foreground:oklch(0.712 0.012 265);
+--accent:oklch(0.271 0.006 265);
+--accent-foreground:oklch(0.962 0.002 265);
+--destructive:oklch(0.579 0.201 25.4);
+--destructive-foreground:oklch(0.985 0.002 265);
+--border:oklch(0.288 0.006 265);
+--input:oklch(0.508 0.006 265);
+--ring:oklch(0.551 0.013 265);
+
+--brand-accent:oklch(0.769 0.157 70.1);
+--brand-accent-soft:oklch(0.769 0.157 70.1 / 0.16);
+
+--state-active:oklch(0.696 0.170 149.2);
+--state-sealed:oklch(0.685 0.130 244.3);
+--state-fenced:oklch(0.769 0.157 70.7);
+--state-damaged:oklch(0.665 0.201 25.4);
+--state-behind:oklch(0.828 0.152 90.1);
+--state-ahead:oklch(0.671 0.207 302.7);
+--state-blocked:oklch(0.553 0.207 19.8);
+--state-unknown:oklch(0.600 0.013 265);
+
+--chart-1:oklch(0.524 0.243 264.4);
+--chart-2:oklch(0.696 0.170 162.5);
+--chart-3:oklch(0.769 0.188 70.1);
+--chart-4:oklch(0.627 0.265 303.9);
+--chart-5:oklch(0.645 0.246 16.4);
+
+/* Cluster identity: operator-picked, same in both themes. Never a state, never a series. Text on a swatch uses --cluster-foreground. */
+--cluster-teal:oklch(0.600 0.118 184.7);
+--cluster-orange:oklch(0.770 0.140 40.1);
+--cluster-violet:oklch(0.627 0.170 303.0);
+--cluster-rose:oklch(0.670 0.190 1.0);
+--cluster-foreground:oklch(0.161 0.004 265);
+
+--sidebar:oklch(0.208 0.005 265);
+--sidebar-foreground:oklch(0.962 0.002 265);
+--sidebar-primary:oklch(0.488 0.243 264.4);
+--sidebar-primary-foreground:oklch(0.985 0.002 265);
+--sidebar-accent:oklch(0.271 0.006 265);
+--sidebar-accent-foreground:oklch(0.962 0.002 265);
+--sidebar-border:oklch(0.288 0.006 265);
+--sidebar-ring:oklch(0.551 0.013 265);
+color-scheme:dark;
+}
