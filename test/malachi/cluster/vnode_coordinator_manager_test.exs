@@ -461,16 +461,21 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerPlacementTest do
     manager = start_manager(placement)
     assert_receive {:spawn, :a, _}
 
+    # A reason of its own: the capture also holds the warnings of the async tests beside this one, which all log the
+    # same text with a generic reason, so only a line that names this reason is this test's warning.
+    reason = {:membership_down, make_ref()}
+    marker = inspect(reason)
+
     log =
       capture_log(fn ->
-        Agent.update(agent, fn _ -> {:error, :membership_down} end)
+        Agent.update(agent, fn _ -> {:error, reason} end)
         Manager.reconcile_now(manager)
         Manager.reconcile_now(manager)
         Manager.reconcile_now(manager)
       end)
 
-    assert length(Regex.scan(~r/could not be read/, log)) == 1
-    assert log =~ ":membership_down"
+    ours = Enum.count(String.split(log, "\n"), &(&1 =~ "could not be read" and &1 =~ marker))
+    assert ours == 1
 
     recovery =
       capture_log(fn ->

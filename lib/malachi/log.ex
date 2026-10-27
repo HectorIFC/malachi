@@ -269,19 +269,27 @@ defmodule Malachi.Log do
   exactly that.
 
   Answers `{:error, :below_base_offset}` for an `end_offset` under the log's first record, which is a
-  caller asking about the wrong log rather than a log that needs emptying. Buffered records are flushed
-  first, as `seal/1` flushes: they are not durable, so nothing has acknowledged them, but a truncation
-  measured against a file that a pending write is about to extend would answer for the wrong bytes.
+  caller asking about the wrong log rather than a log that needs emptying. An unreadable segment directory
+  answers `{:error, {:segments_unreadable, reason}}` instead, because it says nothing about the caller's number.
+  A cut that removes records flushes buffered records first, as `seal/1` flushes: they are not durable, so nothing
+  has acknowledged them, but a truncation measured against a file that a pending write is about to extend would
+  answer for the wrong bytes. A no-op or a refusal answers before that flush.
+
+  After a cut has changed the disk, a reopen that fails answers `{:error, {:reopen_after_cut, reason}}`: the caller
+  must drop the log it holds, whose handle is closed and whose end is stale.
   """
   @spec truncate_to(t(), non_neg_integer()) :: {:ok, t()} | {:error, term()}
   def truncate_to(%__MODULE__{} = log, end_offset) when is_integer(end_offset) do
-    base_offsets = base_offsets_in(log.directory)
-
-    cond do
-      end_offset >= log.next_offset -> {:ok, log}
-      base_offsets == [] -> {:error, :below_base_offset}
-      end_offset < hd(base_offsets) -> {:error, :below_base_offset}
-      true -> do_truncate_to(log, end_offset, base_offsets)
+    if end_offset >= log.next_offset do
+      {:ok, log}
+    else
+      with {:ok, base_offsets} <- segment_offsets(log.directory) do
+        cond do
+          base_offsets == [] -> {:error, :below_base_offset}
+          end_offset < hd(base_offsets) -> {:error, :below_base_offset}
+          true -> do_truncate_to(log, end_offset, base_offsets)
+        end
+      end
     end
   end
 
@@ -439,7 +447,12 @@ defmodule Malachi.Log do
          # every entry it has, so one at the end covers them all, and a crash before it simply leaves
          # files a later pass removes again.
          :ok <- Directory.sync(log.directory) do
-      recover(log.directory, [base_offset: end_offset, store: log.store] ++ log.segment_opts)
+      # The cut has already changed the disk, so a failed reopen is tagged: the caller must not keep the log it holds,
+      # whose handle is closed and whose end is stale.
+      case recover(log.directory, [base_offset: end_offset, store: log.store] ++ log.segment_opts) do
+        {:ok, reopened} -> {:ok, reopened}
+        {:error, reason} -> {:error, {:reopen_after_cut, reason}}
+      end
     end
   end
 
@@ -522,8 +535,8 @@ defmodule Malachi.Log do
     end
   end
 
-  # The other readers (`verify/2`, `rebuild_index/2`, `truncate_to/2`) keep their answer for an unreadable
-  # directory as it was: no segments.
+  # The other readers (`verify/2` and `rebuild_index/2`) keep their answer for an unreadable directory as it was:
+  # no segments. `truncate_to/2` reports the error instead.
   defp base_offsets_in(directory) do
     case segment_offsets(directory) do
       {:ok, base_offsets} -> base_offsets

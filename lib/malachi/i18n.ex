@@ -684,6 +684,19 @@ defmodule Malachi.I18n do
           "them active: %{segments}. Their ranges were refusing every write until now, so a fence's " <>
           "seal failing to land is worth investigating upstream"
     },
+    heal_sealed_copy_confirm_failed: %{
+      "pt_BR" =>
+        "não foi possível registrar que a cópia de %{segment_id} em %{replica} " <>
+          "já foi liquidada: %{reason}",
+      "en_US" => "could not record that the copy of %{segment_id} on %{replica} is settled: %{reason}"
+    },
+    heal_repair_unreachable: %{
+      "pt_BR" =>
+        "não foi possível reparar a cópia de %{segment_id} em %{replica}: " <>
+          "a réplica não respondeu nem aceitou a sonda",
+      "en_US" =>
+        "could not repair the copy of %{segment_id} on %{replica}: the replica neither answered nor accepted the probe"
+    },
     replication_trim_count_unknown: %{
       "pt_BR" =>
         "não foi possível contar os registros que um corte falho removeu do segmento " <>

@@ -59,8 +59,11 @@ defmodule Malachi.Cluster.SealedOverrun do
   sealed the segment, the length is immutable, no producer will ever write to it again, and there is no
   decision left for the pass to decline. Fencing every copy costs nothing it could regret, and it is
   what lets the next pass skip a copy it has already settled at the recorded length: the marker is the memory.
-  A copy whose bytes stay above the recorded size is probed again on every pass in which its segment is fully
-  live, not under-replicated and the copy is not latched, and settled again with it, within the batch.
+  A copy whose bytes stay above the recorded size is probed on every pass in which its segment is fully live,
+  not under-replicated and the copy is not latched, and settled with it, within the batch, until the pass that
+  settles it records that its records are the seal's. From then on it is not selected again. A copy holding fewer
+  records than its seal is fenced short and reported as not settled. Only a copy whose bytes are below the recorded
+  size is repaired, by the integrity pass.
 
   Repair still works on a fenced copy. `ReplicationServer.follow/4`, which `Malachi.Cluster.Catchup`
   uses to backfill a short copy, deliberately carries no fence check, so settling a copy that is short
@@ -85,8 +88,8 @@ defmodule Malachi.Cluster.SealedOverrun do
   measures for every sealed segment whose replicas are all live and not under-replicated, on every pass. That
   probe is the whole reason this policy asks for nothing of its own: a copy settled at the recorded length is
   byte-exact and stops appearing here, unless its bytes stay above the recorded size, in which case it is
-  probed again while its segment stays fully live, not under-replicated and the copy is not latched. The question
-  costs the pass no call it was not already making.
+  probed until it is confirmed, while its segment stays fully live, not under-replicated and the copy is not
+  latched. The question costs one settled-marker call for each copy above the recorded size, on top of the byte count.
 
   Bounded because the FIRST pass after this ships may find many sealed copies unsettled at once. Each
   action opens a log, verifies its records and fsyncs, so an unbounded pass would put that on the disk

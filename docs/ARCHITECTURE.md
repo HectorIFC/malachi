@@ -90,17 +90,18 @@ and fences it there. A copy that holds fewer records than its seal names is hand
 fences it at the length it holds, which the control plane never recorded, and reports it as not settled. The
 integrity pass fills in place a copy whose bytes are below the recorded size, when every replica of the
 segment is live, the segment is not under-replicated, and a copy at or above the recorded size exists to copy
-from, the copy is not latched as failed (a latched copy is replaced instead, or, with no spare broker, kept
+from, and no replica's latch state is unread this tick, the copy is not latched as failed (a latched copy is replaced
+instead, or, with no spare broker, kept
 behind the healthy replicas), and its durable end is short of the recorded end. A copy whose records are all
-present but whose bytes are short is reported as integrity suspect and left to the scrubber, which revisits
-each sealed copy
-about weekly on a node with 10k sealed segments (see the operations
-guide). This fence at a length the metadata does not carry is a divergence from NorthGuard,
+present but whose bytes are short is reported as integrity suspect and left to the scrubber, which
+revisits each sealed copy about weekly on a node with 10k sealed segments (see the operations guide).
+This fence at a length the metadata does not carry is a divergence from NorthGuard,
 where the seal the control plane records is the only one a copy carries. A copy whose bytes stay above the
-recorded size, whatever its records, is returned in the probe's unsettled list on every pass in which its
-segment is fully live, not under-replicated and the copy is not latched, unless its segment's latch state is
-unreadable or its own probe times out on that tick, because a sealed size is immutable and no pass can correct
-it.
+recorded size, holding exactly its seal's records, is returned in the probe's unsettled list until it is
+confirmed, on every pass in which its segment is fully live, not under-replicated and the copy is not latched,
+unless its segment's latch state is unreadable or its own probe times out on that tick, because a sealed size is
+immutable, so no pass corrects it; the confirmation records that the copy is settled and it is not selected
+again.
 
 > **Analogy.** A segment is a notebook: you keep writing on the current page until it is full, then you
 > close that notebook for good (seal it, never edited again) and open a fresh one. Because closed notebooks

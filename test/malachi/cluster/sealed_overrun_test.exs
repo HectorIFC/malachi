@@ -243,8 +243,8 @@ defmodule Malachi.Cluster.SealedOverrunTest do
 
     # Every replica holds `values`, and the segment is sealed with the byte size they actually have,
     # which is the shape the integrity probe compares against.
-    defp sealed_everywhere(replica_set, values) do
-      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+    defp sealed_everywhere(replica_set, values, topic \\ "events") do
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, topic, 4})
       segment_id = {root, 0}
       {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, replica_set, 0})
 
@@ -264,7 +264,8 @@ defmodule Malachi.Cluster.SealedOverrunTest do
     # primary's own local append did before it lost quorum.
     test "an old primary that comes back holding a record past the sealed end is brought back to it" do
       [a, b, c] = [start_broker(), start_broker(), start_broker()]
-      {metadata, segment_id} = sealed_everywhere([a, b, c], ["x", "y", "z"])
+      topic = "old-primary-#{System.unique_integer([:positive])}"
+      {metadata, segment_id} = sealed_everywhere([a, b, c], ["x", "y", "z"], topic)
       {:ok, 3} = ReplicationServer.follow(c, segment_id, 3, records(["surplus"]))
       assert read_values(c, segment_id) == ["x", "y", "z", "surplus"]
 
@@ -276,7 +277,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
       assert read_values(c, segment_id) == ["x", "y", "z"]
       assert fenced?(c, segment_id)
       assert ReplicationServer.stored_bytes(c, segment_id) == Metadata.get_segment(source.(), segment_id).byte_size
-      assert log =~ "dropping 1 record(s) past the sealed end"
+      assert log =~ "dropping 1 record(s) past the sealed end on segment {{\"#{topic}\", 0}, 0}"
     end
 
     # Hypothesis 1 of the same issue: a follower whose own log was never fenced accepts a push for a
@@ -306,7 +307,10 @@ defmodule Malachi.Cluster.SealedOverrunTest do
     # every copy in the cluster, which is why it must not log like the case above.
     test "a copy that only kept a preallocated tail is trimmed and fenced, with nothing dropped" do
       [a, b] = [start_broker(prealloc_bytes: 8192), start_broker(prealloc_bytes: 8192)]
-      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      # A topic name of its own: `capture_log` also takes the warnings of the async tests running beside this one,
+      # so the refute below names this test's segment and not one another test could log too.
+      topic = "prealloc-#{System.unique_integer([:positive])}"
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, topic, 4})
       segment_id = {root, 0}
       {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b], 0})
       for replica <- [a, b], do: {:ok, 2} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y", "z"]))
@@ -337,7 +341,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
       assert ReplicationServer.stored_bytes(b, segment_id) == bytes
       assert read_values(b, segment_id) == ["x", "y", "z"]
       assert fenced?(b, segment_id)
-      refute log =~ "past the sealed end"
+      refute log =~ "past the sealed end on segment {{\"#{topic}\", 0}, 0}"
     end
 
     test "a copy that is already byte exact is left alone, so a settled cluster does no work" do
@@ -465,25 +469,202 @@ defmodule Malachi.Cluster.SealedOverrunTest do
       assert passes == [[x, y], [z, x], [y, z]]
     end
 
-    # The default seam with no injected settle: a settle that gets no answer in time exits inside `seal_at/5`,
-    # and the default turns that into `:unreachable`, which stops the pass after the copy it hit. Only one copy
-    # is reported as not settled, where a pass that carried on would report both.
-    test "a settle the default seam gives up on stops the pass after one copy" do
+    # A settle that answers `:unreachable` stops the pass after the copy it hit. Two copies are above the recorded
+    # length, so a pass that carried on would call the seam twice. The count is taken from the seam, not from a log
+    # line, because `capture_log` also takes the warnings of the async tests running beside this one.
+    test "an unreachable settle stops the pass after one copy" do
       [a, b, c] = [start_broker(), start_broker(), start_broker()]
       {metadata, segment_id} = sealed_everywhere([a, b, c], ["x", "y"])
       for replica <- [b, c], do: {:ok, 2} = ReplicationServer.follow(replica, segment_id, 2, records(["surplus"]))
       {source, apply} = metadata_store(metadata)
+      parent = self()
+
+      settle = fn replica, _segment, _base, _end ->
+        send(parent, {:settled_attempt, replica})
+        :unreachable
+      end
 
       coordinator =
         start_coordinator(
           live_brokers: fn -> [a, b, c] end,
           metadata_source: source,
           apply_command: apply,
-          settle_timeout: 0
+          settle_copy: settle
+        )
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert_received {:settled_attempt, _replica}
+      refute_received {:settled_attempt, _replica}
+    end
+
+    # The tick attempts the confirmation and reports it: the copy is settled, then its replica stops answering, and the
+    # warning names that replica. No assertion here depends on the bound. It is proven on the call alone, in the test
+    # of `default_confirm_settled/1` below, since a wall-clock bound on the whole tick is too fragile under load.
+    test "a stalled confirmation is attempted and reported" do
+      [a, b] = [start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b], 0})
+      for replica <- [a, b], do: {:ok, 1} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y"]))
+      bytes = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, bytes - 1, 0})
+      {source, apply} = metadata_store(metadata)
+      parent = self()
+
+      settle = fn replica, segment, base, end_offset ->
+        result =
+          case ReplicationServer.seal_at(replica, segment, base, end_offset) do
+            {:ok, held_end, byte_size, dropped} -> {:ok, dropped, byte_size, held_end}
+            {:error, _reason} -> :error
+          end
+
+        :sys.suspend(replica)
+        send(parent, {:stalled, replica})
+        result
+      end
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b] end,
+          metadata_source: source,
+          apply_command: apply,
+          replication_factor: 2,
+          settle_batch_size: 1,
+          settle_copy: settle,
+          confirm_timeout: 50
         )
 
       log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
-      assert log =~ "could not bring 1 sealed segment copy"
+
+      assert_received {:stalled, stalled}
+      :sys.resume(stalled)
+
+      # The pid is in the warning, so this is the confirmation to the stalled replica and no other test's.
+      assert log =~ "could not record that the copy"
+      assert log =~ inspect(stalled)
+    end
+
+    # The default confirmation gives up at the bound it is given. A suspended replica never answers, so the time is the
+    # bound alone: with the option ignored, the default of 2 s fails the second assertion.
+    test "the default confirmation gives up at the bound it is given" do
+      replica = start_broker()
+      :sys.suspend(replica)
+      confirm = HealCoordinator.default_confirm_settled(50)
+
+      {micros, result} = :timer.tc(fn -> confirm.(replica, {:events, 0}) end)
+      :sys.resume(replica)
+
+      assert result == {:error, :unreachable}
+      assert micros < 1_000_000
+    end
+
+    # A settle with no trim spends the pass's budget here, and the confirmations still run: they have a budget of
+    # their own, so the copies the settle left for confirmation get their marker on this pass.
+    test "the confirmations still run when a settle without a trim spends the pass budget" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "trims-spend", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+
+      for replica <- [a, b, c], do: {:ok, 1} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y"]))
+      bytes = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, bytes - 1, 0})
+      {source, apply} = metadata_store(metadata)
+      parent = self()
+
+      settle = fn _replica, _segment, _base, _end ->
+        Process.sleep(600)
+        {:ok, 0, bytes, 2}
+      end
+
+      confirm = fn replica, _segment ->
+        send(parent, {:confirm_attempt, replica})
+        :ok
+      end
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          settle_budget: 500,
+          settle_copy: settle,
+          confirm_settled: confirm
+        )
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert_received {:confirm_attempt, _replica}
+    end
+
+    # The confirmations share the pass budget. The three copies below are settled and then need a marker each; the
+    # budget is spent by the first confirmation, so the other two wait for a later pass.
+    test "the confirmations of a pass stop once its budget is spent" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "budget-confirm", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+
+      for replica <- [a, b, c], do: {:ok, 1} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y"]))
+      bytes = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, bytes - 1, 0})
+      {source, apply} = metadata_store(metadata)
+      parent = self()
+
+      settle = fn _replica, _segment, _base, _end -> {:ok, 0, bytes, 2} end
+
+      confirm = fn replica, _segment ->
+        send(parent, {:confirm_attempt, replica})
+        Process.sleep(600)
+        {:error, :eacces}
+      end
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          settle_budget: 500,
+          settle_copy: settle,
+          confirm_settled: confirm
+        )
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert_received {:confirm_attempt, _replica}
+      refute_received {:confirm_attempt, _replica}
+    end
+
+    # The settle pass stops starting copies once its budget is spent. Each trim here outlasts the budget, so one copy
+    # is attempted and the second waits for the next tick. Without the budget both are attempted.
+    test "a settle pass stops starting copies once its budget is spent" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_everywhere([a, b, c], ["x", "y"])
+      for replica <- [b, c], do: {:ok, 2} = ReplicationServer.follow(replica, segment_id, 2, records(["surplus"]))
+      {source, apply} = metadata_store(metadata)
+      parent = self()
+
+      settle = fn replica, _segment, _base, _end ->
+        send(parent, {:settle_attempt, replica})
+        Process.sleep(600)
+        :error
+      end
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          settle_batch_size: 2,
+          settle_budget: 500,
+          settle_copy: settle
+        )
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+
+      assert_received {:settle_attempt, _replica}
+      refute_received {:settle_attempt, _replica}
     end
 
     # A pass with nothing to settle keeps the turn. The cursor rests on p after the pass that settles it last, so
@@ -755,8 +936,8 @@ defmodule Malachi.Cluster.SealedOverrunTest do
     end
 
     # #248. Every copy holds exactly the records its seal names and measures above the recorded byte_size,
-    # which no pass can improve. Each pass reports them as a recorded size below what they hold, and never
-    # as a fence: the fence counter is what climbed forever before, and the counter is what the operator reads.
+    # which no pass can improve. The first pass reports them as a recorded size below what they hold, and never
+    # as a fence; it then records that they are settled, so the counter stops climbing on every later pass.
     test "a recorded byte_size below every correct copy is reported as that, not as a fence" do
       [a, b, c] = [start_broker(), start_broker(), start_broker()]
       {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
@@ -771,13 +952,76 @@ defmodule Malachi.Cluster.SealedOverrunTest do
       coordinator = start_coordinator(live_brokers: fn -> [a, b, c] end, metadata_source: source, apply_command: apply)
       watch_settlements(coordinator, [a, b, c])
 
+      log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+      assert settled_events() == [{:recorded_size_below, 3}]
+      assert log =~ inspect(a)
+
+      # The first pass recorded that these copies hold exactly the seal's records, so no later pass selects them.
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+      assert settled_events() == []
+
+      assert Enum.map([a, b, c], &read_values(&1, segment_id)) == [["x", "y"], ["x", "y"], ["x", "y"]]
+    end
+
+    # A replica that does not answer the confirmation stops the confirmations of the pass, as it stops the settle: the
+    # copies after it wait for the next pass, so one silent replica costs one call here, not one per copy.
+    test "an unanswered confirmation stops the confirmations of the pass" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+
+      for replica <- [a, b, c], do: {:ok, 1} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y"]))
+      bytes = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, bytes - 1, 0})
+
+      owner = self()
+      {source, apply} = metadata_store(metadata)
+
+      coordinator =
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          confirm_settled: fn replica, _segment ->
+            send(owner, {:confirm, replica})
+            {:error, :unreachable}
+          end
+        )
+
+      ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
+      assert_received {:confirm, _first}
+      refute_received {:confirm, _second}
+    end
+
+    # The marker that records the confirmation is what stops the re-selection. When the marker cannot be written,
+    # the copy stays selected, so the next pass settles and confirms it again: the retry is the level trigger.
+    test "a confirmation that cannot be written leaves the copy selected for the next pass" do
+      {a, dir_a} = start_broker_at([])
+      {b, dir_b} = start_broker_at([])
+      {c, dir_c} = start_broker_at([])
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+
+      for replica <- [a, b, c], do: {:ok, 1} = ReplicationServer.follow(replica, segment_id, 0, records(["x", "y"]))
+      bytes = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, bytes - 1, 0})
+
+      # The marker cannot be written where a directory already sits under its name: a real write failure.
+      for dir <- [dir_a, dir_b, dir_c] do
+        File.mkdir_p!(Path.join(Layout.segment_directory(dir, segment_id), "SETTLED"))
+      end
+
+      {source, apply} = metadata_store(metadata)
+      coordinator = start_coordinator(live_brokers: fn -> [a, b, c] end, metadata_source: source, apply_command: apply)
+      watch_settlements(coordinator, [a, b, c])
+
       for _pass <- 1..2 do
         log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
         assert settled_events() == [{:recorded_size_below, 3}]
-        assert log =~ "measure more bytes than the recorded byte_size"
+        assert log =~ "on #{inspect(a)} is settled"
       end
-
-      assert Enum.map([a, b, c], &read_values(&1, segment_id)) == [["x", "y"], ["x", "y"], ["x", "y"]]
     end
 
     # A copy holding fewer records than its seal names is not length-correct, whatever its bytes say. There is
@@ -799,7 +1043,7 @@ defmodule Malachi.Cluster.SealedOverrunTest do
       log = ExUnit.CaptureLog.capture_log(fn -> HealCoordinator.heal_now(coordinator) end)
 
       assert settled_events() == [{:failed, 3}]
-      assert log =~ "still divergent"
+      assert log =~ inspect(a)
       assert Enum.map([a, b, c], &read_values(&1, segment_id)) == [["x"], ["x"], ["x"]]
     end
   end

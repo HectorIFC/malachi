@@ -39,11 +39,12 @@ defmodule Malachi.Cluster.SelfHealing do
   tell them apart. It does not have to: both end at the same place, and a copy that has been settled is
   byte-exact and is no longer selected. The exception is a copy that still measures above the recorded size
   after it is settled, such as one that holds exactly its seal's records: it is returned again in the unsettled
-  list on every pass in which its segment is fully live, not under-replicated and the copy is not latched, and
-  whose segment's latch state was readable this tick, unless its own probe times out on that tick, since a
-  sealed size is immutable. Nothing is repaired from this list. Settling such a copy costs a directory fsync per
-  pass that selects it, round-robin and bounded by the settle batch. On a copy whose log is not yet sealed, its
-  first settle also costs the seal marker write, and, when the log has an active segment, a data sync and a roll.
+  list until it is confirmed, on every pass in which its segment is fully live, not under-replicated and the
+  copy is not latched, and whose segment's latch state was readable this tick, unless its own probe times out on
+  that tick. A sealed size is immutable, so the copy is confirmed once and not selected again. Nothing is
+  repaired from this list. Settling such a copy costs a directory fsync per pass that selects it until it is
+  confirmed, round-robin and bounded by the settle batch. On a copy whose log is not yet sealed, its first
+  settle also costs the seal marker write, and, when the log has an active segment, a data sync and a roll.
 
   ## A copy that failed in storage
 
@@ -59,9 +60,12 @@ defmodule Malachi.Cluster.SelfHealing do
   latch lives in memory, and after a restart a copy whose sealed bytes were intact serves again.
   """
 
+  require Logger
+
   alias Malachi.Cluster.Catchup
   alias Malachi.Cluster.Placement
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.I18n
   alias Malachi.Metadata
 
   # Bounds each integrity probe call, so one hung replica cannot stall the healing pass for the
@@ -78,9 +82,10 @@ defmodule Malachi.Cluster.SelfHealing do
   @doc """
   Backfills and heals every under-replicated **sealed** segment. Returns `%{applied: commands,
   failed: [{segment_id, reason}]}`, `applied` are `:set_segment_replicas` commands to apply
-  through the control plane; `failed` segments could not be backfilled (e.g. `:no_live_source`, or
-  `{:unreachable_sources, replicas}` when the intact copies did not answer, `:no_intact_copy` when every
-  probed replica answered; latched replicas are not probed and are not counted).
+  through the control plane; `failed` segments could not be backfilled (e.g. `:no_live_source`,
+  `{:unread_latch_source, replicas}` when the only live source's latch was not read, or
+  `{:unreachable_sources, replicas}` when the replicas that are not latched did not answer the probe, `:no_intact_copy`
+  when every probed replica answered; latched replicas are not probed and are not counted).
 
   ## Options
     * `:batch_size` - forwarded to `Malachi.Cluster.Catchup.run/6`.
@@ -89,22 +94,37 @@ defmodule Malachi.Cluster.SelfHealing do
       healing prioritises durability and never fails a re-replication for domain diversity.
     * `:failed` - a `MapSet` of `{segment_id, replica}` whose copy failed in storage there (default
       empty). See "A copy that failed in storage" above.
+    * `:unknown_replicas` - a `MapSet` of `{segment_id, replica}` pairs whose latch state could not be read. Those
+      replicas are never backfill sources, and their segment is left out of the integrity pass for this tick.
+    * `:settled_confirmed` - `((replica, segment_id) -> boolean)`, whether a copy's settled marker is on disk. A copy
+      with its marker is not selected again.
   """
   @spec heal_sealed(Metadata.t(), [Metadata.broker()], pos_integer(), keyword()) :: result()
   def heal_sealed(%Metadata{} = metadata, live_brokers, replication_factor, opts \\ []) do
     failed = Keyword.get(opts, :failed, MapSet.new())
     under_replicated = Placement.under_replicated(metadata, live_brokers, replication_factor)
     to_heal = Enum.sort(Enum.uniq(under_replicated ++ with_failed_copy(metadata, failed)))
-    # A segment whose latch state could not be read this tick is left out of the integrity pass only; the
-    # membership pass may still backfill from one of its replicas, whose latch was not read (a known limit).
-    unknown_failed = Keyword.get(opts, :unknown_failed, MapSet.new())
+    # A segment whose latch state could not be read this tick is left out of the integrity pass, and its replicas
+    # with an unread latch are not backfill sources: the membership pass waits for a later tick rather than copy
+    # from one.
+    unknown_replicas = Keyword.get(opts, :unknown_replicas, MapSet.new())
+
+    unknown_failed = MapSet.new(unknown_replicas, fn {segment_id, _replica} -> segment_id end)
 
     healed =
       to_heal
       |> Enum.map(&Metadata.get_segment(metadata, &1))
       |> Enum.filter(&(&1.state == :sealed))
       |> Enum.reduce(%{applied: [], failed: []}, fn segment, acc ->
-        heal_segment(segment, live_brokers, replication_factor, opts, failed_copies(failed, segment), acc)
+        heal_segment(
+          segment,
+          live_brokers,
+          replication_factor,
+          opts,
+          failed_copies(failed, segment),
+          unreadable_copies(unknown_replicas, segment),
+          acc
+        )
       end)
 
     # Only a segment that is under-replicated is left to the membership pass. One held in `to_heal` just
@@ -141,21 +161,26 @@ defmodule Malachi.Cluster.SelfHealing do
     for {segment_id, replica} <- failed, segment_id == segment.id, replica in segment.replica_set, do: replica
   end
 
+  # This segment's replicas whose latch state could not be read this tick: never a backfill source.
+  defp unreadable_copies(unknown_replicas, segment) do
+    for {segment_id, replica} <- unknown_replicas, segment_id == segment.id, replica in segment.replica_set, do: replica
+  end
+
   # `lost` are this segment's failed copies: a broker holding one is live, but not for this segment.
-  defp heal_segment(segment, live_brokers, replication_factor, opts, lost, acc) do
+  defp heal_segment(segment, live_brokers, replication_factor, opts, lost, unreadable, acc) do
     available = live_brokers -- lost
-    sources = Enum.filter(segment.replica_set, &(&1 in available))
+    sources = Enum.filter(segment.replica_set, &(&1 in available and &1 not in unreadable))
 
     # Only :spread is forwarded: heal is durability-first and must never fail on a domain guarantee, so
     # :min_domains/:policy are deliberately stripped, which leaves an empty broker list as the only error.
     case Placement.place(segment.id, available, replication_factor, Keyword.take(opts, [:spread])) do
-      {:ok, new_set} -> heal_to(acc, segment, new_set, sources, lost, opts)
+      {:ok, new_set} -> heal_to(acc, segment, new_set, sources, lost, unreadable, opts)
       # Every live broker holds a failed copy of it, so there is no broker left to hold it.
       {:error, :no_brokers} -> record_failed(acc, segment.id, :no_live_source)
     end
   end
 
-  defp heal_to(acc, segment, new_set, sources, lost, opts) do
+  defp heal_to(acc, segment, new_set, sources, lost, unreadable, opts) do
     to_add = new_set -- segment.replica_set
 
     cond do
@@ -163,8 +188,16 @@ defmodule Malachi.Cluster.SelfHealing do
       to_add == [] and lost != [] -> keep_failed_copies(acc, segment, new_set, lost)
       # The healed set drops/reorders replicas but adds none, so no data has to move.
       to_add == [] -> record_applied(acc, segment.id, new_set)
-      sources == [] -> record_failed(acc, segment.id, :no_live_source)
+      sources == [] -> record_failed(acc, segment.id, membership_no_source(segment, unreadable))
       true -> backfill_and_record(acc, segment, new_set, to_add, hd(sources), opts)
+    end
+  end
+
+  # A live source whose latch was not read is not a missing replica: name it, so the operator is not told none exists.
+  defp membership_no_source(segment, unreadable) do
+    case Enum.filter(segment.replica_set, &(&1 in unreadable)) do
+      [] -> :no_live_source
+      unread -> {:unread_latch_source, unread}
     end
   end
 
@@ -255,7 +288,17 @@ defmodule Malachi.Cluster.SelfHealing do
 
     lost = for {replica, {:ok, bytes}} <- probes, bytes < segment.byte_size, do: replica
     unreachable = for {replica, :unreachable} <- probes, do: replica
-    over = for {replica, {:ok, bytes}} <- probes, bytes > segment.byte_size, do: replica
+    # A copy confirmed as settled (its records are the seal's and only its size is past the recorded one) is not
+    # selected again: the confirmation is what stops a size the metadata can never correct from recurring.
+    confirmed? =
+      Keyword.get(opts, :settled_confirmed, fn replica, segment_id ->
+        ReplicationServer.settled_confirmed?(replica, segment_id, @probe_timeout)
+      end)
+
+    over =
+      for {replica, {:ok, bytes}} <- probes,
+          bytes > segment.byte_size and not confirmed?.(replica, segment.id),
+          do: replica
 
     # A copy above the recorded size is still a valid SOURCE: what a backfill copies is bounded by the
     # segment's recorded end (`repair_copy/5`), so the bytes past it cannot travel. Narrowing this to
@@ -282,17 +325,28 @@ defmodule Malachi.Cluster.SelfHealing do
     else
       # Offsets complete but bytes short: not a truncation Catchup can mend; leave it to the scrub,
       # which verifies checksums and repairs from an intact replica, rather than recopying blindly.
-      false -> %{acc | failed: [{segment.id, {:integrity_suspect, replica}} | acc.failed]}
-      {:ok, reached} -> %{acc | failed: [{segment.id, {:incomplete_source, reached}} | acc.failed]}
-      {:error, reason} -> %{acc | failed: [{segment.id, reason} | acc.failed]}
-      :unreachable -> acc
+      false ->
+        %{acc | failed: [{segment.id, {:integrity_suspect, replica}} | acc.failed]}
+
+      {:ok, reached} ->
+        %{acc | failed: [{segment.id, {:incomplete_source, reached}} | acc.failed]}
+
+      {:error, reason} ->
+        %{acc | failed: [{segment.id, reason} | acc.failed]}
+
+      :unreachable ->
+        Logger.warning(I18n.t(:heal_repair_unreachable, segment_id: inspect(segment.id), replica: inspect(replica)))
+        acc
     end
   end
 
   # A replica that does not answer the probe is skipped, never "repaired" on unknown state: if it is
   # truly gone the membership pass owns it; if it is merely slow, the next pass probes again.
   defp probe_stored_bytes(replica, segment_id) do
-    {:ok, ReplicationServer.stored_bytes(replica, segment_id, @probe_timeout)}
+    case ReplicationServer.stored_bytes(replica, segment_id, @probe_timeout) do
+      {:error, _reason} -> :unreachable
+      bytes -> {:ok, bytes}
+    end
   catch
     :exit, _reason -> :unreachable
   end

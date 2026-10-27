@@ -1309,6 +1309,10 @@ defmodule Malachi.Cluster.ReplicationServerTest do
     if self() == server, do: send(parent, {:trimmed, measurements.copies, measurements.records})
   end
 
+  # Other heal coordinators in the same VM emit this event with other results. An unmatched clause would raise in
+  # the handler, and telemetry would detach it for every later event, including the trim this test waits for.
+  def forward_trim(_event, _measurements, _metadata, _config), do: :ok
+
   # Forwards the trims the server emits, and only those: the handler runs in the emitting process, so the filter
   # keeps other tests' servers from reaching this test's mailbox.
   defp watch_trims(server) do
@@ -1323,6 +1327,121 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       )
 
     on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
+  describe "confirm_settled/3 (the copy that holds its seal's records and measures above the recorded size)" do
+    test "a confirmation is written and answered, and an unconfirmed copy is not" do
+      {server, directory} = start_broker_at([])
+      {:ok, 1} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b"]))
+      refute ReplicationServer.settled_confirmed?(server, @segment)
+
+      assert ReplicationServer.confirm_settled(server, @segment) == :ok
+
+      assert ReplicationServer.settled_confirmed?(server, @segment)
+      assert File.exists?(Path.join(storage_dir(directory, @segment), "SETTLED"))
+    end
+
+    # A replica that stops answering after its seal is an error the retry handles, not a crash of the caller.
+    test "a confirmation to a server that does not answer is an error, not a crash" do
+      assert {:error, :unreachable} =
+               ReplicationServer.confirm_settled(:"no_such_server_#{System.unique_integer([:positive])}", @segment)
+    end
+
+    # A server that does not answer is not confirmed, so the probe keeps selecting its copy and asks again.
+    test "a server that does not answer is not confirmed" do
+      refute ReplicationServer.settled_confirmed?(:"no_such_server_#{System.unique_integer([:positive])}", @segment)
+    end
+
+    # A latched segment is refused every request, so its marker is neither written nor read as a confirmation.
+    test "a latched copy is refused a confirmation and is never reported as confirmed" do
+      {server, directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 1} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b"]))
+      assert ReplicationServer.confirm_settled(server, @segment) == :ok
+      marker = Path.join(storage_dir(directory, @segment), "SETTLED")
+      assert ReplicationServer.settled_confirmed?(server, @segment)
+
+      fail_segment!(server, directory, @segment, :eio)
+
+      assert {:error, {:storage, _reason}} = ReplicationServer.confirm_settled(server, @segment)
+      assert File.exists?(marker)
+      refute ReplicationServer.settled_confirmed?(server, @segment)
+    end
+
+    # An uncached segment whose directory cannot be listed is refused a byte count, not answered 0: a 0 would read as a
+    # copy that holds nothing.
+    test "an uncached segment whose directory cannot be listed is refused a byte count" do
+      {server, directory} = start_broker_at([])
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      stop_supervised!(server)
+      start_supervised!({ReplicationServer, [name: server, directory: directory]}, id: server)
+
+      dir = storage_dir(directory, @segment)
+      File.chmod!(dir, 0o000)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+
+      assert {:error, :eacces} = File.ls(dir), "#{dir} still lists after chmod 000; is the suite running as root?"
+      assert {:error, {:storage, _reason}} = ReplicationServer.stored_bytes(server, @segment)
+    end
+
+    # A latched copy refuses every request, a byte count included: the probe reads it as unreachable, never as a size.
+    test "a latched copy is refused a byte count" do
+      {server, directory} = start_broker_at(store: FaultySegmentStore)
+      {:ok, 1} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b"]))
+      fail_segment!(server, directory, @segment, :eio)
+
+      assert {:error, {:storage, _reason}} = ReplicationServer.stored_bytes(server, @segment)
+    end
+
+    # A marker an earlier confirmation wrote is not this call's to remove. The write fails on the marker that is
+    # already there, so the copy stays confirmed: removing it would make the probe select the copy again.
+    test "a failed write leaves an earlier marker in place" do
+      {server, directory} = start_broker_at([])
+      {:ok, 1} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b"]))
+      assert ReplicationServer.confirm_settled(server, @segment) == :ok
+
+      marker = Path.join(storage_dir(directory, @segment), "SETTLED")
+      StorageFaults.make_unreadable!(marker)
+
+      assert {:error, _reason} = ReplicationServer.confirm_settled(server, @segment)
+      assert File.exists?(marker)
+      assert ReplicationServer.settled_confirmed?(server, @segment)
+    end
+
+    # The directory has no read permission, so listing it and opening it for the fsync both fail, while the index
+    # write (which needs only write and search) still succeeds. The latch therefore comes from the directory fsync.
+    test "keeps latching a copy whose directory cannot be opened to fsync" do
+      {server, directory} = start_broker_at([])
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      dir = storage_dir(directory, @segment)
+      File.chmod!(dir, 0o300)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+
+      assert {:error, :eacces} = File.ls(dir), "#{dir} still lists after chmod 000; is the suite running as root?"
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:storage, _reason}} = ReplicationServer.seal_at(server, @segment, 0, 5)
+      end)
+
+      assert ReplicationServer.failed_segments(server, [@segment]) == {:ok, MapSet.new([@segment])}
+    end
+
+    # A marker this call could create is not left behind when the create fails. The directory is read-only, so the
+    # create fails before any file exists. A write that fails after the create, or a sync that fails after the write,
+    # is the case that needs the removal. No seam injects a fsync failure, so those arms have no test.
+    test "a read-only directory leaves no marker when the create fails" do
+      {server, directory} = start_broker_at([])
+      {:ok, 1} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b"]))
+      dir = storage_dir(directory, @segment)
+      File.chmod!(dir, 0o500)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+
+      assert {:error, :eacces} = File.write(Path.join(dir, "probe"), ""),
+             "#{dir} still lets a file be created after chmod 500; is the suite running as root?"
+
+      assert {:error, _reason} = ReplicationServer.confirm_settled(server, @segment)
+      refute File.exists?(Path.join(dir, "SETTLED"))
+      refute ReplicationServer.settled_confirmed?(server, @segment)
+    end
   end
 
   describe "seal_at/5 (the fence that brings a copy down to a recorded length)" do
@@ -1387,38 +1506,90 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
     # The remaining files cannot be read after the cut lands: nothing is counted, and the operator is told why.
     test "a failed cut whose remaining files cannot be read reports nothing and says so" do
+      segment = {{"failed-cut-#{System.unique_integer([:positive])}", 0}, 0}
       {server, directory} = start_broker_at(store: FaultySegmentStore)
-      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+      {:ok, 4} = ReplicationServer.append(server, segment, [server], 0, records(["a", "b", "c", "d", "e"]))
       watch_trims(server)
-      FaultySegmentStore.fail_after_truncate(storage_dir(directory, @segment), {:error, :eio})
-      FaultySegmentStore.fail(storage_dir(directory, @segment), :verify, {:error, :eio})
+      FaultySegmentStore.fail_after_truncate(storage_dir(directory, segment), {:error, :eio})
+      FaultySegmentStore.fail(storage_dir(directory, segment), :verify, {:error, :eio})
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
-          assert {:error, _reason} = ReplicationServer.seal_at(server, @segment, 0, 3)
+          assert {:error, _reason} = ReplicationServer.seal_at(server, segment, 0, 3)
         end)
 
-      assert log =~ "could not count the records"
+      assert Enum.any?(String.split(log, "\n"), &(&1 =~ "could not count the records" and &1 =~ inspect(segment)))
+      refute_received {:trimmed, _copies, _records}
+    end
+
+    # A segment directory that cannot be listed is not the caller's wrong number and not a failed copy: it answers its
+    # reason, and the copy stays in service, as opening it does.
+    test "an unreadable segment directory answers its reason and leaves the copy in service" do
+      {server, directory} = start_broker_at([])
+      {:ok, 14} = ReplicationServer.append(server, @segment, [server], 10, records(["a", "b", "c", "d", "e"]))
+      dir = storage_dir(directory, @segment)
+      File.chmod!(dir, 0o000)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+
+      assert {:error, :eacces} = File.ls(dir), "#{dir} still lists after chmod 000; is the suite running as root?"
+
+      assert {:error, {:segments_unreadable, _reason}} = ReplicationServer.seal_at(server, @segment, 10, 12)
+      assert ReplicationServer.failed_segments(server, [@segment]) == {:ok, MapSet.new()}
+    end
+
+    # The same answer on a log that has to be opened: the server restarts over the directory, so nothing is cached.
+    test "keeps answering an unreadable directory's seal-marker reason on a log that has to be opened" do
+      {server, directory} = start_broker_at([])
+      {:ok, 14} = ReplicationServer.append(server, @segment, [server], 10, records(["a", "b", "c", "d", "e"]))
+      stop_supervised!(server)
+      start_supervised!({ReplicationServer, [name: server, directory: directory]}, id: server)
+
+      dir = storage_dir(directory, @segment)
+      File.chmod!(dir, 0o000)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+
+      assert {:error, :eacces} = File.ls(dir), "#{dir} still lists after chmod 000; is the suite running as root?"
+
+      assert {:error, {:storage, {reason, _detail}}} = ReplicationServer.seal_at(server, @segment, 10, 12)
+      # The cold open reads the seal marker first, and its stat fails on the directory the chmod closed.
+      assert reason == :seal_marker_unreadable
+      assert ReplicationServer.failed_segments(server, [@segment]) == {:ok, MapSet.new()}
+    end
+
+    # A refusal on a directory with no segment files removes nothing, so it must not be counted as a trim. The count
+    # would be the whole copy from base 0, which is the number a refused cut must never report.
+    test "a refused cut on a directory with no segment files reports nothing" do
+      {server, directory} = start_broker_at([])
+      {:ok, 14} = ReplicationServer.append(server, @segment, [server], 10, records(["a", "b", "c", "d", "e"]))
+      for file <- Path.wildcard(Path.join(storage_dir(directory, @segment), "*.log")), do: File.rm!(file)
+      watch_trims(server)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert ReplicationServer.seal_at(server, @segment, 0, 3) == {:error, :below_base_offset}
+      end)
+
       refute_received {:trimmed, _copies, _records}
     end
 
     # A cut below the segment's first offset fails before it removes anything, and the flush it starts first has
-    # already made the copy's records durable, so a flush afterwards still answers ok.
-    test "a cut below the segment's first offset leaves the flush answer ok" do
+    # already made the copy's records durable, so a flush afterwards still answers ok. The caller passed the wrong
+    # number, so the copy is not failed: a failed copy is one this server will never write again.
+    test "a cut below the segment's first offset is refused and leaves the copy in service" do
       {server, _directory} = start_broker_at(store: FaultySegmentStore)
       {:ok, 14} = ReplicationServer.append(server, @segment, [server], 10, records(["a", "b", "c", "d", "e"]))
       watch_trims(server)
 
       ExUnit.CaptureLog.capture_log(fn ->
-        assert {:error, _reason} = ReplicationServer.seal_at(server, @segment, 0, 3)
+        assert ReplicationServer.seal_at(server, @segment, 0, 3) == {:error, :below_base_offset}
       end)
 
       assert ReplicationServer.flush(server) == :ok
+      assert ReplicationServer.failed_segments(server, [@segment]) == {:ok, MapSet.new()}
       refute_received {:trimmed, _copies, _records}
     end
 
     # A cut that fails before it removes anything reports nothing: the count is what the disk lost, not what was asked.
-    test "a trim that fails before removing anything reports nothing" do
+    test "keeps a failed flush from reporting a trim" do
       {server, directory} = start_broker_at(store: FaultySegmentStore)
       {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
       watch_trims(server)
@@ -1441,7 +1612,9 @@ defmodule Malachi.Cluster.ReplicationServerTest do
       assert {:error, :unreachable} = ReplicationServer.seal_at(server, @segment, 0, 3, 50)
       :sys.resume(server)
 
-      assert_receive {:trimmed, 1, 2}, 2_000
+      # The queued seal runs after the resume and its fsyncs share the disk with the rest of the suite, so the wait is
+      # generous: a bounded wait for an event that must arrive, not a sleep.
+      assert_receive {:trimmed, 1, 2}, 10_000
       assert read_values(server, @segment) == ["a", "b", "c"]
     end
 

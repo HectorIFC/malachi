@@ -48,8 +48,8 @@ defmodule Malachi.Telemetry do
       on it outside the first pass after an upgrade; `result: :failed` is a copy still divergent from
       what the control plane promises; `result: :recorded_size_below` is a copy holding exactly the
       records its seal names that measures above the recorded `byte_size`, so the recorded size may be the
-      low one. A sealed size is immutable and no pass can clear it, so the copy is reported again on later
-      passes, and the batch takes turns, so such copies do not keep every slot from the others.
+      low one. A sealed size is immutable and no pass can clear it, so the copy is reported, then confirmed as settled
+      when its marker lands, and the batch takes turns, so such copies do not keep every slot from the others.
     * `[:malachi, :cluster, :vnode_reconcile]`. `%{ring, hosted, leading, started, stopped}` /
       `%{placement: :ok | :unreadable}` - one reconcile pass of `Malachi.Cluster.VnodeCoordinatorManager`
       on a sharded control plane. `ring` is how many vnodes the live ring names, `hosted` how many of
@@ -186,25 +186,30 @@ defmodule Malachi.Telemetry do
   end
 
   @doc """
-  A heal pass settled `copies` copies of sealed segments against the length the control plane recorded:
+  Copies of sealed segments settled against the length the control plane recorded, reported by the heal pass and by the
+  node that performs a trim (a trim whose caller gave up is still reported by that node):
   `:fenced` wrote only a marker, `:trimmed` also gave up `records` records held past the sealed end,
   `:recorded_size_below` is a copy holding exactly the records its seal names that measures above the
   recorded `byte_size`, and `:failed` means the copy was not settled: either the seal did not complete, or
   a copy holding fewer records than its seal names was fenced at its short length and reported as
   `:failed`. The count covers only the copies attempted in that pass, since a silent replica stops the
   batch. A storage error latches the copy as failed in this process, and a heal pass replaces a latched
-  copy when a spare broker is available. Neither a copy whose directory cannot be listed nor one that
-  cannot be reached is latched. A copy that does not answer the byte-count probe is skipped by that pass
+  copy when a spare broker is available. A copy whose directory a read cannot list is not latched, nor is one that
+  cannot be reached. A write or fsync that fails on a seal's directory latches the copy, as any other storage failure
+  does, except the SETTLED marker, whose failure only answers its error. A copy that does not answer the byte-count
+  probe is skipped by that pass
   and left to the next heal pass, which settles by default at most 64 copies longer than their seals per
   pass once the node's replication server answers; a copy past that cap waits for a later pass, the batch
   taking turns, and a pass stops at the first replica that does not answer. A copy missing records whose bytes are
   below the recorded size is attempted by the heal pass when its segment has at least the replicas achievable
   (the lower of the replication factor and the live brokers), every replica is live, and a copy with bytes at
-  least the recorded size exists to copy from. A copy missing records whose bytes are not below the recorded
+  least the recorded size exists to copy from. Its segment is left out when a replica's latch state was not read this
+  tick.
+  A copy missing records whose bytes are not below the recorded
   size is not repaired by this pass; when its bytes are above it, the copy is settled at its short length and
   reported as `:failed`. A latched copy is never probed or used as a source; with a spare broker it is
   replaced, and without one it stays behind the healthy replicas. A failed attempt that returns an error is
-  reported as a failure; an attempt whose copy cannot be reached is skipped without a report and tried again on
+  reported as a failure; an attempt whose copy cannot be reached is also reported, with a warning, and tried again on
   a later pass. A copy whose intact sources do not answer is listed among the heal pass's failures with those
   unreachable replicas, and is tried again on a later pass; with every probed replica answering and none
   intact, that failure says there is no intact copy. A copy with all records present and bytes short is listed
@@ -214,11 +219,12 @@ defmodule Malachi.Telemetry do
   `:failed` by the coordinator, and a trim is counted by the node that performs it, so a settle that times out
   is still counted as `:trimmed` when the server trims records afterwards. Those are two reports, which can come
   from one node or two, so one copy can appear under both results in the same pass. A directory that cannot be
-  listed reads as lost, and the repair path leaves it alone while the directory cannot be listed. A copy trimmed
+  listed reads as lost. The repair path refuses it when the segment's log is not open; a log already open repairs from
+  its memory, and the directory's listing does not stop it. A copy trimmed
   but unfenced stays so after a restart, unless
-  its bytes are still above the recorded size, in which case a pass selects it again while its segment is fully
-  live, not under-replicated, the copy is not latched, its segment's latch state was readable this tick, and its
-  own probe answers that tick.
+  its bytes are still above the recorded size, in which case a pass selects it until it is confirmed, while its
+  segment is fully live, not under-replicated, the copy is not latched, its segment's latch state was readable
+  this tick, and its own probe answers that tick.
   `records` is 0 for anything but `:trimmed`.
   """
   @spec sealed_copies_settled(

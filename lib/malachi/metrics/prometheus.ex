@@ -136,8 +136,9 @@ defmodule Malachi.Metrics.Prometheus do
       metric(
         "malachi_cluster_sealed_copies_settled_total",
         :counter,
-        "Copies of sealed segments the heal pass settled against the length the control plane recorded " <>
-          "(trimmed means the " <>
+        "Copies of sealed segments settled against the length the control plane recorded, by the heal pass or by " <>
+          "the node " <>
+          "that trims (trimmed means the " <>
           "copy held records past its segment's sealed end, which is a defect that reached disk; " <>
           "recorded_size_below is a copy holding exactly its seal's records that measures above the recorded " <>
           "byte_size, which may mean the recorded size is the low one)",

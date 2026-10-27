@@ -413,8 +413,9 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
-  Records `copies` copies of sealed segments the heal pass settled against the recorded length, by
-  `result` (`:fenced`, `:trimmed`, `:failed` or `:recorded_size_below`), and the `records` a trim gave up.
+  Records `copies` copies of sealed segments settled against the recorded length, by the heal pass or by the node that
+  trims, and tells them apart by `result` (`:fenced`, `:trimmed`, `:failed` or `:recorded_size_below`), and the
+  `records` a trim gave up.
 
   Split by result for the same reason `record_orphaned_fence/0` is split from
   `record_fences_reconciled/1`: settling a copy is overwhelmingly a marker and nothing else, and the
