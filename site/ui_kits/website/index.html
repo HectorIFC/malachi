@@ -5,9 +5,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Malachi: open source reimplementation of LinkedIn's NorthGuard</title>
-<meta name="description" content="Malachi is an open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28 and MIT licensed. Ranges split and merge; writes are acknowledged by a majority of copies. In active development and not production-ready; the quickstart is plaintext on localhost only, so configure TLS before serving real traffic.">
+<meta name="description" content="Malachi is an open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28 and {{license}} licensed. Ranges split and merge; writes are acknowledged by a majority of copies. In active development and not production-ready; the quickstart is plaintext on localhost only, so configure TLS before serving real traffic.">
+<link rel="canonical" href="{{base_url}}/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Malachi: open source reimplementation of LinkedIn's NorthGuard">
+<meta property="og:description" content="Ranges split and merge; writes are acknowledged by a majority of copies. In active development and not production-ready.">
+<meta property="og:url" content="{{base_url}}/">
 <link rel="alternate" type="text/plain" href="llms.txt" title="llms.txt">
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"Malachi","description":"Open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28. In active development and not production-ready. The quickstart runs plaintext on localhost only; configure TLS before serving real traffic.","codeRepository":"https://github.com/HectorIFC/malachi","license":"https://opensource.org/licenses/MIT","programmingLanguage":"Elixir (Erlang/OTP 28)","runtimePlatform":"Erlang/OTP 28"}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"Malachi","version":"{{version}}","description":"Open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28. In active development and not production-ready. The quickstart runs plaintext on localhost only; configure TLS before serving real traffic.","codeRepository":"https://github.com/HectorIFC/malachi","license":"https://spdx.org/licenses/{{license}}.html","programmingLanguage":"Elixir (Erlang/OTP 28)","runtimePlatform":"Erlang/OTP 28"}</script>
 <script>(function(){try{var v=localStorage.getItem("malachi-theme")||"system";var d=v==="dark"||(v==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("dark",d)}catch(e){}})()</script>
 <link rel="preload" href="../../assets/fonts/bricolage-grotesque-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="../../styles.css">
@@ -23,7 +28,7 @@
 <header class="top wrap">
 <a class="brand" href="#" aria-label="Malachi home"><img src="../../assets/logo-mark.svg" width="28" height="28" alt=""><span>malachi</span></a>
 <nav class="top-nav" aria-label="Primary">
-<a class="hide-sm" href="https://github.com/HectorIFC/malachi/tree/main/docs">Docs</a>
+<a class="hide-sm" href="introduction.html">Docs</a>
 <a class="hide-sm" href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">Benchmarks</a>
 <a href="https://github.com/HectorIFC/malachi">GitHub</a>
 </nav>
@@ -52,7 +57,7 @@
 <h1 id="hero-title">Open source reimplementation of LinkedIn's NorthGuard</h1>
 <p class="lead">Clients speak topics, keys and opaque cursors, never partitions or offsets, so Malachi can split, merge and restripe its storage underneath without breaking them.</p>
 <div class="actions">
-<a class="btn btn-primary" href="https://github.com/HectorIFC/malachi/tree/main/docs">Read the docs</a>
+<a class="btn btn-primary" href="introduction.html">Read the docs</a>
 <a class="btn" href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">Benchmarks</a>
 <a class="btn" href="https://github.com/HectorIFC/malachi">GitHub</a>
 </div>
@@ -243,7 +248,7 @@
 <div class="wrap foot-in">
 <div class="foot-brand"><span class="brand"><img src="../../assets/logo-mark.svg" width="28" height="28" alt=""><span>malachi</span></span><p class="muted small">MIT license. Not production-ready.</p></div>
 <nav class="foot-nav" aria-label="Footer">
-<a href="https://github.com/HectorIFC/malachi/tree/main/docs">Docs</a>
+<a href="introduction.html">Docs</a>
 <a href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">Benchmarks</a>
 <a href="https://github.com/HectorIFC/malachi">GitHub</a>
 <a href="https://hub.docker.com/r/hectorcardoso/malachi">Docker Hub</a>
