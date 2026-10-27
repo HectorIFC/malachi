@@ -1022,12 +1022,51 @@ defmodule Malachi.SiteTest do
 
     test "a reference definition with its target in angle brackets is read, and its target checked", %{root: root} do
       stage!(root)
-      append(root, "doc/llms.txt", "[g]: <https://example.test/malachi/gone.html>\n")
+      append(root, "doc/llms.txt", "\n[g]: <gone.html>\n")
+
+      assert "doc/llms.txt links to gone.html, which is not in doc/" in Site.verify(root, @config)
+    end
+
+    test "an inline link whose destination is in angle brackets is read by its target", %{root: root} do
+      stage!(root)
+      append(root, "doc/llms.txt", "- [Introduction](<introduction.html>)\n")
+
+      assert Site.verify(root, @config) == []
+    end
+
+    test "a definition right after a heading is read as a link, and its target checked", %{root: root} do
+      stage!(root)
+      append(root, "doc/llms.txt", "\n# Malachi\n[Docs]: https://example.test/malachi/gone.html\n")
 
       assert "doc/llms.txt links to https://example.test/malachi/gone.html, which is not in doc/" in Site.verify(
                root,
                @config
              )
+    end
+
+    test "a definition right after another definition is read as a link, and its target checked", %{root: root} do
+      stage!(root)
+
+      append(
+        root,
+        "doc/llms.txt",
+        "\n[a]: https://example.test/malachi/introduction.html\n[b]: https://example.test/malachi/gone.html\n"
+      )
+
+      assert "doc/llms.txt links to https://example.test/malachi/gone.html, which is not in doc/" in Site.verify(
+               root,
+               @config
+             )
+    end
+
+    test "a font withdrawn from site/fonts is removed from doc/fonts when the page is staged again", %{root: root} do
+      stage!(root)
+      write(root, "doc/fonts/Old.woff2", "old-bytes")
+
+      stage!(root)
+
+      refute File.exists?(Path.join(root, "doc/fonts/Old.woff2"))
+      assert File.exists?(Path.join(root, "doc/fonts/bricolage.woff2"))
     end
 
     test "a url() in quotes with a space in its name is read whole, and an outside font is reported", %{root: root} do

@@ -17,10 +17,12 @@ defmodule Malachi.Site do
 
   `verify/2` checks a staged tree and returns the problems among these checks: the landing page is in place, fully
   filled, references no font on this site that the site does not ship, every font the source ships is staged,
-  `robots.txt`, `sitemap.xml` and `llms.txt` are present, and every URL in `sitemap.xml` and every link to this site in `llms.txt`
-  resolves to a file in `doc/`. A link to a directory resolves when that directory has an `index.html`.
+  `robots.txt`, `sitemap.xml` and `llms.txt` are present, and every URL in `sitemap.xml` and every Markdown link to this site
+  in `llms.txt` resolves to a file in `doc/`. A link to a directory resolves when that directory has an `index.html`.
+  It does not compare the page with `mix.exs`, so run stage again after the version or the licence changes.
   Not checked: the landing page's own links other than fonts, fonts on other hosts, bare URLs in `llms.txt`,
-  code examples, and links to other sites, including other paths on this host, which belong to other sites. Fonts
+  code examples, HTML links in `llms.txt`, and links to other sites, including other paths on this host, which belong to
+  other sites. Fonts
   under `/fonts/` on this host are checked, and so is every font this site serves, whichever folder holds it.
   """
 
@@ -104,6 +106,19 @@ defmodule Malachi.Site do
     end)
   end
 
+  # The staged fonts are the ones the source ships now, so a font withdrawn from site/fonts is not left published. Only
+  # regular files in doc/fonts are removed, the folder that stage writes.
+  defp remove_stale_fonts(doc, fonts) do
+    keep = MapSet.new(fonts, &Path.basename/1)
+    fonts_dir = Path.join(doc, "fonts")
+
+    for name <- File.ls!(fonts_dir),
+        not MapSet.member?(keep, name),
+        File.regular?(Path.join(fonts_dir, name)) do
+      File.rm!(Path.join(fonts_dir, name))
+    end
+  end
+
   @doc """
   Writes the landing page, the fonts, `llms.txt`, `robots.txt` and `sitemap.xml` into `root/doc`.
 
@@ -135,6 +150,7 @@ defmodule Malachi.Site do
       replace!(Path.join([doc, "fonts", Path.basename(file)]), &File.cp!(file, &1))
     end
 
+    remove_stale_fonts(doc, fonts)
     write!(doc, "index.html", landing)
     write!(doc, "llms.txt", llms)
     write!(doc, "robots.txt", robots(meta))
@@ -275,30 +291,43 @@ defmodule Malachi.Site do
   # A definition after a list marker or `>` begins its own block. A plain one begins a block after a blank line, at the
   # start of the text, or after another definition.
   defp begins_block?(text, match, start) do
-    cond do
-      not String.starts_with?(String.trim_leading(match), "[") -> true
-      start == 0 -> true
-      true -> plain_follows_block?(binary_part(text, 0, start))
-    end
+    if String.starts_with?(String.trim_leading(match), "["),
+      do: plain_follows_block?(binary_part(text, 0, start)),
+      else: true
   end
 
   defp plain_follows_block?(prefix) do
     cond do
       String.ends_with?(prefix, "\n\n") -> true
-      String.ends_with?(prefix, "\n") -> Regex.match?(@reference_definition, previous_line(prefix))
+      String.ends_with?(prefix, "\n") -> block_line?(previous_line(prefix))
       true -> false
     end
+  end
+
+  # A definition or an ATX heading before it ends a block, so a plain definition after either begins one.
+  defp block_line?(line) do
+    Regex.match?(@reference_definition, line) or Regex.match?(~r/^ {0,3}\#{1,6}[ \t]/, line)
   end
 
   defp previous_line(prefix) do
     prefix |> String.split("\n") |> Enum.at(-2, "")
   end
 
+  # A Markdown destination may be written in angle brackets, `[text](<url>)`, which is the same URL without them.
+  defp strip_angle(url) do
+    if String.starts_with?(url, "<") and String.ends_with?(url, ">"),
+      do: String.slice(url, 1, String.length(url) - 2),
+      else: url
+  end
+
   defp llms_errors(doc, meta) do
     case File.read(Path.join(doc, "llms.txt")) do
       {:ok, raw} ->
         text = Regex.replace(@code, raw, "")
-        links = @markdown_links |> Regex.scan(text, capture: :all_but_first) |> List.flatten()
+
+        links =
+          @markdown_links |> Regex.scan(text, capture: :all_but_first) |> List.flatten() |> Enum.map(&strip_angle/1)
+
         unread = length(Regex.scan(@link_opener, text)) - length(links)
 
         definition_urls = definition_urls(text)
