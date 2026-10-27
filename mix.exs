@@ -3,6 +3,9 @@ defmodule Malachi.MixProject do
 
   @version "0.22.2"
   @source_url "https://github.com/HectorIFC/malachi"
+  # Where the published site lives. Once the site's staging task is wired into the docs build (see Malachi.Site),
+  # its sitemap and robots.txt will be built from this value, so a custom domain will change this one line.
+  @site_url "https://hectorifc.github.io/malachi"
 
   def project do
     [
@@ -15,6 +18,7 @@ defmodule Malachi.MixProject do
       description: description(),
       package: package(),
       source_url: @source_url,
+      site_url: @site_url,
       docs: docs(),
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls, threshold: 85],
