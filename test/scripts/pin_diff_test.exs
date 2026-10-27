@@ -1,7 +1,7 @@
 defmodule PinDiffTest do
   # scripts/pin-diff.sh is what every review in this repository reads: adversarial-review and
   # pr-agent-review both pin their diff with it, so they can never disagree about what the diff is. It
-  # runs for real here, against throwaway repositories, the way auto_review_hook_test.exs runs the hook.
+  # runs for real here, against throwaway repositories, the way review_state_test.exs runs its script.
   use ExUnit.Case, async: true
 
   alias Malachi.Test.TmpDir
@@ -506,6 +506,81 @@ defmodule PinDiffTest do
   defp group(ctx, n), do: File.read!(Path.join(ctx.groups, "group-#{n}.txt"))
 
   defp files(ctx), do: ctx.out |> Path.join("files.txt") |> File.read!() |> String.split("\n", trim: true)
+
+  describe "--since" do
+    # The delta a round is asked for: what the working tree holds now against the tree a complete round
+    # reviewed. review-state.sh tests cover how that tree is recorded; these cover the pin's own contract.
+    test "pins what changed since the tree given, untracked files included, and says which tree", ctx do
+      File.write!(Path.join(ctx.repo, "committed.ex"), "c\n")
+      commit!(ctx.repo, "feature work")
+      since = rev!(ctx.repo, "HEAD^{tree}")
+
+      File.write!(Path.join(ctx.repo, "a.ex"), "changed\n")
+      File.write!(Path.join(ctx.repo, "untracked.ex"), "u\n")
+
+      assert {_, 0} = pin(ctx, ["--since", since])
+      assert files(ctx) == ["a.ex", "untracked.ex"]
+      assert base(ctx) == since
+      assert File.read!(Path.join(ctx.out, "diff.patch")) =~ "+++ b/untracked.ex\n@@ -0,0 +1 @@\n+u\n"
+    end
+
+    test "exits 3 with nothing listed when nothing changed since the tree", ctx do
+      since = rev!(ctx.repo, "HEAD^{tree}")
+
+      assert {_, 3} = pin(ctx, ["--since", since])
+      assert files(ctx) == []
+    end
+
+    test "the generated names are left out of the delta, as in the full pin", ctx do
+      since = rev!(ctx.repo, "HEAD^{tree}")
+      File.write!(Path.join(ctx.repo, "commit_message.sh"), "generated\n")
+
+      assert {_, 3} = pin(ctx, ["--since", since])
+    end
+
+    test "is a usage error with --base, with an empty value, or with something that is not a tree", ctx do
+      assert {out, 2} = pin(ctx, ["--since", "HEAD", "--base", "HEAD"])
+      assert out =~ "cannot be given together"
+
+      assert {out, 2} = pin(ctx, ["--since", ""])
+      assert out =~ "--since is empty"
+
+      assert {out, 2} = pin(ctx, ["--since", "no-such-tree"])
+      assert out =~ "--since is not a tree"
+    end
+  end
+
+  describe "tree.txt" do
+    # begin checks the working tree against this id before it counts a round, so it must be the tree the pin
+    # read, in both shapes of pin.
+    test "a full pin and a delta pin both write the tree they read", ctx do
+      File.write!(Path.join(ctx.repo, "a.ex"), "changed\n")
+      commit!(ctx.repo, "work")
+      head_tree = rev!(ctx.repo, "HEAD^{tree}")
+
+      assert {_, 0} = pin(ctx)
+      assert String.trim(File.read!(Path.join(ctx.out, "tree.txt"))) == head_tree
+
+      assert {_, 3} = pin(ctx, ["--since", head_tree])
+      assert String.trim(File.read!(Path.join(ctx.out, "tree.txt"))) == head_tree
+    end
+  end
+
+  describe "renames" do
+    # A rename is a removal and an addition. With rename detection on, --name-only lists only the new path,
+    # so a reviewer scoping by files.txt never sees the old one go. Both pins must list both.
+    test "the full pin and the delta both list the old path of a renamed file", ctx do
+      since = rev!(ctx.repo, "HEAD^{tree}")
+      git!(ctx.repo, ["mv", "a.ex", "b.ex"])
+      commit!(ctx.repo, "rename a to b")
+
+      assert {_, 0} = pin(ctx)
+      assert Enum.sort(files(ctx)) == ["a.ex", "b.ex"]
+
+      assert {_, 0} = pin(ctx, ["--since", since])
+      assert Enum.sort(files(ctx)) == ["a.ex", "b.ex"]
+    end
+  end
 
   defp base(ctx), do: ctx.out |> Path.join("base.txt") |> File.read!() |> String.trim()
 

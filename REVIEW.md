@@ -86,11 +86,26 @@ A suspicion without a failure scenario is not raised. A finding that depends on 
 could not see is labelled as such rather than stated as fact. Every finding is checked by a second pass
 that tries to refute it against the actual code, and only what survives is reported.
 
-## Re-review
+## Rounds
 
-When the change was already reviewed, raise only what is new or what the latest commits changed. A
-finding the author declined or answered is not raised again unless the code it rests on changed; say
-that it was left as decided.
+A review whose prompt names no round is the first round. It applies every criterion above in full,
+documentation guarantees included. The managed Code Review on a pull request is always that: a pull
+request is reviewed once, in full, whatever was pushed before it.
+
+A reviewer whose prompt says a round is under way (the local skill passes the line `begin` prints,
+`round N of <cap>`, with `, delta since <tree>` after it when the diff is a delta) applies the criteria
+above and these rules from round 2 on:
+
+- Only behaviour is important. Of the list under Severity, the item about documentation that promises a
+  guarantee the code does not deliver is a nit from round 2 on. The other items stay as they are.
+- A documentation or comment fix is a nit, and nits are corrected in one batch that does not start
+  another round.
+- A finding is raised only on lines the delta changed. Code around the delta is read as context. A
+  problem on other lines is a note ("outside the delta"), never an option.
+- A finding that asks the change to support something the issue did not plan (one more input form, one
+  more case to handle) recommends narrowing the promise. Widening the code is a follow-up issue.
+- A finding the prompt lists as decided (fixed, declined, follow-up) is not raised again unless the lines
+  it rests on changed. Say that it was left as decided.
 
 ## Summary shape
 

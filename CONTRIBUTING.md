@@ -121,16 +121,24 @@ embarrassment.
 What a reviewer flags, and how severe it is, is written down in [`REVIEW.md`](REVIEW.md). The managed
 Code Review reads it on pull requests, and so does the local review below.
 
-If you work with Claude Code, the repository runs that review for you before you call the work done. A
-Stop hook (`scripts/auto-review-hook.sh`, registered in `.claude/settings.json`) notices when a turn
-ends with the branch carrying changes and asks Claude to run the `adversarial-review` skill: parallel
-reviewer subagents that see only the diff and `REVIEW.md`, then a verifier per finding that tries to
-refute it, and finally the surviving findings as numbered options for you to choose from. Nothing is
-changed before you choose. It asks once per content: a turn that changes no file (a question, your
-answer to the options, a commit of work already reviewed) does not start the same review again, and a
-turn that changes one does. The diff counts as reviewed from the moment the review is asked for, so a
-review you interrupt does not come back by itself; ask for it ("review the branch") when you want it.
-To turn the automatic run off for a session, start Claude Code with `MALACHI_SKIP_AUTO_REVIEW=1`.
+If you work with Claude Code, the adversarial review runs on the branch before you call the work done. The
+`adversarial-review` skill has parallel reviewer subagents that see only the diff and `REVIEW.md`, then a
+verifier per finding that tries to refute it, and finally the surviving findings as numbered options for
+you to choose from. Nothing is changed before you choose.
+
+The review runs once when the work is ready: when you ask for it by name ("review the branch"), or when
+`prepare-commits` starts it before the commits are written. That first round is the full review. Later
+rounds are deltas: each reviews only what changed since the last complete round, and is told what was
+already fixed or declined, so a finding is not raised twice. A base allows three rounds. After the third,
+what is still open goes to the pull request review or to a follow-up issue, not to another round, unless
+you ask for one extra round by name. A rebase onto a newer `origin/main` starts the count again, since it
+is a new branch as far as review goes.
+
+A Stop hook (`scripts/auto-review-hook.sh`, registered in `.claude/settings.json`) does not run the review.
+It says once, when a branch has commits ahead of `origin/main` and no round has run for it yet, and it
+never blocks a turn. To turn that reminder off for a session, start Claude Code with
+`MALACHI_SKIP_AUTO_REVIEW=1`. Sessions already open when this changed keep the old behaviour until they
+restart, or until they start with that variable set.
 
 A second opinion is there when you ask for it by name: the `pr-agent-review` skill (`/pr-agent`) runs a
 port of [PR-Agent](https://github.com/The-PR-Agent/pr-agent)'s review, improve and describe on the
