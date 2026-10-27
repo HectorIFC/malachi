@@ -50,6 +50,24 @@ carries the same subject, and the cleanup would then delete a set that never ran
   matched, or that the base is missing, and ask. Deleting here costs the split and the written
   messages, which the working tree cannot give back.
 
+## 0b. Review the branch before the commits are written
+
+The branch gets its first adversarial review round before anything is grouped, unless a round has already
+run for its base:
+
+```
+"$(/usr/bin/git rev-parse --show-toplevel)/scripts/review-state.sh" status
+```
+
+- `rounds: 0`: run the `adversarial-review` skill, which begins round 1, the full review. Wait for the
+  contributor's choices on its findings, and apply the ones chosen, before step 1. The fixes it applies are
+  part of the changes this skill then groups.
+- `rounds` above 0: say the status in one line and go on. A later round is a delta and is asked for by
+  name, not started here.
+- No `rounds:` line at all: the script could not keep the count and said so on stderr, so the review state
+  is unknown. Stop before step 1 and report that a writable state location is needed. Do not group commits
+  on a state that is not known.
+
 ## 1. Inventory every change
 
 ```

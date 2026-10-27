@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": "2026-10-24T09:09:29Z",
+    "timestamp": "2026-10-27T10:05:26Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "cfaa8e2",
-    "git_ref_date": "2026-10-23T09:37:46Z",
+    "git_ref": "a09684f",
+    "git_ref_date": "2026-10-26T10:05:21Z",
     "malachi_version": "0.22.2",
     "hardware": {
       "cpu": "x86_64",
@@ -25,23 +25,21 @@
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 1083,
-    "post_chaos_records_per_s": 963
+    "acked_writes": 12689,
+    "post_chaos_records_per_s": 19380
   },
   "failures": [
-    "no produce was acknowledged through p1: node 3 to NEW, after the node rejoined (stuck at 94)",
+    "no produce was acknowledged through p1: node 3 to NEW, after the node rejoined (stuck at 301)",
     "OLD node 1 counted no unknown replication cast: the canary never reached an OLD node",
-    "no produce was acknowledged through p1: node 2 to NEW, while malachi2 was down (stuck at 94)",
+    "no produce was acknowledged through p1: node 2 to NEW, while malachi2 was down (stuck at 301)",
     "the cluster did not reconverge after p1: node 2 to NEW",
-    "no produce was acknowledged through p1: node 1 to NEW, after the node rejoined (stuck at 501)",
-    "no produce was acknowledged through the split (stuck at 501)",
-    "phase 1 took 607s, past its 480s checker window; raise PHASE1_WINDOW_S",
+    "phase 1 took 485s, past its 480s checker window; raise PHASE1_WINDOW_S",
     "the cluster did not reconverge after p2: node 3 back to OLD",
-    "no produce was acknowledged through p2: node 2 back to OLD, while malachi2 was down (stuck at 582)",
+    "no produce was acknowledged through p2: node 2 back to OLD, while malachi2 was down (stuck at 1116)",
     "the cluster did not reconverge after p2: node 2 back to OLD",
-    "no produce was acknowledged through p2: node 1 back to OLD, while malachi1 was down (stuck at 582)",
+    "no produce was acknowledged through p2: node 1 back to OLD, while malachi1 was down (stuck at 1116)",
     "the cluster did not reconverge after p2: node 1 back to OLD",
-    "phase 2 took 876s, past its 360s checker window; raise PHASE2_WINDOW_S",
+    "phase 2 took 877s, past its 360s checker window; raise PHASE2_WINDOW_S",
     "acked writes were lost (see verify output above)",
     "cluster is not fully healthy at the end",
     "no produce was acknowledged through p3: node 3 to NEW, while malachi3 was down (stuck at 0)",
@@ -58,7 +56,7 @@
     "acked writes were lost (see verify output above)",
     "a process crashed during the upgrade (see the logs above)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261024T082218Z-cfaa8e2",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261027T091838Z-a09684f",
   "details": {
     "old_ref": "v0.22.1",
     "old_rule": "the newest release whose code differs from this tree, which is release v0.22.2's",
@@ -69,8 +67,8 @@
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 501,
-      "phase2": 582,
+      "phase1": 11573,
+      "phase2": 1116,
       "phase3": 0
     },
     "vnodes": 4,
