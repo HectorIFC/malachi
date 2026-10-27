@@ -1369,6 +1369,18 @@ defmodule Malachi.Cluster.ReplicationServerTest do
 
     # An uncached segment whose directory cannot be listed is refused a byte count, not answered 0: a 0 would read as a
     # copy that holds nothing.
+    test "a cached segment whose directory cannot be listed is refused a byte count" do
+      {server, directory} = start_broker_at([])
+      {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))
+
+      dir = storage_dir(directory, @segment)
+      File.chmod!(dir, 0o000)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+
+      assert {:error, :eacces} = File.ls(dir), "#{dir} still lists after chmod 000; is the suite running as root?"
+      assert {:error, {:storage, _reason}} = ReplicationServer.stored_bytes(server, @segment)
+    end
+
     test "an uncached segment whose directory cannot be listed is refused a byte count" do
       {server, directory} = start_broker_at([])
       {:ok, 4} = ReplicationServer.append(server, @segment, [server], 0, records(["a", "b", "c", "d", "e"]))

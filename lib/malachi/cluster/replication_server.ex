@@ -846,7 +846,10 @@ defmodule Malachi.Cluster.ReplicationServer do
         {:reply, storage_error(state, segment_id), state}
 
       Map.has_key?(state.logs, segment_id) ->
-        {:reply, bytes_on_disk(state, segment_id), state}
+        case Log.listed_bytes(Map.fetch!(state.logs, segment_id)) do
+          {:ok, bytes} -> {:reply, bytes, state}
+          {:error, reason} -> {:reply, {:error, {:storage, reason}}, state}
+        end
 
       true ->
         # A directory that cannot be listed, or a file that cannot be stat'ed, is refused, not counted as 0 bytes.

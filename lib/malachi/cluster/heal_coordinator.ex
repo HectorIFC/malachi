@@ -173,9 +173,12 @@ defmodule Malachi.Cluster.HealCoordinator do
     GenServer.start_link(__MODULE__, opts, gen_server_opts)
   end
 
-  @doc "Runs one healing pass synchronously and returns the `SelfHealing.heal_sealed/4` result."
-  @spec heal_now(GenServer.server()) :: SelfHealing.result()
-  def heal_now(server), do: GenServer.call(server, :heal_now)
+  @doc """
+  Runs one healing pass synchronously and returns the `SelfHealing.heal_sealed/4` result. The call waits up to
+  `timeout` ms (default 30 seconds): a pass with settling work can run longer than the five-second default.
+  """
+  @spec heal_now(GenServer.server(), timeout()) :: SelfHealing.result()
+  def heal_now(server, timeout \\ 30_000), do: GenServer.call(server, :heal_now, timeout)
 
   # --- server ---
 

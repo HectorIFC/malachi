@@ -326,19 +326,41 @@ defmodule Malachi.Log do
   """
   @spec bytes_on_disk(t()) :: non_neg_integer()
   def bytes_on_disk(%__MODULE__{} = log) do
+    case listed_bytes(log) do
+      {:ok, bytes} -> bytes
+      {:error, _reason} -> 0
+    end
+  end
+
+  @doc """
+  `bytes_on_disk/1`, but a directory that cannot be listed, or a file that cannot be stat'ed, is an error rather than
+  zero bytes. A directory that does not exist holds no sealed files, so only the active segment counts.
+  """
+  @spec listed_bytes(t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def listed_bytes(%__MODULE__{} = log) do
     active_path = if log.active_base_offset, do: segment_path(log, log.active_base_offset)
     active_bytes = if log.active, do: log.store.logical_bytes(log.active), else: 0
 
-    log.directory
-    |> Path.join("*.log")
-    |> Path.wildcard()
-    |> Enum.reject(&(&1 == active_path))
-    |> Enum.reduce(active_bytes, fn path, sum ->
-      case File.stat(path) do
-        {:ok, %{size: size}} -> sum + size
-        {:error, _reason} -> sum
-      end
-    end)
+    case File.ls(log.directory) do
+      {:error, :enoent} ->
+        {:ok, active_bytes}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, names} ->
+        names
+        |> Enum.filter(&(String.ends_with?(&1, ".log") and not String.starts_with?(&1, ".")))
+        |> Enum.map(&Path.join(log.directory, &1))
+        |> Enum.reject(&(&1 == active_path))
+        |> Enum.reduce_while({:ok, active_bytes}, fn path, {:ok, sum} ->
+          case File.stat(path) do
+            {:ok, %{size: size}} -> {:cont, {:ok, sum + size}}
+            {:error, :enoent} -> {:cont, {:ok, sum}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+    end
   end
 
   @doc "Whether the log has buffered records not yet flushed."
