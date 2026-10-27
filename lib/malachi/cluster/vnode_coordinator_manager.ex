@@ -265,7 +265,7 @@ defmodule Malachi.Cluster.VnodeCoordinatorManager do
   end
 
   defp placement_readable(%{placement_status: :unreadable} = state) do
-    Logger.info(I18n.t(:vnode_placement_recovered))
+    Logger.info(I18n.t(:vnode_placement_recovered, manager: inspect(self())))
     %{state | placement_status: :ok}
   end
 

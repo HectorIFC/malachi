@@ -484,7 +484,11 @@ defmodule Malachi.Cluster.VnodeCoordinatorManagerPlacementTest do
         Manager.reconcile_now(manager)
       end)
 
-    assert length(Regex.scan(~r/readable again/, recovery)) == 1
+    # The recovery line names this manager's pid, so only this test's line counts, not one from a concurrent test.
+    recovered =
+      Enum.count(String.split(recovery, "\n"), &(&1 =~ "readable again" and &1 =~ inspect(GenServer.whereis(manager))))
+
+    assert recovered == 1
     assert Manager.placement_status(manager) == :ok
     # the coordinator that was already running is not restarted on the way back
     refute_receive {:spawn, :a, _}

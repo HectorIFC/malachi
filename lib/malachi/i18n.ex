@@ -800,8 +800,8 @@ defmodule Malachi.I18n do
         "could not resume this node's vnode members: %{reason}; the pass goes on without resuming, with the coordinators the leadership it can read calls for"
     },
     vnode_placement_recovered: %{
-      "pt_BR" => "a colocação de vnodes voltou a ser legível; reconciliando os coordenadores deste nó",
-      "en_US" => "the vnode placement is readable again; reconciling this node's coordinators"
+      "pt_BR" => "a colocação de vnodes voltou a ser legível; reconciliando os coordenadores deste nó (%{manager})",
+      "en_US" => "the vnode placement is readable again; reconciling this node's coordinators (%{manager})"
     },
     ra_machine_version_unsupported: %{
       "pt_BR" =>
