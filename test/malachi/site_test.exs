@@ -1226,6 +1226,57 @@ defmodule Malachi.SiteTest do
       assert Site.verify(root, config) == []
     end
 
+    test "sitemap entries with &gt; and &quot; are read back as the names they encode", %{root: root} do
+      stage!(root)
+      write(root, "doc/a>b.html", "<h1>a</h1>")
+      write(root, "doc/a\"b.html", "<h1>b</h1>")
+
+      write(
+        root,
+        "doc/sitemap.xml",
+        "<urlset><url><loc>https://example.test/malachi/a&gt;b.html</loc></url>" <>
+          "<url><loc>https://example.test/malachi/a&quot;b.html</loc></url></urlset>"
+      )
+
+      assert Site.verify(root, @config) == []
+    end
+
+    test "a definition indented by one space in a list is read as a link, and a tab-indented one is code", %{root: root} do
+      stage!(root)
+
+      append(
+        root,
+        "doc/llms.txt",
+        "\n - [d]: https://example.test/malachi/gone.html\n\n\t[x]: https://example.test/malachi/tab.html\n"
+      )
+
+      errors = Site.verify(root, @config)
+      assert Enum.any?(errors, &(&1 =~ "gone.html"))
+      refute Enum.any?(errors, &(&1 =~ "tab.html"))
+    end
+
+    test "a plain definition right under paragraph text is text, not a link", %{root: root} do
+      stage!(root)
+      append(root, "doc/llms.txt", "Read the notes\n[notes]: https://example.test/malachi/gone.html\n")
+
+      assert Site.verify(root, @config) == []
+    end
+
+    test "a font reference that names a directory is reported, since a font is a file", %{root: root} do
+      stage!(root)
+      File.mkdir_p!(Path.join(root, "doc/dist/x.woff2"))
+      write(root, "doc/index.html", read(root, "doc/index.html") <> ~s[<link href="dist/x.woff2">])
+
+      assert Enum.any?(Site.verify(root, @config), &(&1 =~ "dist/x.woff2, which is not in doc/"))
+    end
+
+    test "a link whose letters differ in case from its file is reported, as the Linux host would fail it", %{root: root} do
+      stage!(root)
+      append(root, "doc/llms.txt", "- [API](API.html)\n")
+
+      assert "doc/llms.txt links to API.html, which is not in doc/" in Site.verify(root, @config)
+    end
+
     test "the :non_root tests are excluded only when the suite runs as root" do
       {uid, 0} = System.cmd("id", ["-u"])
       excluded = Keyword.get(ExUnit.configuration(), :exclude, [])

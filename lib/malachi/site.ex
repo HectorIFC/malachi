@@ -46,9 +46,10 @@ defmodule Malachi.Site do
   # read, and `llms_errors/2` reports it rather than passing it over.
   @markdown_links ~r{\]\(((?:[^()\s]|\((?:[^()\s]|\([^()\s]*\))*\))+)(?:\s+"[^"]*")?\)}
   @link_opener ~r{\]\(}
-  # A reference definition, `[id]: url`, on a line of its own. Its URL is a link, and it may be in angle brackets. A use
-  # of a definition, `[text][id]`, is text when no definition exists (CommonMark), so no use is reported.
-  @reference_definition ~r/^(?:[ \t]{0,3}|[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+|>[ \t]*)+)\[([^\]]+)\]:[ \t]*<?([^\s>]+)>?(?=[ \t]*(?:$|"[^"\n]*"[ \t]*$|'[^'\n]*'[ \t]*$|\([^)\n]*\)[ \t]*$))/m
+  # A reference definition, `[id]: url`, may be indented up to three spaces (a tab is code), or follow a list marker or
+  # `>`. Its URL is a link, and it may be in angle brackets. A use of a definition, `[text][id]`, is text when no
+  # definition exists (CommonMark), so no use is reported.
+  @reference_definition ~r/^(?:[ ]{0,3}|[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+|>[ \t]*)+)\[([^\]]+)\]:[ \t]*<?([^\s>]+)>?(?=[ \t]*(?:$|"[^"\n]*"[ \t]*$|'[^'\n]*'[ \t]*$|\([^)\n]*\)[ \t]*$))/m
   # An autolink, `<https://...>`, is a link to the URL it names.
   @autolink ~r{<(https?://[^\s<>]+)>}
   # Code spans and fenced blocks are examples, not links, so their text is not read for links.
@@ -193,12 +194,12 @@ defmodule Malachi.Site do
     |> Enum.flat_map(fn ref ->
       case local_path(ref, meta) do
         {:ok, "fonts/" <> _ = font} ->
-          if File.exists?(Path.join(doc, font)),
+          if file_here?(doc, font),
             do: [],
             else: ["doc/index.html references #{ref}, which is not in doc/"]
 
         {:ok, rel} ->
-          if font_file?(ref) and not File.exists?(Path.join(doc, rel)),
+          if font_file?(ref) and not file_here?(doc, rel),
             do: ["doc/index.html references #{ref}, which is not in doc/"],
             else: []
 
@@ -262,6 +263,37 @@ defmodule Malachi.Site do
       (uri.port || URI.default_port(site.scheme)) == site.port
   end
 
+  # The targets of the reference definitions that begin a block. A plain definition is paragraph text when it follows
+  # paragraph text directly, as CommonMark does, so only the ones that begin a block are read.
+  defp definition_urls(text) do
+    @reference_definition
+    |> Regex.scan(text, return: :index)
+    |> Enum.filter(fn [{start, len} | _] -> begins_block?(text, binary_part(text, start, len), start) end)
+    |> Enum.map(fn [_whole, _label, {url_start, url_len}] -> binary_part(text, url_start, url_len) end)
+  end
+
+  # A definition after a list marker or `>` begins its own block. A plain one begins a block after a blank line, at the
+  # start of the text, or after another definition.
+  defp begins_block?(text, match, start) do
+    cond do
+      not String.starts_with?(String.trim_leading(match), "[") -> true
+      start == 0 -> true
+      true -> plain_follows_block?(binary_part(text, 0, start))
+    end
+  end
+
+  defp plain_follows_block?(prefix) do
+    cond do
+      String.ends_with?(prefix, "\n\n") -> true
+      String.ends_with?(prefix, "\n") -> Regex.match?(@reference_definition, previous_line(prefix))
+      true -> false
+    end
+  end
+
+  defp previous_line(prefix) do
+    prefix |> String.split("\n") |> Enum.at(-2, "")
+  end
+
   defp llms_errors(doc, meta) do
     case File.read(Path.join(doc, "llms.txt")) do
       {:ok, raw} ->
@@ -269,8 +301,7 @@ defmodule Malachi.Site do
         links = @markdown_links |> Regex.scan(text, capture: :all_but_first) |> List.flatten()
         unread = length(Regex.scan(@link_opener, text)) - length(links)
 
-        definition_urls =
-          @reference_definition |> Regex.scan(text, capture: :all_but_first) |> Enum.map(fn [_id, url] -> url end)
+        definition_urls = definition_urls(text)
 
         autolinks = @autolink |> Regex.scan(text, capture: :all_but_first) |> List.flatten()
 
@@ -321,8 +352,28 @@ defmodule Malachi.Site do
 
   # A path resolves when it is a file, or a directory with an index page, which is what a browser serves for it.
   defp resolves?(doc, rel) do
-    path = Path.join(doc, rel)
-    if File.dir?(path), do: File.exists?(Path.join(path, "index.html")), else: File.exists?(path)
+    cond do
+      not exact_path?(doc, rel) -> false
+      File.dir?(Path.join(doc, rel)) -> exact_path?(doc, Path.join(rel, "index.html"))
+      true -> true
+    end
+  end
+
+  # A font is a regular file that exists under doc/ with exactly these letters.
+  defp file_here?(doc, rel), do: exact_path?(doc, rel) and File.regular?(Path.join(doc, rel))
+
+  # Whether every segment of a path under doc/ exists with exactly its letters. A case-insensitive file system would
+  # otherwise match `API.html` to `api.html`, which the Linux host that serves the page does not.
+  defp exact_path?(doc, rel) do
+    rel
+    |> Path.split()
+    |> Enum.reduce_while(doc, fn segment, dir ->
+      case File.ls(dir) do
+        {:ok, names} -> if segment in names, do: {:cont, Path.join(dir, segment)}, else: {:halt, nil}
+        {:error, _} -> {:halt, nil}
+      end
+    end)
+    |> is_binary()
   end
 
   # Where a URL points, as a path relative to the root of doc/. It is :external when another scheme or another
