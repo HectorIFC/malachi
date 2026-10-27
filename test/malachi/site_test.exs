@@ -1421,4 +1421,93 @@ defmodule Malachi.SiteTest do
       assert meta["version"] == Mix.Project.config()[:version]
     end
   end
+
+  describe "the kit's landing page, staged from the real site/" do
+    setup %{root: root} do
+      File.rm_rf!(Path.join(root, "site"))
+      File.cp_r!(Path.expand("site"), Path.join(root, "site"))
+      :ok
+    end
+
+    test "names its canonical URL and Open Graph URL under the configured base URL", %{root: root} do
+      stage!(root)
+      html = read(root, "doc/index.html")
+
+      assert html =~ ~s(<link rel="canonical" href="https://example.test/malachi/">)
+      assert html =~ ~s(<meta property="og:url" content="https://example.test/malachi/">)
+      assert html =~ ~s(<meta property="og:title")
+    end
+
+    test "its JSON-LD block parses and carries the version and licence from the config", %{root: root} do
+      stage!(root)
+
+      [_, json] = Regex.run(~r{<script type="application/ld\+json">(.*?)</script>}s, read(root, "doc/index.html"))
+      data = Jason.decode!(json)
+
+      assert data["@type"] == "SoftwareSourceCode"
+      assert data["version"] == "1.2.3"
+      assert data["license"] == "https://spdx.org/licenses/MIT.html"
+    end
+
+    test "the description names the licence the config gives, not a hard-coded one", %{root: root} do
+      stage!(root)
+
+      assert read(root, "doc/index.html") =~ "and MIT licensed"
+    end
+
+    test "states no throughput figure and no chaos verdict", %{root: root} do
+      stage!(root)
+      html = String.downcase(read(root, "doc/index.html"))
+
+      for term <- ["throughput", "chaos", "p99", "msg/s", "records/s", "ops/s", "per second"] do
+        refute html =~ term, "the landing page must not state #{inspect(term)}"
+      end
+    end
+
+    test "the landing page's own files stay within the weight budget: 250 KB of HTML, CSS and JS, 60 KB of fonts", %{
+      root: root
+    } do
+      stage!(root)
+      doc = Path.join(root, "doc")
+
+      page =
+        [Path.join(doc, "index.html")] ++
+          Path.wildcard(Path.join(doc, "*.{css,js}")) ++ Path.wildcard(Path.join([doc, "tokens", "*.css"]))
+
+      fonts = Path.wildcard(Path.join([doc, "fonts", "*"]))
+
+      assert page |> Enum.map(&File.stat!(&1).size) |> Enum.sum() <= 250_000
+      assert fonts |> Enum.map(&File.stat!(&1).size) |> Enum.sum() <= 60_000
+    end
+
+    test "links the documentation's introduction page, so a reader can reach it from the landing page", %{root: root} do
+      stage!(root)
+
+      assert read(root, "doc/index.html") =~ ~s(href="introduction.html")
+    end
+
+    test "keeps every file ExDoc wrote, except the redirect the landing page replaces", %{root: root} do
+      doc = Path.join(root, "doc")
+      before = doc |> doc_files(root) |> Enum.reject(&(&1 == "index.html"))
+      html_before = Map.new(before, &{&1, read(root, "doc/" <> &1)})
+
+      stage!(root)
+
+      for file <- before do
+        assert File.exists?(Path.join(doc, file)), "staging removed doc/#{file}"
+      end
+
+      for {file, text} <- html_before, Path.extname(file) == ".html" do
+        assert read(root, "doc/" <> file) == text, "staging rewrote doc/#{file}"
+      end
+    end
+  end
+
+  defp doc_files(doc, root) do
+    doc
+    |> Path.join("**/*")
+    |> Path.wildcard()
+    |> Enum.filter(&File.regular?/1)
+    |> Enum.map(&Path.relative_to(&1, Path.join(root, "doc")))
+  end
 end

@@ -6,9 +6,8 @@ defmodule Malachi.Site do
   module replaces that redirect with the landing page, and writes `robots.txt` and `sitemap.xml` beside the
   pages it covers. It also merges the landing page's `llms.txt` summary with the one ExDoc already writes.
 
-  Not wired yet: neither the `docs` alias nor CI runs this module. The source directory `site/` arrives with
-  the design kit (#263), and the wiring arrives with it. Until then the module is exercised by its tests on
-  fixture trees only.
+  The `docs` alias runs `mix malachi.docs.site` after the ExDoc build, so `mix docs` stages the landing page. CI
+  runs `--check` after the docs build, and the browser checks in `site/checks` run on the staged tree.
 
   The source lives in `site/` at the repository root. `from_project/1` reads the version, the licence and the
   base URL from `mix.exs`, and `metadata/1` turns them into the values the `{{name}}` placeholders in the source

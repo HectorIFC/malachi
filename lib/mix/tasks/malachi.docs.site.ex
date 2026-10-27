@@ -7,10 +7,9 @@ defmodule Mix.Tasks.Malachi.Docs.Site do
       mix malachi.docs.site          # stage into doc/, after mix docs has written it
       mix malachi.docs.site --check  # fail when a check of the staged tree fails
 
-  Not wired yet: neither the `docs` alias nor CI runs this task. The page source is `site/`, which arrives
-  with the design kit (#263), and the wiring arrives with it. Every value the page takes (the version, the
-  licence, the base URL) comes from `mix.exs` through `Malachi.Site`, which says what is staged and what
-  `--check` proves.
+  The `docs` alias runs this task after the ExDoc build, and CI runs `--check` after it. The page source is
+  `site/`, the design kit (#263). Every value the page takes (the version, the licence, the base URL)
+  comes from `mix.exs` through `Malachi.Site`, which says what is staged and what `--check` proves.
 
   `--root` points the task at another checkout. It exists for the tests; everywhere else the task runs from
   the repository root without it.
