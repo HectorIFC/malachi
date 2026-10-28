@@ -84,6 +84,25 @@ verify after the delete latches it the same way. If the latch itself does not an
 either, the copy stays in place, unfenced, until a later scrub pass retries the latch, and a restart loses that retry. The scrub does not copy a missing replica back: the heal pass does, once every replica of the segment is live. See the operations
 guide for the knobs and cadence.
 
+A copy can also hold more bytes than its seal allows, for example a replica that kept a preallocated tail
+or a write past the seal. The settling pass brings such a copy down to the length the control plane recorded
+and fences it there. A copy that holds fewer records than its seal names is handled differently: the pass
+fences it at the length it holds, which the control plane never recorded, and reports it as not settled. The
+integrity pass fills in place a copy whose bytes are below the recorded size, when every replica of the
+segment is live, the segment is not under-replicated, and a copy at or above the recorded size exists to copy
+from, and no replica's latch state is unread this tick, the copy is not latched as failed (a latched copy is replaced
+instead, or, with no spare broker, kept
+behind the healthy replicas), and its durable end is short of the recorded end. A copy whose records are all
+present but whose bytes are short is reported as integrity suspect and left to the scrubber, which
+revisits each sealed copy about weekly on a node with 10k sealed segments (see the operations guide).
+This fence at a length the metadata does not carry is a divergence from NorthGuard,
+where the seal the control plane records is the only one a copy carries. A copy whose bytes stay above the
+recorded size, holding exactly its seal's records, is returned in the probe's unsettled list until it is
+confirmed, on every pass in which its segment is fully live, not under-replicated and the copy is not latched,
+unless its segment's latch state is unreadable or its own probe times out on that tick, because a sealed size is
+immutable, so no pass corrects it; the confirmation records that the copy is settled and it is not selected
+again.
+
 > **Analogy.** A segment is a notebook: you keep writing on the current page until it is full, then you
 > close that notebook for good (seal it, never edited again) and open a fresh one. Because closed notebooks
 > never change, copying them to another node is safe.

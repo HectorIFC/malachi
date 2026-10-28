@@ -334,6 +334,20 @@ defmodule Malachi.LogTest do
       :ok = Log.close(log)
     end
 
+    test "an unreadable segment directory answers its reason, not a refusal", %{tmp_dir: directory} do
+      {:ok, log} = Log.open(directory, base_offset: 100, max_bytes: 120, index_interval: 32)
+      log = Enum.reduce(100..104, log, fn i, acc -> append_sync(acc, rec("v#{i}")) end)
+      File.chmod!(directory, 0o000)
+      on_exit(fn -> File.chmod(directory, 0o755) end)
+
+      assert {:error, :eacces} = File.ls(directory),
+             "#{directory} still lists after chmod 000; is the suite running as root?"
+
+      assert {:error, {:segments_unreadable, _reason}} = Log.truncate_to(log, 101)
+      File.chmod!(directory, 0o755)
+      :ok = Log.close(log)
+    end
+
     test "a log with no segment file at all refuses a target below where it is seated",
          %{tmp_dir: directory} do
       {:ok, log} = Log.open(directory, base_offset: 100)

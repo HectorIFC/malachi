@@ -23,6 +23,14 @@ defmodule Malachi.Cluster.SelfHealingTest do
 
   defp records(values), do: for(value <- values, do: Record.new(value, key: value))
 
+  # A pid that has already exited: probing it exits, which the integrity pass reads as unreachable.
+  defp dead_broker do
+    pid = spawn(fn -> :ok end)
+    monitor = Process.monitor(pid)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}
+    pid
+  end
+
   defp read_values(ref, segment_id) do
     case ReplicationServer.read(ref, segment_id, 0, 100) do
       {:ok, records} -> Enum.map(records, & &1.value)
@@ -382,6 +390,104 @@ defmodule Malachi.Cluster.SelfHealingTest do
     end)
   end
 
+  describe "the integrity pass's sources" do
+    test "leaves a segment with an unread latch out of the integrity repair" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "integrity-sources", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+      {:ok, _last} = ReplicationServer.replicate(a, segment_id, [a], 0, records(["x", "y", "z"]))
+
+      # Sealed at the bytes a actually holds, so b and c, which hold nothing, are below the recorded size and need
+      # repair. c has a latched copy, which sends the segment to the integrity probe.
+      bytes = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 3, bytes, 0})
+
+      # a's latch was not read, so it is no source: the short copies have nothing to be repaired from.
+      result =
+        SelfHealing.heal_sealed(metadata, [a, b, c], 3,
+          failed: MapSet.new([{segment_id, c}]),
+          unknown_replicas: MapSet.new([{segment_id, a}])
+        )
+
+      assert result.repaired == []
+      assert read_values(b, segment_id) == []
+    end
+  end
+
+  describe "a membership backfill with an unread latch" do
+    test "names the live source whose latch was not read, instead of saying no replica is live" do
+      [a, d] = [start_broker(), start_broker()]
+      b = dead_broker()
+      c = dead_broker()
+      {metadata, segment_id} = sealed_segment([a, b, c], a, ["x", "y", "z"])
+
+      # a is the only live replica that holds the segment, and its latch was not read, so there is no usable source.
+      result = SelfHealing.heal_sealed(metadata, [a, d], 3, unknown_replicas: MapSet.new([{segment_id, a}]))
+
+      assert result.applied == []
+      assert [{^segment_id, {:unread_latch_source, [^a]}}] = result.failed
+    end
+  end
+
+  # A broker whose store can be made to fail, for latching a copy from the outside.
+  defp start_faulty_broker do
+    directory = TmpDir.path("malachi_heal_faulty")
+    on_exit(fn -> FaultySegmentStore.clear(directory) end)
+    id = {:repl, System.unique_integer([:positive])}
+    {start_supervised!({ReplicationServer, directory: directory, store: FaultySegmentStore}, id: id), directory}
+  end
+
+  defp latch!(ref, directory, segment, base) do
+    FaultySegmentStore.fail(Layout.segment_directory(directory, segment), :sync, {:error, :eio})
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert ReplicationServer.replicate(ref, segment, [ref], base, records(["doomed"])) == {:error, {:storage, :eio}}
+    end)
+  end
+
+  describe "a replica that latches after it was listed" do
+    test "is not used as the source of a repair, and its error is not read as a size" do
+      [a, c] = [start_broker(), start_broker()]
+      {b, b_directory} = start_faulty_broker()
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "latched-probe", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+      {:ok, _last} = ReplicationServer.replicate(c, segment_id, [c], 0, records(["x", "y"]))
+      bytes = ReplicationServer.stored_bytes(c, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, bytes, 0})
+
+      # b latches on its own store, so the byte probe gets an error where a size was expected. a is empty, so it is
+      # the copy to repair; the only usable source is c. An error read as a size would make b the first source.
+      # b holds the same two records as c, so its bytes reach the recorded size; then it latches on a third.
+      {:ok, _last} = ReplicationServer.replicate(b, segment_id, [b], 0, records(["x", "y"]))
+      latch!(b, b_directory, segment_id, 2)
+      result = SelfHealing.heal_sealed(metadata, [a, b, c], 3)
+
+      assert {segment_id, a} in result.repaired
+      assert read_values(a, segment_id) == ["x", "y"]
+    end
+  end
+
+  describe "a membership backfill" do
+    test "is not made from a replica whose latch was not read" do
+      [a, b, c, d] = [start_broker(), start_broker(), start_broker(), start_broker()]
+      {metadata, segment_id} = sealed_segment([b, a, c], a, ["x", "y", "z"])
+      {:ok, _last} = ReplicationServer.replicate(b, segment_id, [b], 0, records(["x", "y", "z"]))
+
+      # c is not live, so the segment is under-replicated, and its copies on a and b are the only sources. Neither
+      # latch could be read this tick, so the pass has no source and waits for a later tick.
+      result =
+        SelfHealing.heal_sealed(metadata, [a, b, d], 3,
+          unknown_replicas: MapSet.new([{segment_id, a}, {segment_id, b}])
+        )
+
+      assert result.applied == []
+      assert [{^segment_id, _reason}] = result.failed
+      assert read_values(d, segment_id) == []
+    end
+  end
+
   describe "a sealed copy that failed in storage (:failed)" do
     test "is replaced on a spare broker, backfilled from a healthy copy, and left out of the new set" do
       [a, b, c, d] = [start_broker(), start_broker(), start_broker(), start_broker()]
@@ -420,6 +526,91 @@ defmodule Malachi.Cluster.SelfHealingTest do
       result = SelfHealing.heal_sealed(metadata, [:a], 1, failed: MapSet.new([{segment_id, :a}]))
 
       assert result == %{applied: [], failed: [{segment_id, :no_live_source}], repaired: [], unsettled: []}
+    end
+
+    # A latched copy must not hide a short copy on another replica from the integrity pass, and the latched
+    # replica itself is not repaired, and its bytes are left untouched.
+    test "a short copy is repaired from an intact peer even when another replica of the segment is latched" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+
+      {:ok, _} = ReplicationServer.follow(a, segment_id, 0, records(["x", "y"]))
+      {:ok, _} = ReplicationServer.follow(b, segment_id, 0, records(["x"]))
+      {:ok, _} = ReplicationServer.follow(c, segment_id, 0, records(["x"]))
+      byte_size = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, byte_size, 0})
+
+      result = SelfHealing.heal_sealed(metadata, [a, b, c], 3, failed: MapSet.new([{segment_id, c}]))
+
+      assert result.repaired == [{segment_id, b}]
+      assert read_values(b, segment_id) == ["x", "y"]
+      assert read_values(c, segment_id) == ["x"]
+    end
+
+    # When the latch state of a segment could not be read this tick, the integrity pass leaves it alone rather
+    # than probe a copy that may be latched. The next tick, with the state readable, repairs it.
+    test "a segment whose latch state is unknown this tick is left out of the integrity pass" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+      {:ok, _} = ReplicationServer.follow(a, segment_id, 0, records(["x", "y"]))
+      {:ok, _} = ReplicationServer.follow(b, segment_id, 0, records(["x"]))
+      {:ok, _} = ReplicationServer.follow(c, segment_id, 0, records(["x", "y"]))
+      byte_size = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, byte_size, 0})
+
+      skipped = SelfHealing.heal_sealed(metadata, [a, b, c], 3, unknown_replicas: MapSet.new([{segment_id, a}]))
+      assert skipped.repaired == []
+      assert read_values(b, segment_id) == ["x"]
+
+      repaired = SelfHealing.heal_sealed(metadata, [a, b, c], 3)
+      assert {segment_id, b} in repaired.repaired
+      assert read_values(b, segment_id) == ["x", "y"]
+    end
+
+    # A replica that does not answer may still be intact, so the reason must not claim there is no intact copy.
+    test "a short copy whose only intact peers do not answer is reported as unreachable sources" do
+      [a, b, c] = [dead_broker(), dead_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+      {:ok, _} = ReplicationServer.follow(c, segment_id, 0, records(["x"]))
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, 1_000, 0})
+
+      result = SelfHealing.heal_sealed(metadata, [a, b, c], 3)
+
+      assert result.failed == [{segment_id, {:unreachable_sources, [a, b]}}]
+    end
+
+    test "a short copy with every replica answering and none intact is reported as no intact copy" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+      for replica <- [a, b, c], do: {:ok, _} = ReplicationServer.follow(replica, segment_id, 0, records(["x"]))
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, 1_000, 0})
+
+      result = SelfHealing.heal_sealed(metadata, [a, b, c], 3)
+
+      assert result.failed == [{segment_id, :no_intact_copy}]
+    end
+
+    # The latched replica is excluded from the probes, so it can never be the unreachable one.
+    test "a latched replica is not reported among the unreachable sources" do
+      # b is latched and dead: without the latch exclusion it would be probed, found unreachable, and listed.
+      [a, b, c] = [dead_broker(), dead_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+      {:ok, _} = ReplicationServer.follow(c, segment_id, 0, records(["x"]))
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, 1_000, 0})
+
+      result = SelfHealing.heal_sealed(metadata, [a, b, c], 3, failed: MapSet.new([{segment_id, b}]))
+
+      assert {segment_id, {:unreachable_sources, [a]}} in result.failed
     end
 
     test "a failed copy of a broker outside the set, of an active segment or of an unknown one changes nothing" do

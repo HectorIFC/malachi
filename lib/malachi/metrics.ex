@@ -413,8 +413,9 @@ defmodule Malachi.Metrics do
   end
 
   @doc """
-  Records `copies` copies of sealed segments brought to the length the control plane recorded, by
-  `result` (`:fenced`, `:trimmed` or `:failed`), and the `records` a trim gave up.
+  Records `copies` copies of sealed segments settled against the recorded length, by the heal pass or by the node that
+  trims, and tells them apart by `result` (`:fenced`, `:trimmed`, `:failed` or `:recorded_size_below`), and the
+  `records` a trim gave up.
 
   Split by result for the same reason `record_orphaned_fence/0` is split from
   `record_fences_reconciled/1`: settling a copy is overwhelmingly a marker and nothing else, and the
@@ -661,6 +662,7 @@ defmodule Malachi.Metrics do
         orphaned_fences: get_counter(:orphaned_fences),
         fences_reconciled: get_counter(:fences_reconciled),
         sealed_copies_fenced: get_counter({:sealed_copies_settled, :fenced}),
+        sealed_copies_recorded_below: get_counter({:sealed_copies_settled, :recorded_size_below}),
         sealed_copies_trimmed: get_counter({:sealed_copies_settled, :trimmed}),
         sealed_copies_unsettled: get_counter({:sealed_copies_settled, :failed}),
         sealed_records_dropped: get_counter(:sealed_records_dropped),
