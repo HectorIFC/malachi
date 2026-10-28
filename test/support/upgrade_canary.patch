@@ -45,7 +45,7 @@ index d6514f2..161c808 100644
    Switches the cluster feature flag named `name` on, from this running node. The entry point
    `mix malachi.flag` reaches over RPC.
 diff --git a/lib/malachi/broker.ex b/lib/malachi/broker.ex
-index 6ca0bc6..0e1d5d3 100644
+index 5ea0bfe..d493f4e 100644
 --- a/lib/malachi/broker.ex
 +++ b/lib/malachi/broker.ex
 @@ -248,6 +248,13 @@ defmodule Malachi.Broker do
@@ -95,10 +95,10 @@ index 7c62e6b..ab3535f 100644
    @typedoc "A capability, which is also the name of the flag that requires it."
    @type capability :: atom()
 diff --git a/lib/malachi/cluster/machine_version.ex b/lib/malachi/cluster/machine_version.ex
-index 6974925..f3f1a8b 100644
+index 8cc80e6..384aeea 100644
 --- a/lib/malachi/cluster/machine_version.ex
 +++ b/lib/malachi/cluster/machine_version.ex
-@@ -98,7 +98,10 @@ defmodule Malachi.Cluster.MachineVersion do
+@@ -100,7 +100,10 @@ defmodule Malachi.Cluster.MachineVersion do
    # `Malachi.Metadata`: a wider tuple is a new command, so it takes the next version.
    # 8 introduces the group fence in `Malachi.Metadata` (#275): `{:commit_offset, group, topic, offsets,
    # generation}` and `{:open_group, group, topic}`, at the next version since 7 is released.
@@ -111,10 +111,10 @@ index 6974925..f3f1a8b 100644
    @typedoc "A command's shape: its leading atom and the size of the tuple that carries it."
    @type command_key :: {atom(), non_neg_integer()}
 diff --git a/lib/malachi/cluster/replication_server.ex b/lib/malachi/cluster/replication_server.ex
-index afa3dbb..58add4b 100644
+index 9cf5398..24a38ee 100644
 --- a/lib/malachi/cluster/replication_server.ex
 +++ b/lib/malachi/cluster/replication_server.ex
-@@ -603,6 +603,8 @@ defmodule Malachi.Cluster.ReplicationServer do
+@@ -651,6 +651,8 @@ defmodule Malachi.Cluster.ReplicationServer do
        unexpected_shapes: MapSet.new()
      }
  
@@ -123,7 +123,7 @@ index afa3dbb..58add4b 100644
      {:ok, state}
    end
  
-@@ -944,6 +946,10 @@ defmodule Malachi.Cluster.ReplicationServer do
+@@ -1059,6 +1061,10 @@ defmodule Malachi.Cluster.ReplicationServer do
      {:noreply, state}
    end
  
@@ -134,7 +134,7 @@ index afa3dbb..58add4b 100644
    # A push or an ack in a shape this build does not know, which is what a newer primary sends an older
    # follower during a rolling upgrade. Dropping it costs that one batch its ack (the primary waits out its
    # replication timeout for it); crashing would cost every log on this node (see "Storage failures").
-@@ -1032,6 +1038,16 @@ defmodule Malachi.Cluster.ReplicationServer do
+@@ -1147,6 +1153,16 @@ defmodule Malachi.Cluster.ReplicationServer do
      {:noreply, state}
    end
  
@@ -152,10 +152,10 @@ index afa3dbb..58add4b 100644
    # no_quorum the synchronous path returned. A batch already resolved by acks is simply gone.
    def handle_info({:replicate_timeout, segment_id, batch_ref}, state) do
 diff --git a/lib/malachi/metadata.ex b/lib/malachi/metadata.ex
-index 4cb084b..33aa898 100644
+index 36a2c6d..d4b6dae 100644
 --- a/lib/malachi/metadata.ex
 +++ b/lib/malachi/metadata.ex
-@@ -224,7 +224,10 @@ defmodule Malachi.Metadata do
+@@ -214,7 +214,10 @@ defmodule Malachi.Metadata do
        {:extract_topic, 2} => 0,
        {:insert_topic, 2} => 0,
        {:begin_migration, 2} => 0,
@@ -167,7 +167,7 @@ index 4cb084b..33aa898 100644
      }
    end
  
-@@ -263,6 +266,8 @@ defmodule Malachi.Metadata do
+@@ -252,6 +255,8 @@ defmodule Malachi.Metadata do
    def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
    def command_target_topic({:commit_offset, _group, topic, _offsets, _generation}), do: topic
    def command_target_topic({:open_group, _group, topic}), do: topic
@@ -176,7 +176,7 @@ index 4cb084b..33aa898 100644
    def command_target_topic(command), do: List.first(routed_range_topics(command))
  
    @doc """
-@@ -655,6 +660,17 @@ defmodule Malachi.Metadata do
+@@ -610,6 +615,17 @@ defmodule Malachi.Metadata do
    # unknown command must not raise. Inside ra, `Malachi.Cluster.MachineVersion` refuses an unknown or
    # not-yet-effective command before it gets here, so an older replica never skips a command that a
    # newer one applies.

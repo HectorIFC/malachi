@@ -203,9 +203,9 @@ defmodule Malachi.Cluster.Policy do
 
   # A bound is at most 2^64 - 1 because the wire carries it in 64 bits (`Malachi.Wire`), and a larger one
   # would be stored whole and read back truncated, telling an operator a small limit while the data lives
-  # under a huge one. Refusing it here is a tightening of what `{:define_policy, name, policy}` accepts,
-  # which is admissible only because no release ever emitted that command into either Raft group (the
-  # store gained its first caller in the same change, #194; the legacy metadata command has none, #255).
+  # under a huge one. The rule is checked again on every replay of the policy store's log. A definition
+  # above 2^64 - 1 that the log holds is refused then, and the registry keeps the definition the name had
+  # before, or none if it had none. No current entry point can store such a value.
   @max_bound 0xFFFF_FFFF_FFFF_FFFF
 
   # `nil` turns a rule off, whatever the field's type.

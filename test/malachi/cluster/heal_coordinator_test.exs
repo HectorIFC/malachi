@@ -770,6 +770,62 @@ defmodule Malachi.Cluster.HealCoordinatorTest do
   end
 
   describe "a copy that failed in storage (seal-on-failure)" do
+    # A replica whose latch state cannot be read this tick leaves its segments out of the integrity pass, so a
+    # short copy waits; the next tick, with the state readable, repairs it.
+    # The default latch read against a replica nothing is registered under: the call exits, the error arm
+    # answers :unknown, and the segment is left out of the integrity pass, so no settle is asked for. A default
+    # that read the error as "no latched copy" would probe the live copy and ask to settle it.
+    test "an unreadable latch state through the default read keeps the segment out of the integrity pass" do
+      a = start_broker()
+      {metadata, _segment_id} = sealed_segment([a, :b], a, ["x"])
+      {source, apply} = metadata_store(metadata)
+      owner = self()
+
+      coordinator =
+        start_coordinator(
+          replication_factor: 2,
+          live_brokers: fn -> [a, :b] end,
+          metadata_source: source,
+          apply_command: apply,
+          settle_copy: fn replica, _segment, _base, _end ->
+            send(owner, {:settled, replica})
+            :error
+          end
+        )
+
+      HealCoordinator.heal_now(coordinator)
+      refute_received {:settled, _replica}
+    end
+
+    test "a tick whose latch state is unknown leaves a short copy alone, and the next tick repairs it" do
+      [a, b, c] = [start_broker(), start_broker(), start_broker()]
+      {metadata, {:ok, root}} = Metadata.apply(Metadata.new(), {:create_topic, "events", 4})
+      segment_id = {root, 0}
+      {metadata, :ok} = Metadata.apply(metadata, {:register_segment, root, segment_id, [a, b, c], 0})
+      {:ok, _} = ReplicationServer.follow(a, segment_id, 0, records(["x", "y"]))
+      {:ok, _} = ReplicationServer.follow(b, segment_id, 0, records(["x"]))
+      {:ok, _} = ReplicationServer.follow(c, segment_id, 0, records(["x", "y"]))
+      byte_size = ReplicationServer.stored_bytes(a, segment_id)
+      {metadata, :ok} = Metadata.apply(metadata, {:seal_segment, segment_id, 2, byte_size, 0})
+      {source, apply} = metadata_store(metadata)
+
+      coordinator = fn failed_state ->
+        start_coordinator(
+          live_brokers: fn -> [a, b, c] end,
+          metadata_source: source,
+          apply_command: apply,
+          failed_state: failed_state
+        )
+      end
+
+      assert HealCoordinator.heal_now(coordinator.(fn _replica, _segments -> :unknown end)).repaired == []
+      assert read_values(b, segment_id) == ["x"]
+
+      readable = coordinator.(fn _replica, _segments -> MapSet.new() end)
+      assert {segment_id, b} in HealCoordinator.heal_now(readable).repaired
+      assert read_values(b, segment_id) == ["x", "y"]
+    end
+
     test "a LIVE primary whose copy failed is sealed on its followers, which are fenced, and loses the head" do
       {primary, primary_dir} = start_broker_at(store: FaultySegmentStore)
       b = start_broker()

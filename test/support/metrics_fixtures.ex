@@ -67,6 +67,7 @@ defmodule Malachi.Test.MetricsFixtures do
         sealed_copies_fenced: 9,
         sealed_copies_trimmed: 1,
         sealed_copies_unsettled: 0,
+        sealed_copies_recorded_below: 2,
         sealed_records_dropped: 1,
         reconcile_degraded: [
           %{reason: :skipped, count: 4},

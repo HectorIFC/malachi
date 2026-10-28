@@ -101,16 +101,12 @@ defmodule Malachi.Metadata do
   @typedoc "A policy's name. The shape it names lives in `Malachi.Cluster.Policy`."
   @type policy_name :: Policy.name()
 
-  @typedoc "A named storage policy (see `Malachi.Cluster.Policy`)."
-  @type policy :: Policy.t()
-
   @type t :: %__MODULE__{
           topics: %{topic_name() => topic_meta()},
           ranges: %{range_id() => range_meta()},
           segments: %{segment_id() => segment_meta()},
           committed_offsets: %{group_topic() => offsets()},
           group_fences: %{group_topic() => group_fence()},
-          policies: %{policy_name() => policy()},
           # Secondary (reverse) indexes kept in lockstep with `ranges`/`segments` so
           # `ranges_of_topic`/`segments_of_range` can be O(1)+O(k) lookups instead of full scans. Stored
           # as MapSets (O(1) add/remove, dedup); an entry exists iff the key has ≥1 member.
@@ -150,8 +146,6 @@ defmodule Malachi.Metadata do
           | {:commit_offset, group(), topic_name(), offsets()}
           | {:commit_offset, group(), topic_name(), offsets(), non_neg_integer()}
           | {:open_group, group(), topic_name()}
-          | {:define_policy, policy_name(), policy()}
-          | {:set_topic_policy, topic_name(), policy_name() | nil}
           | {:bind_topic_policy, topic_name(), policy_name() | nil}
           | {:extract_topic, topic_name()}
           | {:insert_topic, topic_export()}
@@ -163,7 +157,6 @@ defmodule Malachi.Metadata do
             segments: %{},
             committed_offsets: %{},
             group_fences: %{},
-            policies: %{},
             topic_ranges: %{},
             range_segments: %{},
             migrating: %{}
@@ -216,10 +209,7 @@ defmodule Malachi.Metadata do
       # generation it was taken at, and a coordinator opening a group.
       {:commit_offset, 5} => 8,
       {:open_group, 3} => 8,
-      {:define_policy, 3} => 0,
-      {:set_topic_policy, 3} => 0,
-      # The binding an operator emits (#194). A new shape rather than the legacy one above, whose rule was
-      # relaxed at version 0 on the promise that nothing emits it.
+      # The binding an operator emits (#194). Policy definitions live in `Malachi.Cluster.PolicyRegistry`.
       {:bind_topic_policy, 3} => 4,
       {:extract_topic, 2} => 0,
       {:insert_topic, 2} => 0,
@@ -258,7 +248,6 @@ defmodule Malachi.Metadata do
   def command_target_topic({:create_topic, name, _bits}), do: name
   def command_target_topic({:seal_topic, name}), do: name
   def command_target_topic({:delete_topic, name}), do: name
-  def command_target_topic({:set_topic_policy, name, _policy}), do: name
   def command_target_topic({:bind_topic_policy, name, _policy}), do: name
   def command_target_topic({:commit_offset, _group, topic, _offsets}), do: topic
   def command_target_topic({:commit_offset, _group, topic, _offsets, _generation}), do: topic
@@ -383,11 +372,10 @@ defmodule Malachi.Metadata do
   defp apply_unfenced(state, command, _at_ms), do: do_apply(state, command)
 
   # The topic a mutating command would change, or `nil` when the command is not topic-scoped or is a
-  # migration/read command that must never be fenced (create_topic, define_policy, begin/end_migration,
-  # extract/insert_topic). Range/segment commands resolve to their owning topic via the state.
+  # migration/read command that must never be fenced (create_topic, begin/end_migration, extract/insert_topic).
+  # Range/segment commands resolve to their owning topic via the state.
   defp command_topic(_state, {:seal_topic, name}), do: name
   defp command_topic(_state, {:delete_topic, name}), do: name
-  defp command_topic(_state, {:set_topic_policy, name, _policy}), do: name
   defp command_topic(_state, {:bind_topic_policy, name, _policy}), do: name
   defp command_topic(_state, {:commit_offset, _group, topic, _offsets}), do: topic
   defp command_topic(_state, {:commit_offset, _group, topic, _offsets, _generation}), do: topic
@@ -583,46 +571,13 @@ defmodule Malachi.Metadata do
     {%{state | group_fences: Map.put(state.group_fences, {group, topic}, fence)}, {:ok, fence.epoch}}
   end
 
-  defp do_apply(%__MODULE__{} = state, {:define_policy, name, policy}) do
-    # The contents are checked, not just the shape: a policy whose `max_bytes` is a binary is accepted
-    # by `is_map/1` and then never fires, because `Malachi.Cluster.Retention` compares it with `>`.
-    #
-    # Tightening what an existing command accepts changes what a replay of the Raft log produces, which
-    # is normally a reason not to do it. It is safe here and only here: nothing in `lib/` emits
-    # `:define_policy` yet (the commands exist and nothing reaches them, which is what #185 is about),
-    # so no log in the field contains one. Once a caller exists, this rule can only be widened.
-    #
-    # Pinned to the fields of version 3, the rule as #190 left it: `Policy.valid?/1` follows the field
-    # table as it grows, and letting this legacy command follow it would widen it at version 0.
-    if Policy.valid_name?(name) and Policy.valid?(policy, 3) do
-      {%{state | policies: Map.put(state.policies, name, policy)}, :ok}
-    else
-      {state, {:error, :invalid_policy}}
-    end
-  end
-
   # Binds a topic to a policy NAME. The name is not checked against a definition here, and cannot be:
   # the definitions are an administrative object of the cluster (`Malachi.Cluster.PolicyStore`), and a
   # `ra` state machine may only read its own replicated state, so a vnode has no way to know which names
   # exist. A topic bound to a name nobody defined holds its data (`Malachi.Cluster.Retention.effective/4`).
   # Whoever offers this to an operator checks the name against the store first, so a typo is caught
   # where it can be reported (`Malachi.Policies.bind/3`).
-  #
-  # Two shapes apply the same rule. `:bind_topic_policy`, introduced at version 4, is the one an operator
-  # emits: a member on older code refuses it only because the group's effective version is below 4, which
-  # every member decides alike.
-  #
-  # `:set_topic_policy` is the legacy shape. #190 relaxed it to accept a name absent from the vnode's own
-  # definitions while leaving it at machine version 0, which the versioning rule would normally forbid: a
-  # member on older code refuses such a name while a newer one stores it, and the two replicas then hold
-  # different states with no error anywhere. It stays admissible on one invariant, narrow and worth
-  # stating because it is not obvious from this file: NOTHING in `lib/` emits `:set_topic_policy`. No log
-  # written by any release can contain one, so there is no entry whose replay could differ between
-  # versions. `Malachi.SetTopicPolicyGuardTest` fails the build the day that stops being true.
   defp do_apply(%__MODULE__{} = state, {:bind_topic_policy, topic, policy_name}),
-    do: bind_policy(state, topic, policy_name)
-
-  defp do_apply(%__MODULE__{} = state, {:set_topic_policy, topic, policy_name}),
     do: bind_policy(state, topic, policy_name)
 
   # Vnode-split migration (driven through each vnode's Raft log): `:extract_topic` removes a topic's full
@@ -869,18 +824,6 @@ defmodule Malachi.Metadata do
     |> Enum.map(fn {group, _topic} -> group end)
     |> Enum.sort()
   end
-
-  @doc """
-  The policy named `name` in this vnode's own (deprecated) definitions, or `nil`.
-
-  Definitions moved to `Malachi.Cluster.PolicyStore`, because they are an administrative object of the
-  cluster rather than state a vnode owns, and keeping them here is what made a topic lose its policy
-  when it moved between vnodes. `{:define_policy, name, policy}` stays appliable so every log ever
-  written still replays the same way, and this is the only thing that reads what it wrote. Nothing in
-  the data path does.
-  """
-  @spec get_policy(t(), policy_name()) :: policy() | nil
-  def get_policy(%__MODULE__{} = state, name), do: Map.get(state.policies, name)
 
   defp bind_policy(state, topic, policy_name) do
     cond do

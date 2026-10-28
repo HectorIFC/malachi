@@ -16,9 +16,13 @@ defmodule PrAgentReviewSkillTest do
            ".claude/commands/pr-agent.md",
            "scripts/pin-diff.sh",
            "scripts/issue-section.sh",
+           "scripts/review_lib.sh",
+           "scripts/review-state.sh",
            "test/scripts/pin_diff_test.exs",
            "test/scripts/issue_section_test.exs",
            "test/scripts/pr_agent_review_skill_test.exs",
+           "test/scripts/review_state_test.exs",
+           "test/scripts/adversarial_review_skill_test.exs",
            "test/docs_config_test.exs",
            "test/fixtures/issue_268_body.md"
          ]
@@ -37,7 +41,7 @@ defmodule PrAgentReviewSkillTest do
   }
 
   test "no added file carries an em dash" do
-    assert length(@added) == 15
+    assert length(@added) == 19
 
     for path <- @added do
       refute path |> File.read!() |> String.contains?(@em_dash), path

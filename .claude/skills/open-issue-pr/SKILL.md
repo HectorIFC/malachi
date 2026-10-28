@@ -271,9 +271,15 @@ and that the fields match. The boards are compared on their own: a board where t
 value set produces no field row, so the field comparison alone would pass while the PR sits on one board
 fewer. Report any difference instead of calling it done.
 
-Report the title, the type and the version label, and the fields copied, and finish with the PR URL on
-its own line, which is the one thing the user acts on and so the last thing they read. Delete the
-scratch directory.
+Report the title, the type and the version label, and the fields copied. Then one line on the adversarial
+review: the rounds that ran (`"$(/usr/bin/git rev-parse --show-toplevel)/scripts/review-state.sh" status`),
+and whether the pushed tree is the one the last round reviewed. Compare `git rev-parse "origin/$branch^{tree}"`
+with `review-state.sh reviewed`. Equal means reviewed as pushed. Different, or no round at all, means the
+PR's diff has not been reviewed locally, and the PR review is the first look at it. Say which, and do not
+start a round from here.
+
+Finish with the PR URL on its own line, which is the one thing the user acts on and so the last thing they
+read. Delete the scratch directory.
 
 ## What not to do
 

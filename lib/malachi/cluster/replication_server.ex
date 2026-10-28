@@ -46,8 +46,8 @@ defmodule Malachi.Cluster.ReplicationServer do
   reconciling pass can find a fence whose control-plane seal never landed and finish it. It is not free
   of effects, though: answering for a fenced segment opens its log, and a copy whose log fails to open is
   latched as failed, as any other storage failure on that path is. The one exception is a failure that may
-  clear by the next request: a directory or seal marker that cannot be listed or stat'ed is refused, and never
-  latched, since it may come back. A marker whose directory fsync fails latches at once, without a retry. Until a
+  clear by the next request: a directory or seal marker that a read cannot list or stat is refused, and never
+  latched, since it may come back. A seal marker whose directory fsync fails latches at once, without a retry. Until a
   copy latches, it is left out of the report and is not in `failed_segments/3`, which lists only latched copies.
 
   ## Storage failures
@@ -61,7 +61,11 @@ defmodule Malachi.Cluster.ReplicationServer do
     * its log is closed and dropped, its parked batches are answered with the same error, and deferred
       follower acks for it are discarded, so nothing acknowledges records that never became durable;
     * every later request for it, writes and reads alike, is refused with that error WITHOUT touching
-      the disk, until the segment is deleted here or the server restarts;
+      the disk, until the segment is deleted here or the server restarts. Four requests do not answer that error:
+      `settled_confirmed?/3` answers `false` for it without touching the disk, `end_offset/3` answers `:empty`, because
+      its log is dropped, `failed_segments/3` reports it, as the next bullet says, and `fenced_segments/3` leaves it out
+      of its batched answer,
+      since one failed segment must not refuse the whole batch;
     * it is reported by `failed_segments/3`, which is how `Malachi.Cluster.HealCoordinator` finds it and
       seals the segment on its surviving replicas so producers move to a new one, as NorthGuard does
       when a replica fails.
@@ -71,9 +75,10 @@ defmodule Malachi.Cluster.ReplicationServer do
   report success over lost data.
 
   One failure does not latch on the first answer, and for it the open IS repeated on each later request: a
-  directory or seal marker that cannot be listed or stat'ed is refused and never latched, since it may come back.
-  A marker whose directory fsync fails latches at once, and is never fsynced again: the failed fsync is the one the
-  paragraph above rules out retrying. Every other failure latches at once too.
+  directory or seal marker that a read cannot list or stat is refused and never latched, since it may come back.
+  A seal marker whose directory fsync fails latches at once, and is never fsynced again: the failed fsync is the one the
+  paragraph above rules out retrying. Every other failure of the bytes latches at once too, except the SETTLED
+  marker: a failed write or sync of it answers its error and never latches, because the copy is only selected again.
 
   ## Messages from another version
 
@@ -94,6 +99,7 @@ defmodule Malachi.Cluster.ReplicationServer do
   alias Malachi.Cluster.ReplicaTracker
   alias Malachi.I18n
   alias Malachi.Log
+  alias Malachi.Storage.Directory
   alias Malachi.Storage.Layout
   alias Malachi.Telemetry
   alias Malachi.UnexpectedMessage
@@ -371,14 +377,49 @@ defmodule Malachi.Cluster.ReplicationServer do
   @doc """
   The on-disk byte size this server stores for `segment_id`: the sum of its segment files' sizes,
   read without opening the log (no descriptors, no state change), so it is cheap enough to poll.
-  0 when nothing is stored. The first stage of the sealed-copy integrity probe
+  0 when nothing is stored. A segment that failed in storage answers the storage error instead. The first stage of the
+  sealed-copy integrity probe
   (`Malachi.Cluster.SelfHealing`): a **sealed** segment whose stored bytes fall short of the
   metadata's sealed `byte_size` has lost data on this replica. Only meaningful for sealed segments;
   an active segment's file legitimately trails its in-memory log by the unflushed buffer.
   """
-  @spec stored_bytes(term(), term(), timeout()) :: non_neg_integer()
+  @spec stored_bytes(term(), term(), timeout()) :: non_neg_integer() | {:error, term()}
   def stored_bytes(ref, segment_id, timeout \\ 5_000) do
     GenServer.call(ref, {:stored_bytes, segment_id}, timeout)
+  end
+
+  @doc """
+  Records, durably, that this server's copy of `segment_id` is settled. The caller has already checked that the
+  copy holds exactly the records its seal names and measures above the recorded `byte_size`. This server does not
+  read the seal, so it writes the marker it is asked for and the check stays with the caller. The integrity probe
+  then stops selecting the copy, so one whose only divergence is a size the metadata can never correct is settled
+  once, not on every pass.
+
+  Answers `:ok` once the marker is on disk and its directory entry is synced. An error reply means the marker is not
+  known to be durable. A failed write removes the marker only when this call created it, and leaves the copy
+  selected again, which is the level-triggered retry. An earlier marker stays in place. A marker that survives a
+  failed sync stays until the segment's directory is removed, and the probe keeps skipping its copy, which is safe
+  because the copy holds exactly its seal's records.
+  """
+  @spec confirm_settled(term(), term(), timeout()) :: :ok | {:error, term()}
+  def confirm_settled(ref, segment_id, timeout \\ 5_000) do
+    GenServer.call(ref, {:confirm_settled, segment_id}, timeout)
+  catch
+    # A replica that stops answering after its seal is not confirmed: the copy stays selected and the next pass retries.
+    :exit, _reason -> {:error, :unreachable}
+  end
+
+  @doc """
+  Whether `confirm_settled/3` has been recorded for this server's copy of `segment_id`. A single check that the
+  segment's `SETTLED` file is a regular file: the probe asks it only for copies it already found above the recorded
+  size. A latched segment answers `false`, since its marker is not read while it refuses every request.
+  """
+  @spec settled_confirmed?(term(), term(), timeout()) :: boolean()
+  def settled_confirmed?(ref, segment_id, timeout \\ 5_000) do
+    GenServer.call(ref, {:settled_confirmed, segment_id}, timeout)
+  catch
+    # A server that does not answer is not confirmed: the copy stays selected and the next pass asks again.
+    :exit, _reason -> false
   end
 
   @doc """
@@ -469,9 +510,16 @@ defmodule Malachi.Cluster.ReplicationServer do
   that is SHORT of the recorded length is a different defect, repaired from a peer by
   `Malachi.Cluster.SelfHealing`, and repair still works on a fenced segment (`follow/4`).
 
-  An `end_offset` below the segment's base offset answers `{:error, :below_base_offset}` without
-  opening the log and without failing the copy. Every storage error here takes the copy out of
-  service, and a coordinator that passed the wrong number must not cost a healthy replica.
+  An `end_offset` below the base offset the caller passed answers `{:error, :below_base_offset}` without
+  opening the log and without failing the copy. An `end_offset` below the log's real base is refused by the log,
+  after the log is opened and flushed; that refusal does not fail the copy, though an error opening or flushing the
+  log can.
+  Every storage error here takes the copy out of
+  service, except a segment directory or seal marker that a read cannot list or stat. Those answer their reason and
+  leave the copy in service, as opening does: bare on a log that is already open, as `{:storage, reason}` on one that
+  has to be opened. A write or an fsync that fails on the directory latches like any other storage error, and so
+  does a directory that cannot be opened to fsync. A coordinator that passed the wrong number must not cost a healthy
+  replica.
 
   `dropped` is how many records the truncation removed, and it is why this answers a four-tuple where
   `seal/4` answers three. Settling a copy is overwhelmingly a no-op that only writes a marker, and one
@@ -607,6 +655,26 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   @impl true
+  # The marker is written and synced before it is reported, so a crash after the reply cannot lose it.
+  def handle_call({:confirm_settled, segment_id}, _from, state) do
+    if Map.has_key?(state.failed, segment_id) do
+      # A latched segment is refused on every request, as the moduledoc says: its marker is not written.
+      {:reply, storage_error(state, segment_id), state}
+    else
+      confirm_marker(state, segment_id)
+    end
+  end
+
+  def handle_call({:settled_confirmed, segment_id}, _from, state) do
+    # A regular file, not any entry: a directory that happens to sit under the marker's name is not a confirmation.
+    # A latched segment answers false: its marker is not read as a confirmation while it refuses every request.
+    confirmed? =
+      not Map.has_key?(state.failed, segment_id) and
+        File.regular?(settled_marker_path(segment_directory(state.directory, segment_id)))
+
+    {:reply, confirmed?, state}
+  end
+
   def handle_call({:replicate, _segment_id, _replica_set, _base_offset, [], _ctx}, _from, state) do
     {:reply, {:error, :empty}, state}
   end
@@ -773,7 +841,23 @@ defmodule Malachi.Cluster.ReplicationServer do
   end
 
   def handle_call({:stored_bytes, segment_id}, _from, state) do
-    {:reply, bytes_on_disk(state, segment_id), state}
+    cond do
+      Map.has_key?(state.failed, segment_id) ->
+        {:reply, storage_error(state, segment_id), state}
+
+      Map.has_key?(state.logs, segment_id) ->
+        case Log.listed_bytes(Map.fetch!(state.logs, segment_id)) do
+          {:ok, bytes} -> {:reply, bytes, state}
+          {:error, reason} -> {:reply, {:error, {:storage, reason}}, state}
+        end
+
+      true ->
+        # A directory that cannot be listed, or a file that cannot be stat'ed, is refused, not counted as 0 bytes.
+        case stat_bytes_on_disk(state, segment_id) do
+          {:ok, bytes} -> {:reply, bytes, state}
+          {:error, reason} -> {:reply, {:error, {:storage, reason}}, state}
+        end
+    end
   end
 
   def handle_call({:durable_end, segment_id, base_offset}, _from, state) do
@@ -856,7 +940,38 @@ defmodule Malachi.Cluster.ReplicationServer do
     {:reply, UnexpectedMessage.unknown_call_reply(), drop_unexpected(state, :call, message)}
   end
 
+  defp confirm_marker(state, segment_id) do
+    directory = segment_directory(state.directory, segment_id)
+
+    marker = settled_marker_path(directory)
+    # A marker an earlier confirmation wrote is not this call's to remove: only one created here is taken back.
+    created? = not File.regular?(marker)
+
+    reply =
+      case File.write(marker, <<>>, [:sync]) do
+        :ok ->
+          case Directory.sync(directory) do
+            :ok ->
+              :ok
+
+            {:error, _reason} = error ->
+              # The marker is not durable without its directory entry, so the failure takes it back. If that also
+              # fails, the marker may remain: the reply is still an error, and `confirm_settled/3` documents that.
+              if created?, do: _ = File.rm(marker)
+              error
+          end
+
+        {:error, _reason} = error ->
+          # A write that fails after creating the file leaves it behind: take it back, as the sync failure does.
+          if created?, do: _ = File.rm(marker)
+          error
+      end
+
+    {:reply, reply, state}
+  end
+
   # The asynchronous fence (`seal_async/5`): the same seal as the call, answered as a message.
+
   @impl true
   def handle_cast({:seal_async, segment_id, base_offset, notify}, state) do
     {reply, state} = seal_segment(state, segment_id, base_offset, :whole)
@@ -1347,21 +1462,41 @@ defmodule Malachi.Cluster.ReplicationServer do
   defp bytes_on_disk(state, segment_id) do
     case Map.fetch(state.logs, segment_id) do
       {:ok, log} -> Log.bytes_on_disk(log)
-      :error -> stat_bytes_on_disk(state, segment_id)
+      :error -> stat_bytes_on_disk_or_zero(state, segment_id)
     end
   end
 
+  defp stat_bytes_on_disk_or_zero(state, segment_id) do
+    case stat_bytes_on_disk(state, segment_id) do
+      {:ok, bytes} -> bytes
+      {:error, _reason} -> 0
+    end
+  end
+
+  # Lists the directory with File.ls/1, which reports a directory it cannot read, where a wildcard would answer [].
+  # A directory that does not exist holds nothing, so it is 0 bytes; any other failure is refused. Names are matched as
+  # the `*.log` wildcard does, so dotfiles are skipped.
   defp stat_bytes_on_disk(state, segment_id) do
-    state.directory
-    |> segment_directory(segment_id)
-    |> Path.join("*.log")
-    |> Path.wildcard()
-    |> Enum.reduce(0, fn path, sum ->
-      case File.stat(path) do
-        {:ok, %{size: size}} -> sum + size
-        {:error, _reason} -> sum
-      end
-    end)
+    directory = segment_directory(state.directory, segment_id)
+
+    case File.ls(directory) do
+      {:error, :enoent} ->
+        {:ok, 0}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, names} ->
+        names
+        |> Enum.filter(&(String.ends_with?(&1, ".log") and not String.starts_with?(&1, ".")))
+        |> Enum.reduce_while({:ok, 0}, fn name, {:ok, sum} ->
+          case File.stat(Path.join(directory, name)) do
+            {:ok, %{size: size}} -> {:cont, {:ok, sum + size}}
+            {:error, :enoent} -> {:cont, {:ok, sum}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+    end
   end
 
   # Only `open_segment/3` calls this: it is what applies the failure latch before and after.
@@ -1447,17 +1582,121 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
+  # The trim is counted where it happens: this node holds the copy and knows what it dropped, and a settle whose
+  # caller gave up still trims. A repeat seal finds nothing past the end and reports nothing.
+  defp report_trim(segment_id, dropped) when dropped > 0 do
+    Telemetry.sealed_copies_settled(:trimmed, 1, dropped)
+
+    Logger.warning(I18n.t(:replication_sealed_copy_trimmed, records: dropped, segment_id: inspect(segment_id)))
+    :ok
+  end
+
+  defp report_trim(_segment_id, _dropped), do: :ok
+
   # The write fence behind `seal/4`, `seal_async/5` and `seal_at/5`, answering what the sealed log
   # holds. `target` is `:whole` for the plain fence and an end offset for the one that first brings the
   # copy down to a length the control plane recorded.
   defp seal_segment(state, segment_id, base_offset, target) do
     with {:ok, state, log} <- open_segment(state, segment_id, base_offset),
          held = log.next_offset,
-         {:ok, state, log} <- run_log(state, segment_id, log, &trim_to(&1, target)),
+         {:ok, state, log} <- trim_copy(state, segment_id, log, target, held, base_offset),
          {:ok, state, log} <- run_log(state, segment_id, log, &Log.seal/1) do
       {{:ok, log.next_offset, bytes_on_disk(state, segment_id), max(held - log.next_offset, 0)}, state}
     else
       {:error, reason, state} -> {{:error, reason}, state}
+    end
+  end
+
+  # The trim is reported as soon as it has run, whether or not its call answers: a cut that removed records and
+  # then failed to sync has still removed them. A cut flushes the buffered records first, as the first step of
+  # the trim, so the logical end is the disk end by the time anything is removed. When the cut fails, the count is
+  # the logical end minus what the directory still holds, read without writing to it. Two exceptions: a directory
+  # with no segment files left counts every record from the segment's base (all of them are gone), and a directory
+  # that cannot be read counts nothing and says so in a warning.
+  defp trim_copy(state, segment_id, log, target, held, base_offset) do
+    if cut?(target, held),
+      do: cut_copy(state, segment_id, log, target, held, base_offset),
+      else: untouched_trim(state, segment_id, log, target, held)
+  end
+
+  # A trim that changes nothing (the plain fence, or a target at or past the end) removes nothing and is not measured.
+  defp cut?(:whole, _held), do: false
+  defp cut?(target, held), do: target < held
+
+  defp untouched_trim(state, segment_id, log, target, held) do
+    case run_trim(state, segment_id, log, target) do
+      {:ok, state, log} ->
+        report_trim(segment_id, max(held - log.next_offset, 0))
+        {:ok, state, log}
+
+      {:error, reason, state} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp cut_copy(state, segment_id, log, target, held, base_offset) do
+    # A flush that fails removes nothing, so nothing is counted: the error is the answer.
+    case run_log(state, segment_id, log, &Log.sync/1) do
+      {:ok, state, log} ->
+        case run_trim(state, segment_id, log, target) do
+          {:ok, state, log} ->
+            report_trim(segment_id, max(held - log.next_offset, 0))
+            {:ok, state, log}
+
+          # A refusal removes nothing, so there is nothing to count.
+          {:error, :below_base_offset, state} ->
+            {:error, :below_base_offset, state}
+
+          {:error, reason, state} ->
+            report_trim(segment_id, removed_by_failed_cut(segment_id, held, base_offset, log))
+            {:error, reason, state}
+        end
+
+      {:error, reason, state} ->
+        {:error, reason, state}
+    end
+  end
+
+  # What the directory still holds decides what the cut removed. Nothing left at all means every record is gone.
+  defp removed_by_failed_cut(segment_id, held, base_offset, log) do
+    case remaining_end(log) do
+      {:ok, :none} ->
+        held - base_offset
+
+      {:ok, remaining} ->
+        max(held - remaining, 0)
+
+      {:error, reason} ->
+        Logger.warning(
+          I18n.t(:replication_trim_count_unknown, segment_id: inspect(segment_id), reason: inspect(reason))
+        )
+
+        0
+    end
+  end
+
+  # The end the directory still holds: the first record on disk plus the records it counts, or `:none` when no
+  # segment file is left. `first` is read from the directory, so it is the origin whatever the caller passed; the
+  # caller's `base_offset` is used only when no segment file is left, to count from the segment's first record.
+  # This reads the directory on the failure path only, inside the server process, so its cost grows with the
+  # segment's size: a documented limit, not a bound.
+  defp remaining_end(log) do
+    opts = [store: log.store] ++ log.segment_opts
+
+    case Log.segment_offsets(log.directory) do
+      {:ok, []} ->
+        {:ok, :none}
+
+      {:ok, [first | _]} ->
+        case Log.verify(log.directory, opts) do
+          {:ok, %{records: records}} -> {:ok, first + records}
+          # With files found above, an :enoent here means the directory became unreadable, or a segment was removed
+          # mid-read by retention. Both are unknowable from here, so both count zero with a warning.
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -1468,10 +1707,37 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   # Trimming is run through `run_log/4` like every other whole-log operation, so a copy whose device
   # will not give the bytes up is failed here rather than half-truncated and left in service. A caller
-  # error is kept out of that path deliberately: `seal_at/5` rejects a target below the base offset
-  # before this is ever reached.
-  defp trim_to(log, :whole), do: {:ok, log}
-  defp trim_to(log, end_offset), do: Log.truncate_to(log, end_offset)
+  # error is kept out of that path deliberately: `seal_at/5` rejects a target below the caller's base offset
+  # before this is ever reached. A target below the log's real base is the log's refusal, handled in `run_trim/4`.
+  # A cut below the segment's first record is the caller's wrong number, not a failing copy: the log refuses it
+  # after the flush every cut starts with, writes nothing itself, and the copy stays in service: the caller hears the
+  # refusal.
+  defp run_trim(state, segment_id, log, :whole), do: {:ok, put_log(state, segment_id, log), log}
+
+  defp run_trim(state, segment_id, log, end_offset) do
+    case Log.truncate_to(log, end_offset) do
+      {:ok, log} ->
+        {:ok, put_log(state, segment_id, log), log}
+
+      {:error, :below_base_offset} ->
+        {:error, :below_base_offset, state}
+
+      # An unreadable directory is not the caller's number and not a failed copy: it answers its reason, and the copy
+      # stays in service, as opening it does.
+      {:error, {:segments_unreadable, _reason} = reason} ->
+        {:error, reason, state}
+
+      # The cut has changed the disk, so the cached log is stale. An unreadable reopen is not latched, and it leaves
+      # the cache so the next request opens the segment again; any other reopen failure is a storage fault.
+      {:error, {:reopen_after_cut, reason}} ->
+        if unreadable?(reason),
+          do: {:error, reason, forget_log(state, segment_id)},
+          else: {:error, {:storage, reason}, fail_segment(state, segment_id, reason)}
+
+      {:error, reason} ->
+        {:error, {:storage, reason}, fail_segment(state, segment_id, reason)}
+    end
+  end
 
   defp notify_seal({pid, tag}, reply), do: send(pid, {:seal_result, tag, reply})
 
@@ -1518,7 +1784,7 @@ defmodule Malachi.Cluster.ReplicationServer do
     end
   end
 
-  # A directory or seal marker that cannot be listed or stat'ed is refused, and never latched: it may come back by the
+  # A read that cannot list or stat a directory or seal marker is refused, and never latched: it may come back by the
   # next request. Every other open failure is a finding about the bytes, a failed fsync included, and latches at once:
   # the copy is taken out of service, and the heal path seals the segment away from its replicas.
   defp open_failed(state, segment_id, reason) do
@@ -1652,9 +1918,24 @@ defmodule Malachi.Cluster.ReplicationServer do
 
   defp put_log(state, segment_id, log), do: put_in(state.logs[segment_id], log)
 
+  # A cached log whose cut changed the disk but could not be reopened has a closed handle, so it leaves the cache.
+  # Nothing is latched: the next request opens the segment again and answers with what it finds.
+  defp forget_log(state, segment_id) do
+    case Map.pop(state.logs, segment_id) do
+      {nil, _logs} ->
+        state
+
+      {log, logs} ->
+        _ = Log.close(log)
+        %{state | logs: logs}
+    end
+  end
+
   # The on-disk mapping lives in Malachi.Storage.Layout: the scrubber reads the same directories to
   # verify their checksums, and a second copy of this rule could drift from the writer's.
   defp segment_directory(base, segment_id), do: Layout.segment_directory(base, segment_id)
+
+  defp settled_marker_path(directory), do: Path.join(directory, "SETTLED")
 
   # A single path segment that is not a parent reference. Mirrors the defense in
   # `Malachi.Storage.Layout`, at the other end of the same path.

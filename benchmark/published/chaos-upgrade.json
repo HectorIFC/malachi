@@ -1,56 +1,57 @@
 {
   "meta": {
-    "timestamp": "2026-10-21T09:24:33Z",
+    "timestamp": "2026-10-28T10:32:28Z",
     "command": "scripts/docker-upgrade-chaos.sh",
-    "git_ref": "d22f770",
-    "git_ref_date": "2026-10-20T09:24:03Z",
-    "malachi_version": "0.22.0",
+    "git_ref": "dfdf734",
+    "git_ref_date": "2026-10-28T00:44:29Z",
+    "malachi_version": "0.22.4",
     "hardware": {
       "cpu": "x86_64",
       "cores": 4,
-      "os": "Linux 7.0.0-1017-azure"
+      "os": "Linux 6.17.0-1022-azure"
     }
   },
   "certification": "UPGRADE AND ROLLBACK CERTIFICATION",
   "verdict": "failed",
   "replication_factor": 3,
   "events": [
-    "p1: rolling every node from OLD to NEW (pin 5)",
+    "p1: rolling every node from OLD to NEW (pin 7)",
     "p1: mixed cluster (node 3 on NEW, nodes 1 and 2 on OLD)",
     "p1: splitting the metadata ring from 4 to 5 vnodes on NEW",
-    "p2: rolling every node from NEW back to OLD (pin 5)",
-    "p3: rolling every node from OLD to NEW (pin 5)",
+    "p2: rolling every node from NEW back to OLD (pin 7)",
+    "p3: rolling every node from OLD to NEW (pin 7)",
     "p3: finalizing: the pin removed node by node",
     "p3: switching the canary flag on",
     "p3: node 3 started on OLD after the flip must refuse its data directory"
   ],
   "invariants": {
-    "acked_writes": 50594,
-    "post_chaos_records_per_s": 18157
+    "acked_writes": 54152,
+    "post_chaos_records_per_s": 19183
   },
   "failures": [
-    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 1954)",
-    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 4700)",
+    "no produce was acknowledged through p3: node 3 without the pin, while malachi3 was down (stuck at 2024)",
+    "no produce was acknowledged through the refused rollback of node 3 (quorum on 2/3) (stuck at 4581)",
     "nodes 1 and 2 did not serve a clean produce while node 3 was down",
-    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 4700)"
+    "no produce was acknowledged through p3: node 3 back on NEW, while malachi3 was down (stuck at 4581)",
+    "a process crashed during the upgrade (see the logs above)"
   ],
-  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261021T085035Z-d22f770",
+  "evidence_dir": "/home/runner/work/_temp/chaos/evidence/20261028T095845Z-dfdf734",
   "details": {
-    "old_ref": "v0.21.1",
-    "old_rule": "the newest release whose code differs from this tree, which is release v0.22.0's",
-    "old_sha": "99f7289ac17af7d9a99f4c994f39c1e269b833f5",
-    "old_version": "0.21.1",
-    "old_machine_version": 5,
+    "old_ref": "v0.22.3",
+    "old_rule": "the newest release whose code differs from this tree, which is release v0.22.4's",
+    "old_sha": "cfa18918ea4278ab94051ee20dfbade7ab68c3c6",
+    "old_version": "0.22.3",
+    "old_machine_version": 7,
     "old_patch": null,
     "new_patch": null,
     "negative_control": false,
     "acked_writes_by_phase": {
-      "phase1": 18895,
-      "phase2": 12926,
-      "phase3": 18773
+      "phase1": 18983,
+      "phase2": 13431,
+      "phase3": 21738
     },
     "vnodes": 4,
-    "vnode_rule": "sharded: v0.21.1 resumes its vnode members after a restart",
+    "vnode_rule": "sharded: v0.22.3 resumes its vnode members after a restart",
     "vnodes_after_split": 5
   }
 }
