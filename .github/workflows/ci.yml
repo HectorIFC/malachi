@@ -522,7 +522,9 @@ jobs:
   landing-page:
     name: Landing page checks
     runs-on: ubuntu-latest
-    needs: test
+    # quality uploads the artifact this job downloads, so it must finish first. Without it the download can run
+    # before the upload, and a quality failure before the upload would hide its real cause behind a download error.
+    needs: [test, quality]
 
     steps:
       - name: 📥 Checkout code
