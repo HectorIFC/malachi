@@ -18,41 +18,58 @@ function report(name, ok, detail = "") {
   if (!ok) failures.push(name);
 }
 
+// Shared CI runners make a single Lighthouse run noisy: the same page measured 0 and 1,270 ms of blocking time on
+// different runs. Each category is the median of RUNS runs, and the diagnostic comes from the run that has the median
+// performance score.
+const RUNS = 3;
+
+const categories = ["performance", "accessibility", "best-practices", "seo"];
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function printDiagnostics(lhr) {
+  for (const id of ["first-contentful-paint", "largest-contentful-paint", "total-blocking-time", "cumulative-layout-shift", "speed-index"]) {
+    const audit = lhr.audits[id];
+    console.log(`  metric ${id}: ${audit.displayValue ?? audit.numericValue}`);
+  }
+  // Which elements moved, when the layout shift is what lowered the score.
+  const shifts = lhr.audits["layout-shifts"]?.details?.items ?? [];
+  for (const item of shifts.slice(0, 8)) {
+    console.log(`  layout shift ${Number(item.score).toFixed(3)}: ${item.node?.selector ?? "unknown element"}`);
+  }
+  const worst = lhr.categories.performance.auditRefs
+    .filter((ref) => ref.weight > 0 && (lhr.audits[ref.id].score ?? 1) < 0.9)
+    .sort((a, b) => (1 - (lhr.audits[b.id].score ?? 1)) * b.weight - (1 - (lhr.audits[a.id].score ?? 1)) * a.weight)
+    .slice(0, 8);
+  for (const ref of worst) {
+    const audit = lhr.audits[ref.id];
+    console.log(`  audit ${ref.id}: score ${audit.score}, ${audit.displayValue ?? ""}`);
+  }
+}
+
 async function lighthouseScores() {
   const chrome = await chromeLauncher.launch({ chromeFlags: ["--headless=new", "--no-sandbox"] });
+  const runs = [];
   try {
-    const result = await lighthouse(base, {
-      port: chrome.port,
-      output: "json",
-      logLevel: "error",
-      onlyCategories: ["performance", "accessibility", "best-practices", "seo"],
-    });
-    for (const [id, category] of Object.entries(result.lhr.categories)) {
-      const score = Math.round(category.score * 100);
-      report(`lighthouse ${id} >= ${MIN_SCORE}`, score >= MIN_SCORE, `${score}`);
-    }
-    // Below the bar, print what pulled the performance score down, so the next change can be aimed at it.
-    if (Math.round(result.lhr.categories.performance.score * 100) < MIN_SCORE) {
-      for (const id of ["first-contentful-paint", "largest-contentful-paint", "total-blocking-time", "cumulative-layout-shift", "speed-index"]) {
-        const audit = result.lhr.audits[id];
-        console.log(`  metric ${id}: ${audit.displayValue ?? audit.numericValue}`);
-      }
-      // Which elements moved, when the layout shift is what lowered the score.
-      const shifts = result.lhr.audits["layout-shifts"]?.details?.items ?? [];
-      for (const item of shifts.slice(0, 8)) {
-        console.log(`  layout shift ${Number(item.score).toFixed(3)}: ${item.node?.selector ?? "unknown element"}`);
-      }
-      const worst = result.lhr.categories.performance.auditRefs
-        .filter((ref) => ref.weight > 0 && (result.lhr.audits[ref.id].score ?? 1) < 0.9)
-        .sort((a, b) => (1 - (result.lhr.audits[b.id].score ?? 1)) * b.weight - (1 - (result.lhr.audits[a.id].score ?? 1)) * a.weight)
-        .slice(0, 8);
-      for (const ref of worst) {
-        const audit = result.lhr.audits[ref.id];
-        console.log(`  audit ${ref.id}: score ${audit.score}, ${audit.displayValue ?? ""}`);
-      }
+    for (let i = 0; i < RUNS; i++) {
+      runs.push(await lighthouse(base, { port: chrome.port, output: "json", logLevel: "error", onlyCategories: categories }));
     }
   } finally {
     await chrome.kill();
+  }
+
+  const perRun = (id) => runs.map((r) => Math.round(r.lhr.categories[id].score * 100));
+  const scores = Object.fromEntries(categories.map((id) => [id, Math.round(median(runs.map((r) => r.lhr.categories[id].score)) * 100)]));
+  for (const id of categories) {
+    report(`lighthouse ${id} >= ${MIN_SCORE}`, scores[id] >= MIN_SCORE, `${scores[id]} (median of ${RUNS}: ${perRun(id).join(", ")})`);
+  }
+
+  if (scores.performance < MIN_SCORE) {
+    const middle = runs.find((r) => Math.round(r.lhr.categories.performance.score * 100) === scores.performance) ?? runs[0];
+    printDiagnostics(middle.lhr);
   }
 }
 
