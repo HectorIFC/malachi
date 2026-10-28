@@ -5,9 +5,7 @@ defmodule Malachi.BrokerServerTest do
   import Malachi.Test.TeardownHelper
 
   alias Malachi.Broker
-  alias Malachi.Broker.Skip
   alias Malachi.BrokerServer
-  alias Malachi.BrokerServer.Subscribers
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.ReplicatedDSRSM
@@ -16,9 +14,7 @@ defmodule Malachi.BrokerServerTest do
   alias Malachi.ConsumeStreams
   alias Malachi.Log.Record
   alias Malachi.Metadata
-  alias Malachi.Retention.SkipReporter
   alias Malachi.Test.ReadBack
-  alias Malachi.Test.StreamPush
   alias Malachi.Test.TmpDir
   alias Malachi.Test.UnfenceablePrimary
   alias Malachi.Test.UnknownMessages
@@ -56,27 +52,6 @@ defmodule Malachi.BrokerServerTest do
       :eof -> accumulated |> Enum.reverse() |> List.flatten()
       {:ok, records} -> read_all(server, range_id, offset + length(records), [records | accumulated])
     end
-  end
-
-  # Deterministically wait until `count` long-poll waiters are parked (avoids sleep-based flakiness).
-  defp wait_for_park(server, count \\ 1, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
-
-    cond do
-      length(:sys.get_state(server).waiters) >= count -> :ok
-      System.monotonic_time(:millisecond) > deadline -> flunk("expected #{count} parked waiter(s)")
-      true -> Process.sleep(2) && wait_for_park(server, count, deadline)
-    end
-  end
-
-  # Answers the parked waiter of `topic` through its own timeout path, now, instead of waiting for its
-  # timer. A test that asserts a waiter is still parked after a produce used to give it a short timer and
-  # race it: on a loaded runner the produce outlasted the timer and the waiter was gone before the
-  # assertion. With a long timer and this, what is tested (the timeout answers, empty, with its skips)
-  # does not depend on how long the produce took.
-  defp fire_longpoll_timeout(server, topic) do
-    [waiter] = Enum.filter(:sys.get_state(server).waiters, &(&1.topic == topic))
-    send(server, {:longpoll_timeout, waiter.ref})
   end
 
   describe "the broker set refresh" do
@@ -126,225 +101,6 @@ defmodule Malachi.BrokerServerTest do
       on_exit(fn -> stop_quietly(broker) end)
       send(broker, :refresh_brokers)
       assert :sys.get_state(broker).broker.broker_attributes == %{repl => %{"rack" => "r1"}}
-    end
-  end
-
-  describe "long-poll consume" do
-    test "consume returns immediately when wait_ms is 0", %{tmp_dir: directory} do
-      {server, _root} = with_topic(directory)
-      assert {[], _positions, []} = BrokerServer.consume(server, "events", %{}, 100, 0)
-    end
-
-    test "consume with wait blocks until a produce wakes it", %{tmp_dir: directory} do
-      {server, _root} = with_topic(directory)
-
-      task = Task.async(fn -> BrokerServer.consume(server, "events", %{}, 100, 5_000) end)
-      wait_for_park(server)
-
-      {:ok, _placements} = BrokerServer.produce(server, "events", [record("a", "k0")])
-
-      assert {records, _positions, []} = Task.await(task)
-      assert Enum.map(records, & &1.value) == ["a"]
-    end
-
-    test "consume with wait returns empty after the timeout when nothing is produced", %{tmp_dir: directory} do
-      {server, _root} = with_topic(directory)
-      assert {[], _positions, []} = BrokerServer.consume(server, "events", %{}, 100, 50)
-    end
-
-    test "a produce wakes only waiters on the produced topic", %{tmp_dir: directory} do
-      server = start(directory)
-      {:ok, _} = BrokerServer.create_topic(server, "events", 4)
-      {:ok, _} = BrokerServer.create_topic(server, "other", 4)
-
-      events_task = Task.async(fn -> BrokerServer.consume(server, "events", %{}, 100, 5_000) end)
-      other_task = Task.async(fn -> BrokerServer.consume(server, "other", %{}, 100, 5_000) end)
-      wait_for_park(server, 2)
-
-      {:ok, _} = BrokerServer.produce(server, "events", [record("a", "k0")])
-
-      # the events waiter wakes with data; the other waiter is untouched and times out empty
-      assert {[%{value: "a"}], _, []} = Task.await(events_task)
-      assert [%{topic: "other"}] = :sys.get_state(server).waiters
-      fire_longpoll_timeout(server, "other")
-      assert {[], _, []} = Task.await(other_task, 1_000)
-    end
-  end
-
-  describe "skipped data on the delivery paths" do
-    # A named broker over one-record segments, its skip reporter beside it, and a telemetry handler that
-    # forwards only this broker's topic (the file runs async, and other tests emit too).
-    defp skipping_broker(directory) do
-      topic = "skips_#{System.unique_integer([:positive])}"
-      name = :"skip_broker_#{System.unique_integer([:positive])}"
-      start_supervised!({SkipReporter, name: SkipReporter.name_for(name)})
-
-      server = start(directory, name: name, segment_max_bytes: Record.encoded_size(record("v0", "k0")))
-      {:ok, root_id} = BrokerServer.create_topic(server, topic, 4)
-
-      parent = self()
-      handler_id = "skips-#{topic}"
-
-      :telemetry.attach(
-        handler_id,
-        [:malachi, :retention, :skip],
-        fn _event, measurements, metadata, _config ->
-          if metadata.topic == topic, do: send(parent, {:skip_event, measurements, metadata})
-        end,
-        nil
-      )
-
-      on_exit(fn -> :telemetry.detach(handler_id) end)
-      {server, topic, root_id}
-    end
-
-    defp produce_sealed(server, topic, root_id, values) do
-      for value <- values, do: {:ok, _placements} = BrokerServer.produce(server, topic, [record(value, value)])
-      wait_until!(fn -> Enum.all?(segments(server, root_id), &(&1.state == :sealed)) end)
-    end
-
-    defp segments(server, root_id), do: server |> BrokerServer.metadata() |> Metadata.segments_of_range(root_id)
-
-    defp expire(server, root_id, starts) do
-      for segment <- segments(server, root_id), segment.start_offset in starts do
-        :ok = BrokerServer.delete_segment(server, segment.id)
-      end
-    end
-
-    test "a consume hands back the skips of the page it delivered", %{tmp_dir: directory} do
-      {server, topic, root_id} = skipping_broker(directory)
-      produce_sealed(server, topic, root_id, ["v0", "v1", "v2"])
-      expire(server, root_id, [0])
-
-      assert {records, %{^root_id => {0, 3}}, [skip]} =
-               BrokerServer.consume(server, topic, %{root_id => {0, 0}}, 100, 0)
-
-      assert Enum.map(records, & &1.value) == ["v1", "v2"]
-      assert %Skip{range_id: ^root_id, from: 0, offsets: 1, origin: :cursor} = skip
-
-      # The fetch path does not attribute or report: that is the consumer layer's job.
-      refute_receive {:skip_event, _measurements, _metadata}
-    end
-
-    test "a long-poll parked at an expired position reports its skip on the wake that delivers",
-         %{tmp_dir: directory} do
-      {server, topic, root_id} = skipping_broker(directory)
-      produce_sealed(server, topic, root_id, ["v0", "v1", "v2"])
-      expire(server, root_id, [0, 1, 2])
-
-      # Nothing is stored, so there is no floor to clamp to: the waiter parks with its position.
-      task = Task.async(fn -> BrokerServer.consume(server, topic, %{root_id => {0, 0}}, 100, 5_000) end)
-      wait_for_park(server)
-
-      {:ok, _placements} = BrokerServer.produce(server, topic, [record("v3", "v3")])
-
-      assert {[%{value: "v3"}], %{^root_id => {0, 4}}, [skip]} = Task.await(task)
-      assert %Skip{from: 0, offsets: 3} = skip
-    end
-
-    test "a wake that finds nothing in the waiter's own ranges keeps it parked", %{tmp_dir: directory} do
-      # A member scoped to one child range is woken by a produce to the topic that routed to the other
-      # child: its re-read is empty, so it stays parked and its own timeout answers, with no skips.
-      {server, topic, root_id} = skipping_broker(directory)
-      {:ok, left_id, right_id} = BrokerServer.split_range(server, root_id)
-      right = server |> BrokerServer.metadata() |> Metadata.get_range(right_id)
-
-      key =
-        Enum.find_value(0..1_000, fn i ->
-          key = "k#{i}"
-          position = Malachi.Keyspace.position_of(key, right.keyspace_size)
-          if Malachi.Keyspace.within?(position, right.key_start, right.key_end), do: key
-        end)
-
-      task = Task.async(fn -> BrokerServer.consume(server, topic, %{}, 100, 5_000, [left_id]) end)
-      wait_for_park(server)
-      {:ok, _placements} = BrokerServer.produce(server, topic, [record("v", key)])
-
-      # Still parked after the produce's wake pass, then answered empty by its own timeout.
-      assert length(:sys.get_state(server).waiters) == 1
-      fire_longpoll_timeout(server, topic)
-      assert {[], %{}, []} = Task.await(task, 1_000)
-    end
-
-    # A child whose ancestor has no segment left: consuming it moves the cursor to the child's own
-    # source and reports the whole ancestor, with no record to deliver. The shape every delivery path
-    # used to throw away.
-    defp child_with_expired_ancestor(directory) do
-      {server, topic, root_id} = skipping_broker(directory)
-      produce_sealed(server, topic, root_id, ["v0", "v1", "v2"])
-      {:ok, left_id, _right_id} = BrokerServer.split_range(server, root_id)
-      expire(server, root_id, [0, 1, 2])
-      {server, topic, left_id}
-    end
-
-    test "a long poll parks on the progress a skip-only page made, and hands it back on the timeout",
-         %{tmp_dir: directory} do
-      # Parking on the ORIGINAL position would rescan the dead ancestor on every wake and never report
-      # what the reader lost until the range gets traffic again.
-      {server, topic, left_id} = child_with_expired_ancestor(directory)
-
-      # Scoped to one child, so the page is exactly one range's worth of progress.
-      task = Task.async(fn -> BrokerServer.consume(server, topic, %{left_id => {0, 0}}, 100, 5_000, [left_id]) end)
-      wait_for_park(server)
-      assert [%{positions: %{^left_id => {1, 0}}, skips: [%Skip{offsets: 3}]}] = :sys.get_state(server).waiters
-      fire_longpoll_timeout(server, topic)
-
-      assert {[], %{^left_id => {1, 0}}, [%Skip{source: :ancestor, offsets: 3}]} = Task.await(task, 1_000)
-    end
-
-    test "a wake delivers the skips the parked page had already found", %{tmp_dir: directory} do
-      {server, topic, left_id} = child_with_expired_ancestor(directory)
-
-      task = Task.async(fn -> BrokerServer.consume(server, topic, %{left_id => {0, 0}}, 100, 5_000, [left_id]) end)
-      wait_for_park(server)
-      # A key of the left child, so the produce wakes this waiter with a record of its own range.
-      left = server |> BrokerServer.metadata() |> Metadata.get_range(left_id)
-
-      key =
-        Enum.find_value(0..1_000, fn i ->
-          key = "k#{i}"
-          position = Malachi.Keyspace.position_of(key, left.keyspace_size)
-          if Malachi.Keyspace.within?(position, left.key_start, left.key_end), do: key
-        end)
-
-      {:ok, _placements} = BrokerServer.produce(server, topic, [record("v3", key)])
-
-      assert {records, _positions, [%Skip{source: :ancestor, offsets: 3}]} = Task.await(task, 1_000)
-      assert Enum.map(records, & &1.value) == ["v3"]
-    end
-
-    test "a push reports a skip-only page and keeps the position, without pushing an empty batch",
-         %{tmp_dir: directory} do
-      {server, topic, left_id} = child_with_expired_ancestor(directory)
-      :ok = BrokerServer.commit_offset(server, "billing", topic, %{left_id => {0, 0}})
-
-      :ok = BrokerServer.subscribe(server, topic, "billing", 100, 100)
-
-      # The read moves past the dead ancestor and delivers nothing: no empty batch is handed back.
-      assert StreamPush.drain() == []
-      assert_receive {:skip_event, %{offsets: 3}, %{group: "billing", span: :upper_bound}}
-
-      # The subscriber moved past the dead ancestor, so the next push does not scan it again.
-      assert [%{positions: %{^left_id => {1, 0}}}] = Subscribers.list(:sys.get_state(server).subscribers, topic)
-    end
-
-    test "a long-poll that times out hands back no skips", %{tmp_dir: directory} do
-      {server, topic, root_id} = skipping_broker(directory)
-      produce_sealed(server, topic, root_id, ["v0"])
-
-      assert {[], %{^root_id => {0, 1}}, []} = BrokerServer.consume(server, topic, %{root_id => {0, 1}}, 100, 30)
-    end
-
-    test "a push reports the skip it delivered, attributed to the subscriber's group", %{tmp_dir: directory} do
-      {server, topic, root_id} = skipping_broker(directory)
-      produce_sealed(server, topic, root_id, ["v0", "v1", "v2"])
-      expire(server, root_id, [0, 1])
-      :ok = BrokerServer.commit_offset(server, "billing", topic, %{root_id => {0, 0}})
-
-      :ok = BrokerServer.subscribe(server, topic, "billing", 100, 100)
-
-      assert {:log_records, ^topic, [%{value: "v2"}], _positions} = StreamPush.recv()
-      assert_receive {:skip_event, %{count: 1, offsets: 2}, %{group: "billing", origin: :cursor, span: :exact}}
     end
   end
 

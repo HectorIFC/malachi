@@ -3,7 +3,7 @@ defmodule Malachi.AclEnforcementTest do
   use ExUnit.Case, async: false
 
   alias Malachi.Auth
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.StreamTCP
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
@@ -94,7 +94,7 @@ defmodule Malachi.AclEnforcementTest do
     end
 
     test "a consume ACL gates both reading keys independently of produce" do
-      :ok = StreamsOn.setup(%{})
+      :ok = RouterTopology.clear()
       Application.put_env(:malachi, :acl_strict, true)
       topic = "feed_#{System.unique_integer([:positive])}"
       {_admin, admin} = connect_as([:admin])

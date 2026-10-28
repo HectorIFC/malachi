@@ -1,10 +1,10 @@
 defmodule Malachi.RoutingKeysTest do
   # The routing keys through the protocol boundary (`Malachi.TCPProtocol.process_frame/4`), against the
-  # running application: `cluster_state` (24) always answers, and every key from `topic_routes` (25) to
-  # `commit_offsets` (34) waits for the `producer_streams` cluster flag.
+  # running application: `cluster_state` (24) and every key from `topic_routes` (25) to `commit_offsets` (34)
+  # are served whatever the retired `producer_streams` cluster flag says. Each test runs with it off.
   #
-  # async: false. The flag is the application's own cache (`Malachi.Test.ClusterFlagsPause` takes it over),
-  # and the topic routing reads the topology the consumer-group router publishes, which a sharded broker
+  # async: false. The flags are the application's own cache (`Malachi.Test.ClusterFlagsPause` takes it
+  # over), and the topic routing reads the topology the consumer-group router publishes, which a sharded broker
   # started by another test can leave behind: it is cleared for each test and put back afterwards.
   use ExUnit.Case, async: false
 
@@ -18,25 +18,19 @@ defmodule Malachi.RoutingKeysTest do
   alias Malachi.Test.AppChildren
   alias Malachi.Test.ClusterFlagsPause
   alias Malachi.Test.EchoTransport
+  alias Malachi.Test.RouterTopology
   alias Malachi.Wire
 
   @admin %{username: "routing_keys_admin", permissions: [:produce, :consume, :admin]}
-  # mirrors Malachi.Consumer.CoordinatorRouter's private @topology_key
-  @router_topology {Malachi.Consumer.CoordinatorRouter, :topology}
 
   setup do
     :ok = ClusterFlagsPause.pause()
     ClusterFlagsCache.put([])
 
-    topology = :persistent_term.get(@router_topology, nil)
-    :persistent_term.erase(@router_topology)
+    :ok = RouterTopology.clear()
     acl_strict = Application.get_env(:malachi, :acl_strict)
 
     on_exit(fn ->
-      if topology,
-        do: :persistent_term.put(@router_topology, topology),
-        else: :persistent_term.erase(@router_topology)
-
       if acl_strict == nil,
         do: Application.delete_env(:malachi, :acl_strict),
         else: Application.put_env(:malachi, :acl_strict, acl_strict)
@@ -45,8 +39,6 @@ defmodule Malachi.RoutingKeysTest do
     Application.put_env(:malachi, :acl_strict, false)
     :ok
   end
-
-  defp streams_on, do: ClusterFlagsCache.put([Routing.flag()])
 
   defp process(api_key, payload, session \\ @admin, wait \\ 2_000) do
     {:ok, body, <<>>} = api_key |> Wire.encode_request(7, payload) |> Wire.decode_frame()
@@ -74,11 +66,11 @@ defmodule Malachi.RoutingKeysTest do
   end
 
   describe "cluster_state" do
-    test "answers with the flag off, naming this node at the address its listener took" do
+    test "says the stream keys are served with the flag off, naming this node at the address its listener took" do
       assert {:ok, payload} = process(Wire.cluster_state_key(), Wire.encode_cluster_state_req())
       state = Wire.decode_cluster_state_resp(payload)
 
-      assert state.streams_enabled == false
+      assert state.streams_enabled == true
       assert state.vnodes != []
       me = Enum.find(state.brokers, &(&1.id == Atom.to_string(node())))
       assert %{status: :alive, port: port, host: host} = me
@@ -87,13 +79,12 @@ defmodule Malachi.RoutingKeysTest do
       assert {:ok, ^state} = Routing.read_cluster_state()
     end
 
-    test "says when the stream keys are on, and its version moves with that" do
+    test "the retired flag changes nothing in the answer, its version included" do
       {:ok, off} = process(Wire.cluster_state_key(), <<>>)
-      streams_on()
+      ClusterFlagsCache.put([:producer_streams])
       {:ok, on} = process(Wire.cluster_state_key(), <<>>)
 
-      assert Wire.decode_cluster_state_resp(on).streams_enabled
-      refute Wire.decode_cluster_state_resp(on).version == Wire.decode_cluster_state_resp(off).version
+      assert Wire.decode_cluster_state_resp(on) == Wire.decode_cluster_state_resp(off)
     end
 
     test "a membership server that is not running (between a crash and its restart) makes the answer unavailable" do
@@ -157,19 +148,18 @@ defmodule Malachi.RoutingKeysTest do
   end
 
   describe "with producer_streams off" do
-    test "every key from topic_routes to commit_offsets is unsupported" do
+    test "every key from topic_routes to commit_offsets is served: an empty payload is answered, never unsupported" do
+      # a key that names a stream answers that this connection holds none; every other one decodes its payload
+      stream_keys = [Wire.append_key(), Wire.consume_ack_key(), Wire.close_stream_key()]
+
       for key <- Wire.topic_routes_key()..Wire.commit_offsets_key() do
-        assert process(key, <<>>) == {:error, "unsupported"}, "key #{key}"
+        expected = if key in stream_keys, do: "unknown_stream", else: "malformed_request"
+        assert process(key, <<>>) == {:error, expected}, "key #{key}"
       end
     end
   end
 
-  describe "topic_routes with producer_streams on" do
-    setup do
-      streams_on()
-      :ok
-    end
-
+  describe "topic_routes" do
     test "a new topic is one range over its whole keyspace with no segment until its first record" do
       topic = new_topic()
 

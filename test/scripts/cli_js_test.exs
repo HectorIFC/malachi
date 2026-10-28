@@ -10,7 +10,7 @@ defmodule CliJsTest do
   alias Malachi.Consumer.Assignment
   alias Malachi.DataPlaneRouter
   alias Malachi.TCPAcceptorPool
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
@@ -23,7 +23,7 @@ defmodule CliJsTest do
   end
 
   setup do
-    :ok = StreamsOn.setup(%{})
+    :ok = RouterTopology.clear()
     %{topic: "cli_js_#{System.unique_integer([:positive])}"}
   end
 

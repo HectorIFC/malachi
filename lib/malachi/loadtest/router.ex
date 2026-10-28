@@ -126,7 +126,10 @@ defmodule Malachi.Loadtest.Router do
   @spec forget(t(), String.t()) :: t()
   def forget(%__MODULE__{} = router, topic), do: %{router | topics: Map.delete(router.topics, topic)}
 
-  @doc "Whether the cluster serves the stream keys (the `producer_streams` flag)."
+  @doc """
+  Whether the cluster serves the stream keys, as its `cluster_state` said: always, from a node of a release
+  that always serves them, and only with the `producer_streams` flag on from one before.
+  """
   @spec streams_enabled?(t()) :: boolean()
   def streams_enabled?(%__MODULE__{streams_enabled: enabled}), do: enabled
 

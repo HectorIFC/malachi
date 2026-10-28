@@ -88,7 +88,8 @@ flowchart TD
   acknowledged when a **quorum** has it durably (fsync before counting), so the system tolerates
   ⌊(N-1)/2⌋ slow or failed replicas.
 
-Reads never expose any of this. `Malachi.LogApi.fetch/5` returns records plus the next cursor.
+Reads never expose segments or replicas: a reader names a range and a position in its history, and gets
+back records with the position of each (`fetch_range` and consume streams, see `Malachi.Wire`).
 
 ## Consumer groups
 

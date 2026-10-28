@@ -11,12 +11,12 @@ defmodule Malachi.Wire do
   `correlation_id` lets a client pipeline (match each response to its request). A record on the wire
   (`encode_record/1`) carries no offset, so it is a distinct encoding from `Malachi.Log.Record.encode/1`
   (the on-disk frame, which includes the offset); a consume batch puts each record's position beside it
-  (`Malachi.Wire.Batch`). Keys and cursors are
+  (`Malachi.Wire.Batch`). Keys, topics and names are
   length-prefixed byte strings with a presence flag (`nil` vs empty are distinct). Pure, this module
   only encodes/decodes binaries; the socket wiring is B1b.
 
   `decode_frame/1` is tolerant (returns `:incomplete` for a partial frame), but the payload decoders
-  (`decode_request/1`, `decode_produce_req/1`, …) assume a **well-formed** body and raise on a malformed
+  (`decode_request/1`, `decode_open_stream_req/1`, …) assume a **well-formed** body and raise on a malformed
   one. A frame body comes from an untrusted client, so B1b must decode inside a `try` and answer an error
   (or close) on a raise: keeping the malformed-input handling at the connection boundary, not in the codec.
 
@@ -24,7 +24,8 @@ defmodule Malachi.Wire do
 
   This framing is the compatibility contract with every client: the Node CLI, the Elixir client, and any
   future SDK. Two things are **stable** and must stay so: the byte layout of each frame above, and the
-  `api_key` numbers (currently 0..34, `@auth` through `@commit_offsets`). Clients are compiled against them, so
+  `api_key` numbers (currently 0, 1 and 7 to 34, `@auth` through `@commit_offsets`; 2 to 6 are retired and
+  never reused). Clients are compiled against them, so
   a running cluster and its clients agree on the wire only as long as both hold.
 
   A change is **breaking** (every deployed client must update in lockstep, so it cannot ship in a normal
@@ -68,7 +69,7 @@ defmodule Malachi.Wire do
       the control plane below a generation the range was already committed at through this key.
 
   A server push reuses the response envelope with the correlation id of the request that opened the
-  stream, as a subscribe push always has; its payload starts with a kind byte (`append_ack`, `moved`,
+  stream; its payload starts with a kind byte (`append_ack`, `moved`,
   `records`) and the stream id. Records travel in a batch (`Malachi.Wire.Batch`): a codec byte, the record
   count, the inflated size, and the payload, compressed or not. A range travels as its sequence number
   within the topic, a segment likewise, a position as the index of its source in the range's history (an
@@ -96,11 +97,9 @@ defmodule Malachi.Wire do
   # api keys (request operations)
   @auth 0
   @create_topic 1
-  @produce 2
-  @fetch 3
-  @commit 4
-  @subscribe 5
-  @stream_ack 6
+  # 2 to 6 were the legacy data keys (produce, fetch, commit, subscribe, stream_ack), removed with the
+  # any-node data path: a frame on any of them is answered `unknown_api_key` like any other unknown key.
+  # The numbers stay retired, never reused.
   @leave_group 7
   # admin user management (require the :admin permission, see Malachi.TCPProtocol)
   @create_user 8
@@ -145,17 +144,13 @@ defmodule Malachi.Wire do
   @ok 0
   @error 1
 
-  @type api_key :: 0..34
+  @typedoc "A request operation: 0 and 1, then 7 to 34 (2 to 6 are retired)."
+  @type api_key :: 0..1 | 7..34
   @type error_code :: non_neg_integer()
 
   @spec auth_key() :: api_key()
   def auth_key, do: @auth
   def create_topic_key, do: @create_topic
-  def produce_key, do: @produce
-  def fetch_key, do: @fetch
-  def commit_key, do: @commit
-  def subscribe_key, do: @subscribe
-  def stream_ack_key, do: @stream_ack
   def leave_group_key, do: @leave_group
   def create_user_key, do: @create_user
   def delete_user_key, do: @delete_user
@@ -288,103 +283,6 @@ defmodule Malachi.Wire do
   def decode_create_topic_req(payload) do
     {topic, <<keyspace_bits::8>>} = take_str(payload)
     {topic, keyspace_bits}
-  end
-
-  def encode_produce_req(topic, records),
-    do: <<put_str(topic)::binary, encode_produce_records(records)::binary>>
-
-  @doc """
-  The records half of a produce request (the count, then each record), which does not depend on the
-  topic. A sender that reuses one batch across topics encodes it once with this and joins it to each
-  topic with `encode_produce_req_with/2`; `encode_produce_req(topic, records)` is the same bytes as one
-  binary.
-  """
-  @spec encode_produce_records([Record.t()]) :: binary()
-  def encode_produce_records(records), do: <<length(records)::32, encode_records(records)::binary>>
-
-  @doc """
-  A produce request for `topic` from records already encoded by `encode_produce_records/1`, as iodata, so
-  the records are referenced rather than copied; `encode_request_iodata/3` frames it the same way.
-  """
-  @spec encode_produce_req_with(String.t(), binary()) :: iodata()
-  def encode_produce_req_with(topic, encoded_records), do: [put_str(topic), encoded_records]
-
-  def decode_produce_req(payload) do
-    {topic, <<count::32, rest::binary>>} = take_str(payload)
-    {records, <<>>} = take_records(rest, count, [])
-    {topic, records}
-  end
-
-  # cursor is an opaque byte string (nil = start), group is an optional consumer group (nil = none),
-  # member is an optional consumer-group member id (nil = whole-group / single consumer); max and wait_ms
-  # are the fetch bounds. Precedence: a `member` (grouped, server-scoped to its ranges) wins, then an
-  # explicit `cursor` (client-managed paging), then a `group` resume. No range/offset ever crosses the
-  # wire: the response is always records + an opaque cursor.
-  def encode_fetch_req(topic, cursor, group, member, max, wait_ms) do
-    <<put_str(topic)::binary, put_str(cursor)::binary, put_str(group)::binary, put_str(member)::binary, max::32,
-      wait_ms::32>>
-  end
-
-  def decode_fetch_req(payload) do
-    {topic, rest} = take_str(payload)
-    {cursor, rest} = take_str(rest)
-    {group, rest} = take_str(rest)
-    {member, <<max::32, wait_ms::32>>} = take_str(rest)
-    {topic, cursor, group, member, max, wait_ms}
-  end
-
-  def encode_fetch_resp(records, next_cursor) do
-    <<length(records)::32, encode_records(records)::binary, put_str(next_cursor)::binary>>
-  end
-
-  def decode_fetch_resp(payload) do
-    <<count::32, rest::binary>> = payload
-    {records, rest} = take_records(rest, count, [])
-    {next_cursor, <<>>} = take_str(rest)
-    {records, next_cursor}
-  end
-
-  def encode_commit_req(topic, group, cursor) do
-    <<put_str(topic)::binary, put_str(group)::binary, put_str(cursor)::binary>>
-  end
-
-  def decode_commit_req(payload) do
-    {topic, rest} = take_str(payload)
-    {group, rest} = take_str(rest)
-    {cursor, <<>>} = take_str(rest)
-    {topic, group, cursor}
-  end
-
-  # Streaming: subscribe opens a server-push stream for a consumer `group`, bounded by a credit
-  # `window` (max in-flight records) and a per-push `max` batch size. The server then pushes records as
-  # ordinary success responses tagged with the subscribe's correlation id, each carrying an
-  # `encode_fetch_resp/2` payload (records + the next opaque cursor).
-  # member is an optional consumer-group member id (nil = whole-group subscription); with it set the
-  # server scopes the push stream to the member's ranges (opaque: the push is still records + cursor).
-  def encode_subscribe_req(topic, group, member, window, max) do
-    <<put_str(topic)::binary, put_str(group)::binary, put_str(member)::binary, window::32, max::32>>
-  end
-
-  def decode_subscribe_req(payload) do
-    {topic, rest} = take_str(payload)
-    {group, rest} = take_str(rest)
-    {member, <<window::32, max::32>>} = take_str(rest)
-    {topic, group, member, window, max}
-  end
-
-  # stream_ack durably commits `group`'s position at `cursor` and returns `count` records of window
-  # credit (unblocking further pushes). Fire-and-forget: the server sends no response, the credit shows
-  # up as more pushes.
-  def encode_stream_ack_req(topic, group, member, cursor, count) do
-    <<put_str(topic)::binary, put_str(group)::binary, put_str(member)::binary, put_str(cursor)::binary, count::32>>
-  end
-
-  def decode_stream_ack_req(payload) do
-    {topic, rest} = take_str(payload)
-    {group, rest} = take_str(rest)
-    {member, rest} = take_str(rest)
-    {cursor, <<count::32>>} = take_str(rest)
-    {topic, group, member, cursor, count}
   end
 
   # leave_group removes a member from a consumer group for a fast rebalance on a clean shutdown (otherwise
@@ -680,7 +578,9 @@ defmodule Malachi.Wire do
   @doc """
   The cluster's minimal state (transcript 609 to 613): the brokers with their status and the address each
   advertises to clients (`nil` host and port 0 for one that advertises none), the vnodes that exist, and
-  whether the stream keys are enabled. `version` changes exactly when the rest of the answer does, so a
+  whether the stream keys are served. A node of this build always serves them and says so; the byte stays
+  because a node of a release before it serves them only behind the `producer_streams` cluster flag and
+  says 0 while that is off, which a client rolling across an upgrade still has to read. `version` changes exactly when the rest of the answer does, so a
   client compares two for equality (`Malachi.Routing`).
   """
   @spec encode_cluster_state_resp(map()) :: binary()
@@ -1197,15 +1097,6 @@ defmodule Malachi.Wire do
     {name, rest} = take_str(rest)
     {value, <<origin::8, rest::binary>>} = take_value(rest)
     take_effective(rest, n - 1, [{name, value, key_of(@origins, origin)} | acc])
-  end
-
-  defp encode_records(records), do: records |> Enum.map(&encode_record/1) |> IO.iodata_to_binary()
-
-  defp take_records(rest, 0, acc), do: {Enum.reverse(acc), rest}
-
-  defp take_records(rest, n, acc) do
-    {record, rest} = decode_record(rest)
-    take_records(rest, n - 1, [record | acc])
   end
 
   defp encode_headers(headers) do

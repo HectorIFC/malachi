@@ -213,9 +213,9 @@ as the Node one does. Those three are the difference between a server that is sl
 shedding, and a throughput number taken while any of them is climbing describes the backpressure rather
 than the capacity. A dropped connection is reconnected and the run goes on; the drop is what is counted.
 
-It speaks only the stream keys: a server that does not answer `cluster_state`, or a cluster with the
-`producer_streams` flag off, fails the run before any worker connects, naming why
-(`mix malachi.flag enable producer_streams` turns the flag on). What routing did is in `moved`,
+It speaks only the stream keys: a server that does not answer `cluster_state`, or a cluster of a release
+before they were always served with its `producer_streams` flag off, fails the run before any worker
+connects, naming why (`mix malachi.flag enable producer_streams` turns that flag on). What routing did is in `moved`,
 `redirects` and `route_refreshes`.
 
 A run that completes with `ops: 0` prints a warning naming the likely cause instead of reporting a

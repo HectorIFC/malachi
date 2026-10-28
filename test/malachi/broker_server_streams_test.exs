@@ -32,7 +32,16 @@ defmodule Malachi.BrokerServerStreamsTest do
 
   # One append, waited for: the produce reply and the window scale.
   defp append(server, range_id, records) do
-    reqids = BrokerServer.send_stream_produce(server, range_id, records, :label, :gen_server.reqids_new())
+    reqids =
+      BrokerServer.send_stream_produce(
+        server,
+        range_id,
+        records,
+        :label,
+        :gen_server.reqids_new(),
+        :otel_ctx.get_current()
+      )
+
     {{:reply, reply}, :label, _reqids} = :gen_server.receive_response(reqids, 5_000, true)
     reply
   end
@@ -131,7 +140,7 @@ defmodule Malachi.BrokerServerStreamsTest do
     end
   end
 
-  describe "send_stream_produce/5" do
+  describe "send_stream_produce/6" do
     test "an append is the range's produce, answered with the share of the window its load leaves", %{tmp_dir: dir} do
       {server, root} = with_topic(dir)
 
@@ -164,7 +173,14 @@ defmodule Malachi.BrokerServerStreamsTest do
 
       reqids =
         Enum.reduce(1..2, :gen_server.reqids_new(), fn index, reqids ->
-          BrokerServer.send_stream_produce(server, root, [Record.new("v#{index}", key: "k")], index, reqids)
+          BrokerServer.send_stream_produce(
+            server,
+            root,
+            [Record.new("v#{index}", key: "k")],
+            index,
+            reqids,
+            :otel_ctx.get_current()
+          )
         end)
 
       replies =
@@ -185,7 +201,14 @@ defmodule Malachi.BrokerServerStreamsTest do
 
       # the first append fills the segment, and its answer sends the roll's fence, which is left unanswered
       send_append = fn records, label ->
-        BrokerServer.send_stream_produce(server, root, records, label, :gen_server.reqids_new())
+        BrokerServer.send_stream_produce(
+          server,
+          root,
+          records,
+          label,
+          :gen_server.reqids_new(),
+          :otel_ctx.get_current()
+        )
       end
 
       first = send_append.([Record.new("v0", key: "k")], :first)
@@ -391,7 +414,14 @@ defmodule Malachi.BrokerServerStreamsTest do
 
       # a produce reserves offset 0 and is held before its quorum
       pending =
-        BrokerServer.send_stream_produce(server, root, [Record.new("v", key: "k")], :p, :gen_server.reqids_new())
+        BrokerServer.send_stream_produce(
+          server,
+          root,
+          [Record.new("v", key: "k")],
+          :p,
+          :gen_server.reqids_new(),
+          :otel_ctx.get_current()
+        )
 
       assert_receive {:held, {:replicate_async, _seg, _set, _base, _records, {^server, tag}, _ctx}}
       broker = :sys.get_state(server).broker
@@ -474,12 +504,30 @@ defmodule Malachi.BrokerServerStreamsTest do
           group_commit_max_inflight: 100
         )
 
-      first = BrokerServer.send_stream_produce(server, root, [Record.new("v1", key: "k")], 1, :gen_server.reqids_new())
+      first =
+        BrokerServer.send_stream_produce(
+          server,
+          root,
+          [Record.new("v1", key: "k")],
+          1,
+          :gen_server.reqids_new(),
+          :otel_ctx.get_current()
+        )
+
       PollingHelper.wait_until!(fn -> :sys.get_state(server).pending_records == 1 end)
       # buffered, not flushed: not durable, though its offset is reserved
       assert Broker.durable_end(:sys.get_state(server).broker, root) == 0
 
-      second = BrokerServer.send_stream_produce(server, root, [Record.new("v2", key: "k")], 2, :gen_server.reqids_new())
+      second =
+        BrokerServer.send_stream_produce(
+          server,
+          root,
+          [Record.new("v2", key: "k")],
+          2,
+          :gen_server.reqids_new(),
+          :otel_ctx.get_current()
+        )
+
       {{:reply, {{:ok, _}, _}}, 1, _} = :gen_server.receive_response(first, 5_000, true)
       {{:reply, {{:ok, _}, _}}, 2, _} = :gen_server.receive_response(second, 5_000, true)
       assert Broker.durable_end(:sys.get_state(server).broker, root) == 2

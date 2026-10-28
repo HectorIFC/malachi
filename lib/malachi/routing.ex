@@ -21,7 +21,6 @@ defmodule Malachi.Routing do
   alias Malachi.Application, as: App
   alias Malachi.BrokerServer
   alias Malachi.Cluster.Advertised
-  alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.Cluster.HashRing
   alias Malachi.Cluster.Membership
   alias Malachi.Cluster.MembershipServer
@@ -32,7 +31,6 @@ defmodule Malachi.Routing do
   alias Malachi.TCPAcceptorPool
   alias Malachi.Wire
 
-  @flag :producer_streams
   @membership Malachi.LogMembership
   @read_timeout 2_000
   # What a route read projects out of a vnode's state inside the leader: every topic, range and segment the
@@ -45,17 +43,14 @@ defmodule Malachi.Routing do
   @typedoc "A member as the membership view holds it."
   @type member :: {node(), Membership.status(), map()}
 
-  @doc "The cluster flag (and capability) that switches the stream keys on."
-  @spec flag() :: :producer_streams
-  def flag, do: @flag
-
   @doc """
-  The cluster state from `members` and the ring's vnode tokens, with whether the stream keys are on.
+  The cluster state from `members` and the ring's vnode tokens. It says the stream keys are on: this build
+  always serves them (`Malachi.Wire.encode_cluster_state_resp/1` says why the answer still carries it).
   Brokers are ordered by id; one advertising no address (a node on an older build) has a nil host and
   port 0.
   """
-  @spec cluster_state([member()], [non_neg_integer()], boolean()) :: map()
-  def cluster_state(members, vnode_tokens, streams_enabled) do
+  @spec cluster_state([member()], [non_neg_integer()]) :: map()
+  def cluster_state(members, vnode_tokens) do
     brokers =
       members
       |> Enum.map(fn {node_name, status, attributes} -> broker(node_name, status, Advertised.of(attributes)) end)
@@ -64,7 +59,7 @@ defmodule Malachi.Routing do
     vnodes = Enum.sort(vnode_tokens)
 
     with_version(
-      %{streams_enabled: streams_enabled, brokers: brokers, vnodes: vnodes},
+      %{streams_enabled: true, brokers: brokers, vnodes: vnodes},
       &Wire.encode_cluster_state_resp/1
     )
   end
@@ -94,8 +89,8 @@ defmodule Malachi.Routing do
   end
 
   @doc """
-  The cluster state as this node sees it: the members of its membership view, the vnode tokens of the
-  ring it adopted and whether `flag/0` is on. `{:error, :unavailable}` when the membership server does
+  The cluster state as this node sees it: the members of its membership view and the vnode tokens of the
+  ring it adopted. `{:error, :unavailable}` when the membership server does
   not answer in time, or is not running (between a crash and its restart). A node with no control plane
   (measured in memory) is its own whole cluster: itself and one vnode at token 0.
   """
@@ -103,11 +98,11 @@ defmodule Malachi.Routing do
   def read_cluster_state do
     if Application.get_env(:malachi, :log_cluster) do
       with {:ok, members} <- members(), {:ok, tokens} <- vnode_tokens() do
-        {:ok, cluster_state(members, tokens, ClusterFlagsCache.enabled?(@flag))}
+        {:ok, cluster_state(members, tokens)}
       end
     else
       # No control plane (a single node measured in memory): its own whole cluster.
-      {:ok, cluster_state([{node(), :alive, App.membership_attributes()}], [0], ClusterFlagsCache.enabled?(@flag))}
+      {:ok, cluster_state([{node(), :alive, App.membership_attributes()}], [0])}
     end
   end
 

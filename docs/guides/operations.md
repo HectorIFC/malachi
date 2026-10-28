@@ -704,7 +704,7 @@ The flags this build knows:
 
 | flag | switches on |
 |---|---|
-| `producer_streams` | `topic_routes` (`Malachi.Wire` 25), producer streams (`open_stream`, `append`, `close_stream`, 26 to 28) consume streams with the unary range read (`open_consume`, `consume_ack`, `fetch_range`, 29 to 31) and group membership with checkpoints (`join_group`, `group_heartbeat`, `commit_offsets`, 32 to 34). Until it is on, keys 25 to 34 answer `unsupported`; the group keys also answer `unsupported` until the control plane reaches machine version 8, which removing `MALACHI_RA_MACHINE_VERSION` finalizes. `cluster_state` (24) says whether it is on |
+| `producer_streams` | nothing: retired. It switched on the routing, stream and group keys (`Malachi.Wire` 25 to 34) in the releases before they were always served. This build serves them whether it is on or not, and still advertises it, so a cluster that switched it on keeps booting this build. The group keys answer `unsupported` until the control plane reaches machine version 8, which removing `MALACHI_RA_MACHINE_VERSION` finalizes |
 
 Two things follow from a flag being permanent:
 

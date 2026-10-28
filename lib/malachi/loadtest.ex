@@ -8,9 +8,9 @@ defmodule Malachi.Loadtest do
   routing client (`Malachi.Loadtest.Producer`), a `stream` connection a consumer
   (`Malachi.Loadtest.Consumer`) and a `fetch` connection a fetcher (`Malachi.Loadtest.Fetcher`). The
   setup reads the cluster state first, on the setup connection, and fails with a `SetupError` when the
-  server does not answer it or the cluster does not serve the stream keys (the `producer_streams` flag
-  off); it never falls back to other keys. The `user` and `acl` scenarios are one authenticated
-  connection each, in a closed loop.
+  server does not answer it or the cluster does not serve the stream keys (a release before they were
+  always served, with the `producer_streams` flag off); it never falls back to other keys. The `user` and
+  `acl` scenarios are one authenticated connection each, in a closed loop.
 
   `run/1` is the entry point (the `mix malachi.loadtest` task is a thin wrapper). Metrics are collected
   lock-free: an `:counters` array for ops/records/errors plus backpressure events (dropped connections,
@@ -258,7 +258,8 @@ defmodule Malachi.Loadtest do
 
   # The cluster state, read once, on the setup connection, before any worker starts: the router every
   # worker starts from. A node that does not answer it, or a cluster that does not serve the stream keys
-  # (the `producer_streams` flag off), fails the setup here, naming why: the generator speaks no other keys.
+  # (one of a release before they were always served, with the `producer_streams` flag off), fails the
+  # setup here, naming why: the generator speaks no other keys.
   defp read_cluster(cfg, admin) do
     conn_opts = conn_opts_for(cfg, 0)
     router = Router.new({Keyword.fetch!(conn_opts, :host), Keyword.get(conn_opts, :port, 4040)})

@@ -20,16 +20,23 @@ defmodule Malachi.ConsumeStreams do
   at or before it (the position after that record, or the page's end, which can lie further on), and may
   set a new window. A stream caught up on its view asks the broker to wake it once the range's durable
   records end past that view (`Malachi.BrokerServer.arm_consume/3`); a stream without credit waits for an
-  ack, and reads its view again then. Before each page the flag and the consume permission are checked
-  again: a stream that lost either is answered with the refusal and closed.
+  ack, and reads its view again then. Before each page the consume permission is checked again: a stream
+  that lost it is answered with the refusal and closed.
 
   When the range moves on (a split or merge retires it, or its next active segment opens on another node)
   or the broker that served it goes down, the stream is answered with a `moved` push and closed; a roll
   that keeps the range here does not move it. Positions carry over to a split's children, so the consumer
   opens there from the position it acked (`Malachi.Wire`).
 
-  Pure but for the reads, the broker calls and the skip reports: messages in, pushes and the next state out.
+  Every page read (`read_page/6`, for a push and for a `fetch_range` answer alike) runs in a
+  `malachi.consume` span (OpenTelemetry) carrying `malachi.topic` and `malachi.records`, or `malachi.error`,
+  and a page read emits `[:malachi, :consume]` (`Malachi.Telemetry.consume/2`) with its record count.
+
+  Pure but for the reads, the broker calls, the skip reports and the telemetry: messages in, pushes and the
+  next state out.
   """
+
+  require OpenTelemetry.Tracer, as: Tracer
 
   alias Malachi.Broker
   alias Malachi.Broker.ReadView
@@ -40,6 +47,7 @@ defmodule Malachi.ConsumeStreams do
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
   alias Malachi.StreamMoves
+  alias Malachi.Telemetry
   alias Malachi.Wire
   alias Malachi.Wire.Batch
 
@@ -227,12 +235,29 @@ defmodule Malachi.ConsumeStreams do
   @doc """
   One page of `range_id` from `position`, read through `view` (what a `records` push and a `fetch_range`
   answer carry, see `Malachi.Wire.encode_page/1`, and `records_end`, the position right after its last
-  record): at most `max` records and about `max_bytes` bytes, always one record when the range holds one. `{:ok, page, count}` with `count` records, the skips are
-  reported to `reporter` (`Malachi.Retention.SkipReporter`), or `{:error, reason}` for a read that failed.
+  record): at most `max` records and about `max_bytes` bytes, always one record when the range holds one.
+  `{:ok, page, count}` with `count` records, the skips are reported to `reporter`
+  (`Malachi.Retention.SkipReporter`), or `{:error, reason}` for a read that failed. Traced and counted as
+  the moduledoc says.
   """
   @spec read_page(ReadView.t(), Metadata.range_id(), position(), pos_integer(), pos_integer(), term()) ::
           {:ok, map(), non_neg_integer()} | {:error, term()}
   def read_page(view, {topic, _seq} = range_id, position, max, max_bytes, reporter) do
+    Tracer.with_span "malachi.consume", %{attributes: %{"malachi.topic" => topic}} do
+      case read_page_untraced(view, range_id, position, max, max_bytes, reporter) do
+        {:ok, _page, count} = read ->
+          Tracer.set_attributes(%{"malachi.records" => count})
+          Telemetry.consume(topic, count)
+          read
+
+        {:error, reason} = error ->
+          Tracer.set_attributes(%{"malachi.error" => inspect(reason)})
+          error
+      end
+    end
+  end
+
+  defp read_page_untraced(view, {topic, _seq} = range_id, position, max, max_bytes, reporter) do
     with {:ok, positioned, next, skips} <- read_positioned(view, range_id, position, max),
          {:ok, kept, next, skips} <- within_bytes(view, range_id, position, {positioned, next, skips}, max_bytes) do
       SkipReporter.report(reporter, topic, nil, skips)
@@ -287,9 +312,9 @@ defmodule Malachi.ConsumeStreams do
   # Reads and pushes one page when the stream has credit and its view holds records past its position, and
   # asks for the next page by a message to itself (`{:consume_continue, id}`). A stream caught up on its view
   # asks to be woken once the range's durable records pass it; one out of credit waits for an ack and keeps
-  # its view to read again then. Before each read the stream's access is checked again (the flag and the
-  # consume permission, which an operator can revoke while it is open): a stream that lost it is answered
-  # with the refusal and closed.
+  # its view to read again then. Before each read the stream's access is checked again (the consume
+  # permission, which an operator can revoke while it is open): a stream that lost it is answered with the
+  # refusal and closed.
   defp read(state, %{view: nil} = stream), do: {put(state, stream), []}
 
   defp read(state, stream) do

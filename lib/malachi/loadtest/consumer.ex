@@ -4,8 +4,8 @@ defmodule Malachi.Loadtest.Consumer do
   (`Malachi.Wire` keys 29 and 30), opened where the range is read, pushing `records` pages with the position
   of every record, and a read ack after each page that names the position read and returns the credit, so
   the broker keeps at most `window` records pushed and unread. It reads every active range of a topic, from
-  the start of each range's history (a load generator worker reads all of its topic, as a legacy consumer
-  in a group of its own does).
+  the start of each range's history (a load generator worker reads all of its topic, as a consumer in a
+  group of its own does).
 
   Event driven, as `Malachi.Loadtest.Producer` is: the connections are activated, their socket messages go
   to `handle_message/3`, and what comes back are events:
@@ -14,8 +14,7 @@ defmodule Malachi.Loadtest.Consumer do
       records it already had, `skip`, are not counted);
     * `{:failed, range_key, reason}`: an open, or a stream, the broker refused for a reason that is not a
       redirect; the range opens again after a backoff, or, with `on_refusal: :stop`, is not read again, nor
-      is a range a split makes of it, or a merge back into exactly its block (a refused legacy subscribe
-      ends that worker's stream); a merge that takes it in with other keys is a new range, and is opened.
+      is a range a split makes of it, or a merge back into exactly its block; a merge that takes it in with other keys is a new range, and is opened.
 
   When a range moves on, its stream is answered `moved` and closed, and the consumer opens the ranges the
   routes now name: one whose block a range it read held (a split's child, or a merge back into a block read

@@ -1,7 +1,8 @@
 # 1M-message end-to-end throughput + resource benchmark on the REAL log stack.
 #
 # Produces and consumes 1_000_000 records through the actual produce -> disk (ReplicationServer) ->
-# consume path of the BrokerServer, measuring throughput, per-batch latency, BEAM memory, on-disk bytes,
+# consume path of the BrokerServer (a range read as a `fetch_range` serves it: `BrokerServer.fetch_range/4`
+# hands a view, `Malachi.ConsumeStreams.read_page/6` reads a page through it), measuring throughput, per-batch latency, BEAM memory, on-disk bytes,
 # and CPU (reductions). This is the SYSTEM baseline the streaming alternatives are judged against; it is
 # a standalone script and does not modify lib/.
 #
@@ -25,6 +26,7 @@ defmodule Bench1M do
   alias Malachi.Bench.FlushRegime
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
+  alias Malachi.ConsumeStreams
   alias Malachi.Log.Record
 
   @total 1_000_000
@@ -85,7 +87,7 @@ defmodule Bench1M do
     disk = dir_bytes(repl_dir)
 
     # ---- CONSUME ----
-    IO.puts("Consuming #{@total} records (fetch by cursor, pages of #{@batch})...")
+    IO.puts("Consuming #{@total} records (range reads, pages of #{@batch})...")
     t1 = System.monotonic_time(:microsecond)
     {consumed, consume_lat} = consume_all(broker)
     consume_wall = System.monotonic_time(:microsecond) - t1
@@ -113,16 +115,25 @@ defmodule Bench1M do
     File.rm_rf!(base)
   end
 
-  defp consume_all(broker), do: consume_loop(broker, %{}, 0, [])
+  # Every active range of the topic read from its start, a page at a time, until a page holds no record.
+  defp consume_all(broker) do
+    broker
+    |> BrokerServer.active_range_ids(@topic)
+    |> Enum.reduce({0, []}, fn range_id, {count, lats} -> consume_loop(broker, range_id, :earliest, count, lats) end)
+  end
 
-  defp consume_loop(broker, positions, count, lats) do
+  # One page is what a `fetch_range` with no wait answers: the broker hands a view of the range from `start`,
+  # and the page is read through it in this process. Its byte limit is the largest batch the server takes in,
+  # so `@batch` records bound every page.
+  defp consume_loop(broker, range_id, start, count, lats) do
     b0 = System.monotonic_time(:microsecond)
-    {records, next, _skips} = BrokerServer.consume(broker, @topic, positions, @batch, 0)
+    {:ok, position, view, reporter} = BrokerServer.fetch_range(broker, range_id, start, 0)
+    {:ok, page, read} = ConsumeStreams.read_page(view, range_id, position, @batch, 16_777_216, reporter)
     lat = System.monotonic_time(:microsecond) - b0
 
-    case records do
-      [] -> {count, lats}
-      _ -> consume_loop(broker, next, count + length(records), [lat | lats])
+    case read do
+      0 -> {count, lats}
+      _ -> consume_loop(broker, range_id, {:position, page.next}, count + read, [lat | lats])
     end
   end
 

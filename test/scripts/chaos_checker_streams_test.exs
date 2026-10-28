@@ -8,7 +8,7 @@ defmodule ChaosCheckerStreamsTest do
   alias Malachi.Loadtest.Conn
   alias Malachi.Loadtest.Router
   alias Malachi.TCPAcceptorPool
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.StreamStub
   alias Malachi.Wire
 
@@ -18,7 +18,7 @@ defmodule ChaosCheckerStreamsTest do
   end
 
   setup do
-    :ok = StreamsOn.setup(%{})
+    :ok = RouterTopology.clear()
     topic = "chaos_#{System.unique_integer([:positive])}"
     conn = connect!(TCPAcceptorPool.port())
     {:ok, 0, _, conn} = Conn.request(conn, Wire.create_topic_key(), 2, Wire.encode_create_topic_req(topic, 4))

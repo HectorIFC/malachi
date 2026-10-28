@@ -554,6 +554,10 @@ build_upgrade_images
 export UPGRADE_RESTART_3=on-failure
 export MALACHI_RA_MACHINE_VERSION="$OLD_PIN"
 start_cluster
+# The cluster starts on OLD, and a release that predates the stream keys being always served answers them
+# only while the producer_streams flag is on: the checker and the traffic speak no other keys. NEW keeps
+# advertising the flag as a retired no-op, so turning it on here holds across every swap, rollback included.
+enable_stream_keys
 
 say "phase 1: roll forward under the pin"
 begin_phase 1 "$PHASE1_WINDOW_S"

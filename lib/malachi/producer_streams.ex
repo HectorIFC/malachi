@@ -18,8 +18,15 @@ defmodule Malachi.ProducerStreams do
   The connection reads its socket only while every open stream has room in its window, so a producer that
   outruns its grant is held back by TCP rather than buffered here.
 
+  Each append sent to the broker runs in a `malachi.produce` span (OpenTelemetry), the parent of the
+  broker's `malachi.broker.produce`, and ends when the broker answers it, carrying `malachi.topic`,
+  `malachi.records` and `malachi.bytes` (the records' value bytes), or `malachi.error`. An append the broker
+  took emits `[:malachi, :produce]` (`Malachi.Telemetry.produce/3`) with the same counts.
+
   Pure but for the broker calls: frames and broker answers in, pushes and the next state out.
   """
+
+  require OpenTelemetry.Tracer, as: Tracer
 
   alias Malachi.BrokerServer
   alias Malachi.Log.Record
@@ -30,6 +37,8 @@ defmodule Malachi.ProducerStreams do
   alias Malachi.Telemetry
   alias Malachi.Wire
   alias Malachi.Wire.Batch
+  alias OpenTelemetry.Ctx
+  alias OpenTelemetry.Span
 
   defstruct streams: %{}, by_token: %{}, reqids: nil, brokers: %{}
 
@@ -45,7 +54,7 @@ defmodule Malachi.ProducerStreams do
           granted: StreamWindow.t(),
           window: StreamWindow.t(),
           next_seq: non_neg_integer(),
-          inflight: %{non_neg_integer() => non_neg_integer()},
+          inflight: %{non_neg_integer() => inflight()},
           inflight_bytes: non_neg_integer(),
           answered: %{non_neg_integer() => :ok | {:error, String.t()}},
           acked: non_neg_integer(),
@@ -53,6 +62,17 @@ defmodule Malachi.ProducerStreams do
           segment_id: Metadata.segment_id() | nil,
           label: String.t(),
           opened_at: integer()
+        }
+
+  @typedoc """
+  An append sent to the broker and not answered yet: its inflated size (what the window counts), its
+  records and their value bytes (what its telemetry counts), and its `malachi.produce` span.
+  """
+  @type inflight :: %{
+          size: non_neg_integer(),
+          records: non_neg_integer(),
+          bytes: non_neg_integer(),
+          span: :opentelemetry.span_ctx()
         }
 
   @type t :: %__MODULE__{
@@ -292,11 +312,14 @@ defmodule Malachi.ProducerStreams do
          # charged last, so an append refused for any other reason spends nothing
          :ok <- charge.(length(records), size) do
       label = {stream.id, sequence}
-      reqids = BrokerServer.send_stream_produce(stream.broker, stream.range_id, records, label, state.reqids)
+      span = Tracer.start_span("malachi.produce", %{attributes: %{"malachi.topic" => stream.topic}})
+      ctx = Tracer.set_current_span(Ctx.get_current(), span)
+      reqids = BrokerServer.send_stream_produce(stream.broker, stream.range_id, records, label, state.reqids, ctx)
+      sent = %{size: size, records: length(records), bytes: value_bytes(records), span: span}
 
       stream = %{
         stream
-        | inflight: Map.put(stream.inflight, sequence, size),
+        | inflight: Map.put(stream.inflight, sequence, sent),
           inflight_bytes: stream.inflight_bytes + size
       }
 
@@ -340,7 +363,8 @@ defmodule Malachi.ProducerStreams do
         {state, []}
 
       {:ok, stream} ->
-        {size, inflight} = Map.pop(stream.inflight, sequence, 0)
+        {sent, inflight} = Map.pop(stream.inflight, sequence)
+        size = if sent, do: finish_sent(stream.topic, sent, reply), else: 0
 
         stream = %{
           stream
@@ -359,6 +383,23 @@ defmodule Malachi.ProducerStreams do
           else: {put_stream(state, stream), [frame]}
     end
   end
+
+  # An append the broker answered: its span ends with the outcome, and one the broker took is counted.
+  # Answers the size it held of the window.
+  defp finish_sent(topic, sent, {:ok, _placements}) do
+    Span.set_attributes(sent.span, %{"malachi.records" => sent.records, "malachi.bytes" => sent.bytes})
+    Span.end_span(sent.span)
+    Telemetry.produce(topic, sent.records, sent.bytes)
+    sent.size
+  end
+
+  defp finish_sent(_topic, sent, {:error, reason}) do
+    Span.set_attributes(sent.span, %{"malachi.error" => inspect(reason)})
+    Span.end_span(sent.span)
+    sent.size
+  end
+
+  defp value_bytes(records), do: Enum.reduce(records, 0, fn record, acc -> acc + byte_size(record.value) end)
 
   defp outcome({:ok, _placements}), do: :ok
   defp outcome({:error, reason}), do: {:error, reason_string(reason)}

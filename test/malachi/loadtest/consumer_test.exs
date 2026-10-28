@@ -1,12 +1,12 @@
 defmodule Malachi.Loadtest.ConsumerTest do
-  # The routing consumer and fetcher the load generator reads through, against the real TCP server with the
-  # `producer_streams` flag on: every record of every range read, under a window smaller than the topic;
+  # The routing consumer and fetcher the load generator reads through, against the real TCP server: every
+  # record of every range read, under a window smaller than the topic;
   # records written after the read started; a split's children read from the position read in the parent,
   # a merge's range from the start of its history; a dropped connection read again from where it stopped;
   # refusals and redirects.
   #
-  # async: false. The flag is the application's own cache (`ClusterFlagsPause`), and the topic routing reads
-  # the topology the consumer-group router publishes, which is cleared for each test and put back.
+  # async: false. The topic routing reads the topology the consumer-group router publishes, which is cleared
+  # for each test and put back.
   use ExUnit.Case, async: false
 
   alias Malachi.BrokerServer
@@ -22,13 +22,13 @@ defmodule Malachi.Loadtest.ConsumerTest do
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.TCPAcceptorPool
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.StreamStub
   alias Malachi.Wire
   alias Malachi.Wire.Batch
 
   setup do
-    :ok = StreamsOn.setup(%{})
+    :ok = RouterTopology.clear()
 
     topic = "consumer_#{System.unique_integer([:positive])}"
     admin = connect!(user: "admin", pass: "admin123")

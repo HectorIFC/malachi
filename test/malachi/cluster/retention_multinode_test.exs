@@ -1,25 +1,27 @@
 defmodule Malachi.Cluster.RetentionMultinodeTest do
   # Retention across real BEAM nodes (#191): segments live on replication servers on two peer nodes, the
   # sweep on this node expires them with the application's real delete path (control plane, then every
-  # remote replica), and a consumer group reading through this node's broker is told, through its skip
-  # reporter, that it was moved past what was deleted. The sweep's telemetry and the skip are emitted
-  # where the work happened: here, not on the nodes that only held the copies.
+  # remote replica), and a reader starting from a consumer group's checkpoint through this node's broker is
+  # told, through its skip reporter, that it was moved past what was deleted. The sweep's telemetry and the
+  # skip are emitted where the work happened: here, not on the nodes that only held the copies.
   #
   # async: false and tagged, like every test that starts peer nodes.
   use ExUnit.Case, async: false
 
   @moduletag :multinode
 
+  alias Malachi.Broker
   alias Malachi.BrokerServer
   alias Malachi.Cluster.MetadataServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RetentionCoordinator
+  alias Malachi.ConsumeStreams
   alias Malachi.Log.Record
-  alias Malachi.LogApi
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
   alias Malachi.Telemetry
   alias Malachi.Test.Distribution
+  alias Malachi.Test.StreamTCP
 
   @server :retention_multinode_repl
 
@@ -53,7 +55,7 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
 
   defp segments(broker, range_id), do: broker |> BrokerServer.metadata() |> Metadata.segments_of_range(range_id)
 
-  test "a sweep deletes the remote copies, and the group reading through this node is told it skipped them" do
+  test "a sweep deletes the remote copies, and a read from a group's checkpoint is told it skipped them" do
     replicas = [start_peer_replica(), start_peer_replica()]
 
     name = :"retention_multinode_broker_#{System.unique_integer([:positive])}"
@@ -92,10 +94,10 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
-    :ok = LogApi.create_topic(name, "events")
+    {:ok, _root} = BrokerServer.create_topic(name, "events", 8)
 
     for value <- ["v0", "v1", "v2", "v3"],
-        do: {:ok, 1} = LogApi.produce(name, "events", [%{"key" => value, "value" => value}])
+        do: {:ok, _placements} = BrokerServer.produce(name, "events", [Record.new(value, key: value)])
 
     [root_id] = BrokerServer.active_range_ids(name, "events")
     assert eventually(fn -> Enum.count(segments(name, root_id), &(&1.state == :sealed)) >= 3 end)
@@ -103,8 +105,8 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
     [oldest | _] = Enum.sort_by(segments(name, root_id), & &1.start_offset)
     assert Enum.all?(oldest.replica_set, &match?({:ok, [_ | _]}, ReplicationServer.read(&1, oldest.id, 0, 10)))
 
-    # A group that committed the very beginning, before retention ran.
-    :ok = BrokerServer.commit_offset(name, "billing", "events", %{root_id => {0, 0}})
+    # A group that committed the very beginning, before retention ran (generation 0: no coordinator opened it).
+    :ok = BrokerServer.commit_offset(name, "billing", "events", %{root_id => {0, 0}}, 0)
 
     {:ok, coordinator} =
       RetentionCoordinator.start_link(
@@ -135,16 +137,26 @@ defmodule Malachi.Cluster.RetentionMultinodeTest do
     # Gone from the replicas on the other nodes, through the real delete path.
     assert Enum.all?(oldest.replica_set, &(ReplicationServer.read(&1, oldest.id, 0, 10) == :eof))
 
-    # The next produce gives the group something to land on past the gap.
-    {:ok, 1} = LogApi.produce(name, "events", [%{"key" => "v4", "value" => "v4"}])
+    # The next produce gives the read something to land on past the gap.
+    {:ok, _placements} = BrokerServer.produce(name, "events", [Record.new("v4", key: "v4")])
 
-    # One record per segment, and retention removes the oldest first, so the group resumes exactly past
-    # the expired prefix and the skip covers exactly those offsets.
-    assert {:ok, records, _cursor} = LogApi.fetch_group(name, "events", "billing", 100)
-    assert Enum.map(records, & &1.value) == Enum.drop(["v0", "v1", "v2", "v3", "v4"], length(expired))
+    # One record per segment, and retention removes the oldest first, so a page read from the group's
+    # checkpoint resumes exactly past the expired prefix and the skip covers exactly those offsets. The page
+    # is read as a consume stream or a `fetch_range` reads one (`Malachi.ConsumeStreams.read_page/6`), through
+    # this node's view of the range, whose active segment a peer leads; a page knows no group, so the skip is
+    # the position's.
+    broker = :sys.get_state(name).broker
+    {:ok, position} = Broker.consume_start(broker, root_id, {:committed, "billing"})
+    view = Broker.consume_view(broker, root_id)
+
+    assert {:ok, page, _count} =
+             ConsumeStreams.read_page(view, root_id, position, 100, 1_048_576, SkipReporter.name_for(name))
+
+    values = page |> StreamTCP.page_records() |> Enum.map(&elem(&1, 1))
+    assert values == Enum.drop(["v0", "v1", "v2", "v3", "v4"], length(expired))
 
     assert_receive {[:malachi, :retention, :skip], %{count: 1, offsets: offsets},
-                    %{topic: "events", group: "billing", origin: :cursor, span: :exact}}
+                    %{topic: "events", group: nil, origin: :cursor, span: :exact}}
 
     assert offsets == length(expired)
   end

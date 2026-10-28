@@ -86,7 +86,7 @@ defmodule Malachi.RoutingTest do
 
       assert routes.version == expected
 
-      state = Routing.cluster_state([{:malachi@a, :alive, %{}}], [0], false)
+      state = Routing.cluster_state([{:malachi@a, :alive, %{}}], [0])
       <<expected::64, _rest::binary>> = :crypto.hash(:sha256, Wire.encode_cluster_state_resp(%{state | version: 0}))
       assert state.version == expected
     end
@@ -169,8 +169,8 @@ defmodule Malachi.RoutingTest do
         member(:malachi@a, :alive, %{host: "a.svc", port: 5050})
       ]
 
-      assert %{brokers: brokers, vnodes: [7, 100], streams_enabled: false} =
-               Routing.cluster_state(members, [100, 7], false)
+      # the stream keys are always served
+      assert %{brokers: brokers, vnodes: [7, 100], streams_enabled: true} = Routing.cluster_state(members, [100, 7])
 
       assert brokers == [
                %{id: "malachi@a", host: "a.svc", port: 5050, status: :alive},
@@ -180,20 +180,19 @@ defmodule Malachi.RoutingTest do
 
     test "a member that advertises no address has a nil host and port 0" do
       assert %{brokers: [%{host: nil, port: 0, status: :dead}]} =
-               Routing.cluster_state([member(:malachi@old, :dead, nil)], [0], true)
+               Routing.cluster_state([member(:malachi@old, :dead, nil)], [0])
     end
 
-    test "the version is the same for the same state and changes when a broker, a vnode or the flag does" do
+    test "the version is the same for the same state and changes when a broker or a vnode does" do
       members = [member(:malachi@a, :alive, %{host: "a.svc", port: 4040})]
-      %{version: version} = Routing.cluster_state(members, [0], false)
+      %{version: version} = Routing.cluster_state(members, [0])
 
-      assert Routing.cluster_state(Enum.reverse(members), [0], false).version == version
+      assert Routing.cluster_state(Enum.reverse(members), [0]).version == version
 
       others = [
-        Routing.cluster_state([member(:malachi@a, :suspect, %{host: "a.svc", port: 4040})], [0], false),
-        Routing.cluster_state([member(:malachi@a, :alive, %{host: "a.svc", port: 4041})], [0], false),
-        Routing.cluster_state(members, [0, 1], false),
-        Routing.cluster_state(members, [0], true)
+        Routing.cluster_state([member(:malachi@a, :suspect, %{host: "a.svc", port: 4040})], [0]),
+        Routing.cluster_state([member(:malachi@a, :alive, %{host: "a.svc", port: 4041})], [0]),
+        Routing.cluster_state(members, [0, 1])
       ]
 
       versions = Enum.map(others, & &1.version)

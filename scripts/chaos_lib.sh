@@ -94,8 +94,7 @@ preflight_cluster() {
   echo "host load:$(uptime | sed 's/.*load average/ load average/')"
 }
 
-# Fresh cluster on fresh volumes, with the stream keys on (`enable_stream_keys`), since the checker and the
-# traffic of every drill run on them; sets NET to the compose network name for partition events.
+# Fresh cluster on fresh volumes; sets NET to the compose network name for partition events.
 start_cluster() {
   say "starting 3-node RF=${RF} cluster (fresh persistent volumes)"
   preflight_cluster
@@ -105,7 +104,6 @@ start_cluster() {
   wait_healthy || { cat "$WORK/up.log"; abort_run "cluster never converged"; }
   NET=$(docker inspect malachi-cluster-1 --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
   echo "cluster healthy; network: $NET"
-  enable_stream_keys
 }
 
 # Ends a run that cannot go on, recording $1 as its failure. A drill that named its certification in
@@ -212,10 +210,12 @@ node_task() {
     "cd /app && elixir --sname chaoscli --cookie malachi_bench -S mix $* --node malachi@malachi$idx" 2>&1
 }
 
-# Switches the stream keys on (the producer_streams cluster flag) once the cluster this run started is up
-# (`start_cluster` does it): the checker produces and reads on them, so a drill whose cluster refuses them
-# ends there rather than certify nothing. Each node learns of the flag on its own next refresh; the checker
-# waits for the node it asks to serve them before it starts.
+# Switches the producer_streams cluster flag on through node 1. A build of this tree serves the stream keys
+# whatever the flag says (it is a retired no-op here); a release that predates that serves them only while
+# the flag is on. Only the upgrade drill calls this, right after `start_cluster`, because its cluster starts
+# on such an OLD release and the checker produces and reads on the stream keys: a cluster that refuses the
+# flag ends the run there rather than certify nothing. Each node learns of the flag on its own next
+# refresh; the checker waits for the node it asks to serve the keys before it starts.
 enable_stream_keys() {
   out=$(node_task 1 "malachi.flag enable producer_streams")
   echo "$out" | grep -q "cluster flag enabled: producer_streams" ||

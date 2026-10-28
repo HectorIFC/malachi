@@ -90,41 +90,8 @@ defmodule Malachi.WireTest do
       assert Wire.decode_create_topic_req(Wire.encode_create_topic_req("events", 8)) == {"events", 8}
     end
 
-    test "produce req round-trip (multiple records)" do
-      records = for i <- 1..3, do: %Record{key: "k#{i}", value: "v#{i}", timestamp: i, headers: [], offset: nil}
-      assert Wire.decode_produce_req(Wire.encode_produce_req("t", records)) == {"t", records}
-    end
-
-    test "fetch req round-trip: cursor, group, member, and :start (all nil)" do
-      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", <<1, 2, 3>>, nil, nil, 500, 30_000)) ==
-               {"t", <<1, 2, 3>>, nil, nil, 500, 30_000}
-
-      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, "grp", nil, 100, 0)) ==
-               {"t", nil, "grp", nil, 100, 0}
-
-      # a group member id rides alongside the group (server scopes the fetch to its ranges)
-      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, "grp", "m1", 100, 0)) ==
-               {"t", nil, "grp", "m1", 100, 0}
-
-      assert Wire.decode_fetch_req(Wire.encode_fetch_req("t", nil, nil, nil, 100, 0)) ==
-               {"t", nil, nil, nil, 100, 0}
-    end
-
     test "leave_group req round-trip" do
       assert Wire.decode_leave_group_req(Wire.encode_leave_group_req("t", "grp", "m1")) == {"t", "grp", "m1"}
-    end
-
-    test "subscribe req round-trip carries an optional member id" do
-      assert Wire.decode_subscribe_req(Wire.encode_subscribe_req("t", "g", "m1", 10, 100)) == {"t", "g", "m1", 10, 100}
-      assert Wire.decode_subscribe_req(Wire.encode_subscribe_req("t", "g", nil, 10, 100)) == {"t", "g", nil, 10, 100}
-    end
-
-    test "stream_ack req round-trip carries an optional member id" do
-      assert Wire.decode_stream_ack_req(Wire.encode_stream_ack_req("t", "g", "m1", <<1, 2>>, 5)) ==
-               {"t", "g", "m1", <<1, 2>>, 5}
-
-      assert Wire.decode_stream_ack_req(Wire.encode_stream_ack_req("t", "g", nil, nil, 0)) ==
-               {"t", "g", nil, nil, 0}
     end
 
     test "auth req/resp round-trip" do
@@ -141,15 +108,6 @@ defmodule Malachi.WireTest do
       assert error_code == Wire.error_code()
       # the reason travels as a length-prefixed string in the payload
       assert Wire.decode_auth_resp(payload) == "not_found"
-    end
-
-    test "fetch resp round-trip (records + next cursor)" do
-      records = [%Record{key: nil, value: "v", timestamp: 1, headers: [], offset: nil}]
-      assert Wire.decode_fetch_resp(Wire.encode_fetch_resp(records, <<9, 9>>)) == {records, <<9, 9>>}
-    end
-
-    test "commit req round-trip" do
-      assert Wire.decode_commit_req(Wire.encode_commit_req("t", "grp", <<4, 5>>)) == {"t", "grp", <<4, 5>>}
     end
   end
 end

@@ -6,7 +6,6 @@ defmodule Malachi.LoadtestTest do
   import ExUnit.CaptureIO
 
   alias Malachi.BrokerServer
-  alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.DataPlaneRouter
   alias Malachi.Loadtest
   alias Malachi.Loadtest.Conn
@@ -18,7 +17,7 @@ defmodule Malachi.LoadtestTest do
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Test.PollingHelper
   alias Malachi.Test.ReadBack
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.StreamStub
   alias Malachi.Test.StreamTCP
   alias Malachi.Test.TCPHelper
@@ -34,9 +33,9 @@ defmodule Malachi.LoadtestTest do
 
   defp topic(name), do: "lt_#{name}_#{System.unique_integer([:positive])}"
 
-  # The generator speaks only the stream keys, which the `producer_streams` flag gates: every case runs with
-  # it on, and the one about a cluster with it off turns it off itself.
-  setup {StreamsOn, :setup}
+  # The generator speaks only the stream keys; the topic routing reads the consumer-group router's topology,
+  # cleared for each case.
+  setup {RouterTopology, :clear}
 
   describe "produce" do
     test "the report records the batch size and record size it ran with, as fields of their own" do
@@ -787,12 +786,12 @@ defmodule Malachi.LoadtestTest do
       assert r.ops > 0 and r.records == r.ops * 5
     end
 
-    test "a cluster that does not serve the stream keys fails the setup, naming why" do
-      ClusterFlagsCache.put([])
-
-      assert_raise Loadtest.SetupError, ~r/does not serve the stream keys \(the producer_streams flag is off\)/, fn ->
-        run(scenario: :produce, connections: 1, topic: topic("streams_off"))
-      end
+    test "a cluster that does not serve the stream keys (an older release, its flag off) fails the setup, naming why" do
+      with_stream_server(%{24 => :streams_off}, fn port ->
+        assert_raise Loadtest.SetupError, ~r/does not serve the stream keys \(the producer_streams flag is off\)/, fn ->
+          run(scenario: :produce, connections: 1, port: port, topic: "t")
+        end
+      end)
     end
 
     test "a node that does not answer cluster_state fails the setup, naming why" do

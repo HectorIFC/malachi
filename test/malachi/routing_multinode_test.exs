@@ -1,10 +1,12 @@
 defmodule Malachi.RoutingMultinodeTest do
   @moduledoc """
   The routing state over real BEAM nodes: three peers gossiping SWIM membership, each advertising the
-  address clients reach it at, one of them on a build without `producer_streams`.
+  address clients reach it at, one of them advertising no `producer_streams` capability (as a release from
+  before the capability did).
 
-  Every node's view yields the same cluster state, version included, so a client can ask any of them;
-  and the flag that switches the stream keys on is refused while one node cannot serve them.
+  Every node's view yields the same cluster state, version included, so a client can ask any of them, and
+  it says the stream keys are served; the retired `producer_streams` flag is still refused while one node
+  does not advertise it, as every flag is.
   """
   use ExUnit.Case, async: false
 
@@ -37,7 +39,7 @@ defmodule Malachi.RoutingMultinodeTest do
     addresses =
       for {node, i} <- Enum.with_index(nodes), into: %{}, do: {node, %{host: "broker-#{i}.svc", port: 4040 + i}}
 
-    capabilities = %{new_a => [Routing.flag()], new_b => [Routing.flag()], old => []}
+    capabilities = %{new_a => [:producer_streams], new_b => [:producer_streams], old => []}
 
     for node <- nodes do
       attributes = %{"rack" => "a"} |> Capabilities.attributes(capabilities[node]) |> Advertised.put(addresses[node])
@@ -72,7 +74,7 @@ defmodule Malachi.RoutingMultinodeTest do
 
   test "every node's view gives the same cluster state, naming each broker at its advertised address", ctx do
     states =
-      for node <- ctx.nodes, do: :erpc.call(node, Routing, :cluster_state, [Routing.members_of(view(node)), [0], false])
+      for node <- ctx.nodes, do: :erpc.call(node, Routing, :cluster_state, [Routing.members_of(view(node)), [0]])
 
     assert [state] = Enum.uniq(states)
 
@@ -84,14 +86,14 @@ defmodule Malachi.RoutingMultinodeTest do
              |> Enum.sort_by(& &1.id)
   end
 
-  test "each node reads that same cluster state for itself, ring and flag included", ctx do
+  test "each node reads that same cluster state for itself, ring included, and serves the stream keys", ctx do
     # Each peer has a control plane, as a clustered node does (a node without one answers for itself).
     for node <- ctx.nodes, do: :ok = :erpc.call(node, Application, :put_env, [:malachi, :log_cluster, :routing_mn])
 
     assert [{:ok, state}] = ctx.nodes |> Enum.map(&:erpc.call(&1, Routing, :read_cluster_state, [])) |> Enum.uniq()
     assert length(state.brokers) == 3
     assert state.vnodes == [0]
-    refute state.streams_enabled
+    assert state.streams_enabled
   end
 
   test "producer_streams cannot be switched on while a node does not advertise it, and that node is named", ctx do

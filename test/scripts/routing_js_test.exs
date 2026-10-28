@@ -6,7 +6,7 @@ defmodule RoutingJsTest do
 
   alias Malachi.Loadtest.Router
   alias Malachi.TCPAcceptorPool
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
@@ -58,7 +58,7 @@ defmodule RoutingJsTest do
   end
 
   test "against the server: routes, one connection per broker, and a stream's pushes and refusals", ctx do
-    :ok = StreamsOn.setup(%{})
+    :ok = RouterTopology.clear()
     topic = "routing_js_#{System.unique_integer([:positive])}"
     {:ok, socket} = TCPHelper.connect()
     {:ok, _token} = TCPHelper.authenticate_wire(socket, "admin", "admin123")

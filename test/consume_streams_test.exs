@@ -4,37 +4,24 @@ defmodule Malachi.ConsumeStreamsTest do
   # stream starts, the unary read and its wait, the refusals, the move a split sends, and a connection that
   # produces and consumes at once.
   #
-  # async: false. The `producer_streams` flag is the application's own cache (`ClusterFlagsPause`), and
-  # the routing reads the topology the consumer-group router publishes, cleared here for each test.
+  # async: false. The routing reads the topology the consumer-group router publishes, cleared here for each
+  # test.
   use ExUnit.Case, async: false
 
   import Malachi.Test.QuotaForensics, only: [within_one_window: 2, snapshot: 2, assert_refused: 4]
   import Malachi.Test.StreamTCP
 
   alias Malachi.BrokerServer
-  alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.DataPlaneRouter
   alias Malachi.Log.Record
-  alias Malachi.Routing
-  alias Malachi.Test.ClusterFlagsPause
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
-  @router_topology {Malachi.Consumer.CoordinatorRouter, :topology}
   @quota_window_ms 60_000
 
   setup do
-    :ok = ClusterFlagsPause.pause()
-    ClusterFlagsCache.put([Routing.flag()])
-
-    topology = :persistent_term.get(@router_topology, nil)
-    :persistent_term.erase(@router_topology)
-
-    on_exit(fn ->
-      if topology,
-        do: :persistent_term.put(@router_topology, topology),
-        else: :persistent_term.erase(@router_topology)
-    end)
+    :ok = RouterTopology.clear()
 
     topic = "cstream_#{System.unique_integer([:positive])}"
     producer = connect()
@@ -336,12 +323,6 @@ defmodule Malachi.ConsumeStreamsTest do
         assert {:ok, _page} = fetch_range(reader, ctx.topic)
         assert_refused(fetch_range(reader, ctx.topic), spent, user, :subscribe)
       end)
-    end
-
-    test "with the flag off the consume keys are unsupported", ctx do
-      ClusterFlagsCache.put([])
-      assert open_consume(ctx.consumer, ctx.topic, routes_version: 0) == {:error, "unsupported"}
-      assert fetch_range(ctx.consumer, ctx.topic, routes_version: 0) == {:error, "unsupported"}
     end
   end
 

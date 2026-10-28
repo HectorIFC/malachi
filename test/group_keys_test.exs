@@ -4,37 +4,22 @@ defmodule Malachi.GroupKeysTest do
   # checkpoint a member commits for its own ranges at its generation, which a consume stream then resumes
   # from. Refused commits leave the checkpoint where it was.
   #
-  # async: false. The `producer_streams` flag is the application's own cache (`ClusterFlagsPause`), and
-  # the coordinator is the node-wide one the router resolves to once its topology is cleared here.
+  # async: false. The coordinator is the node-wide one the router resolves to once its topology is cleared here.
   use ExUnit.Case, async: false
 
   import Malachi.Test.StreamTCP
 
   alias Malachi.BrokerServer
-  alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.ConnectionStreams
   alias Malachi.Consumer.Assignment
   alias Malachi.Consumer.GroupCoordinator
   alias Malachi.DataPlaneRouter
-  alias Malachi.Routing
-  alias Malachi.Test.ClusterFlagsPause
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
-  @router_topology {Malachi.Consumer.CoordinatorRouter, :topology}
-
   setup do
-    :ok = ClusterFlagsPause.pause()
-    ClusterFlagsCache.put([Routing.flag()])
-
-    topology = :persistent_term.get(@router_topology, nil)
-    :persistent_term.erase(@router_topology)
-
-    on_exit(fn ->
-      if topology,
-        do: :persistent_term.put(@router_topology, topology),
-        else: :persistent_term.erase(@router_topology)
-    end)
+    :ok = RouterTopology.clear()
 
     topic = "groups_#{System.unique_integer([:positive])}"
     socket = connect()
@@ -111,22 +96,6 @@ defmodule Malachi.GroupKeysTest do
     Enum.find(for(i <- 2..100, do: "m#{i}"), fn name ->
       Assignment.assign(range_ids, ["m1", name]) |> Map.values() |> Enum.all?(&(length(&1) == 1))
     end)
-  end
-
-  # Reads until the server closes the connection: `:closed`, or what else ended the reading. Any frame
-  # read first must be a push of the subscription (correlation id 8), never an answer to the ack.
-  defp recv_until_closed(socket) do
-    case TCPHelper.recv_frame(socket, timeout: 5_000) do
-      {:ok, body} ->
-        {8, 0, _push} = Wire.decode_response(body)
-        recv_until_closed(socket)
-
-      {:error, :closed} ->
-        :closed
-
-      other ->
-        other
-    end
   end
 
   defp heartbeat_calls(coordinator) do
@@ -549,53 +518,8 @@ defmodule Malachi.GroupKeysTest do
     assert {1, reason} = TCPHelper.request(ctx.socket, Wire.leave_group_key(), 6, leave)
     assert Wire.decode_error_reason(reason) == "not_owner"
 
-    # the legacy member fetch reaches the same coordinator, and is answered the same
-    fetch = Wire.encode_fetch_req(ctx.topic, nil, ctx.group, "m1", 10, 0)
-    assert {1, reason} = TCPHelper.request(ctx.socket, Wire.fetch_key(), 7, fetch)
-    assert Wire.decode_error_reason(reason) == "not_owner"
-
     true = Process.register(coordinator, Malachi.LogGroupCoordinator)
     assert {:ok, _} = join(ctx, "m1")
-  end
-
-  test "a member subscribe its coordinator cannot be reached for is not_owner, and the connection lives on", ctx do
-    socket = connect()
-    coordinator = Process.whereis(Malachi.LogGroupCoordinator)
-    true = Process.unregister(Malachi.LogGroupCoordinator)
-
-    on_exit(fn ->
-      if Process.whereis(Malachi.LogGroupCoordinator) == nil,
-        do: Process.register(coordinator, Malachi.LogGroupCoordinator)
-    end)
-
-    subscribe = Wire.encode_subscribe_req(ctx.topic, ctx.group, "m1", 10, 10)
-    assert {1, reason} = TCPHelper.request(socket, Wire.subscribe_key(), 8, subscribe)
-    assert Wire.decode_error_reason(reason) == "not_owner"
-
-    true = Process.register(coordinator, Malachi.LogGroupCoordinator)
-    assert {0, _payload} = TCPHelper.request(socket, Wire.subscribe_key(), 9, subscribe)
-  end
-
-  test "a member read ack its coordinator cannot answer ends the stream, rather than stall it",
-       ctx do
-    socket = connect()
-    subscribe = Wire.encode_subscribe_req(ctx.topic, ctx.group, "m1", 10, 10)
-    assert {0, _payload} = TCPHelper.request(socket, Wire.subscribe_key(), 8, subscribe)
-
-    coordinator = Process.whereis(Malachi.LogGroupCoordinator)
-    true = Process.unregister(Malachi.LogGroupCoordinator)
-
-    on_exit(fn ->
-      if Process.whereis(Malachi.LogGroupCoordinator) == nil,
-        do: Process.register(coordinator, Malachi.LogGroupCoordinator)
-    end)
-
-    ack = Wire.encode_stream_ack_req(ctx.topic, ctx.group, "m1", nil, 3)
-    :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.stream_ack_key(), 12, ack))
-
-    # an ack never gets a response: the connection just closes, past any push already on its way
-    assert recv_until_closed(socket) == :closed
-    true = Process.register(coordinator, Malachi.LogGroupCoordinator)
   end
 
   test "a malformed group frame on a connection that holds streams is malformed_request, as on any other", ctx do
@@ -611,10 +535,15 @@ defmodule Malachi.GroupKeysTest do
   test "a checkpoint past the range's history does not start a reader there", ctx do
     [range | _] = ctx.ranges
 
+    # generation 0: no coordinator opened this group, so its epoch is 0 and the fence takes the commit
     :ok =
-      BrokerServer.commit_offset(DataPlaneRouter.shard_for(ctx.topic), ctx.group, ctx.topic, %{
-        {ctx.topic, range} => {9, 0}
-      })
+      BrokerServer.commit_offset(
+        DataPlaneRouter.shard_for(ctx.topic),
+        ctx.group,
+        ctx.topic,
+        %{{ctx.topic, range} => {9, 0}},
+        0
+      )
 
     assert open_consume(connect(), ctx.topic, range: range, start: {:committed, ctx.group}) ==
              {:error, "invalid_position"}

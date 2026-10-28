@@ -11,7 +11,8 @@ defmodule Mix.Tasks.Malachi.Loadtest do
   every range on consume streams (`Malachi.Loadtest.Consumer`), a `fetch` worker paging every range in
   turn with `fetch_range` (`Malachi.Loadtest.Fetcher`); the report counts `moved`, `redirects` and
   `route_refreshes`. A server that does not answer `cluster_state`, or a cluster that does not serve the
-  stream keys (the `producer_streams` flag off), fails the run before any worker connects.
+  stream keys (one of a release before they were always served, with the `producer_streams` flag off),
+  fails the run before any worker connects.
 
       mix malachi.loadtest --scenario produce --connections 512 --batch 10 --duration 10
 

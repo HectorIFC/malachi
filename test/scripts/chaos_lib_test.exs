@@ -256,13 +256,15 @@ defmodule ChaosLibTest do
   end
 
   describe "start_cluster" do
-    test "switches the stream keys on once the cluster it started is healthy", ctx do
+    # This build always serves the stream keys, so only the upgrade drill, whose cluster starts on an older
+    # release, switches the flag on (`enable_stream_keys`).
+    test "starts the cluster and leaves the producer_streams flag alone", ctx do
       assert {output, 0} = drive(ctx, "start_cluster; echo \"failed=$FAILED\"")
-      assert output =~ "the stream keys are on"
+      assert output =~ "failed=0"
       calls = docker_calls(ctx)
-      up = Enum.find_index(calls, &String.starts_with?(&1, "up -d"))
-      flag = Enum.find_index(calls, &(&1 =~ "malachi.flag enable producer_streams"))
-      assert up && flag && up < flag
+      assert Enum.any?(calls, &String.starts_with?(&1, "up -d"))
+      refute Enum.any?(calls, &(&1 =~ "malachi.flag enable producer_streams"))
+      refute output =~ "the stream keys are on"
     end
   end
 

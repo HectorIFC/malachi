@@ -3,8 +3,8 @@ defmodule Malachi.Consumer.GroupCoordinator do
   Tracks the members of consumer groups and assigns each topic's ranges across them (via
   `Malachi.Consumer.Assignment`), so members consume in parallel: one range per member.
 
-  A group is keyed by `{group, topic}`. Members `join`, then `heartbeat` to stay alive; a member that
-  stops heartbeating for `session_ms` is evicted (a dead consumer). Rebalancing is **eager**: any
+  A group is keyed by `{group, topic}`. Members join (`join_group/4`), then heartbeat (`heartbeat_group/4`)
+  to stay alive; a member that stops heartbeating for `session_ms` is evicted (a dead consumer). Rebalancing is **eager**: any
   membership change: join, leave, eviction - or a change in the topic's ranges recomputes the whole
   assignment and bumps a **generation** counter; a member re-reads its assignment on the next heartbeat and
   sees the new generation, its signal to take over its (possibly changed) ranges. Because the assignment is
@@ -33,9 +33,6 @@ defmodule Malachi.Consumer.GroupCoordinator do
   orders every commit and refuses one below a generation a range was already committed at
   (`Malachi.Metadata`'s group fence), which closes the gap between this check and the write.
 
-  The legacy entry points (`join/4`, `poll/4`, `heartbeat/4`) predate the epoch and hand out the bare
-  rebalance count; they never wait for an opening.
-
   ## Options
     * `:ranges_fun` - `(topic -> [range_id])`, the topic's current ranges (default `fn _ -> [] end`)
     * `:open_fun`   - `(group, topic -> {:ok, epoch} | {:error, reason})`, opens a group's next epoch
@@ -60,7 +57,6 @@ defmodule Malachi.Consumer.GroupCoordinator do
   @default_open_deadline_ms 2_000
 
   @type member :: term()
-  @type reply :: {:ok, non_neg_integer(), [term()]} | {:error, :unknown_member | :not_owner}
   @type group_reply ::
           {:ok, %{generation: non_neg_integer(), ranges: [term()], session_ms: pos_integer()}}
           | {:error, term()}
@@ -72,40 +68,17 @@ defmodule Malachi.Consumer.GroupCoordinator do
   end
 
   @doc """
-  Joins `member` to `{group, topic}`, triggering a rebalance. Returns `{:ok, generation, ranges}`, or
-  `{:error, :not_owner}` if this node no longer owns the topic's coordination (the caller re-resolves).
-  """
-  @spec join(GenServer.server(), term(), term(), member()) :: reply()
-  def join(server, group, topic, member), do: GenServer.call(server, {:join, group, topic, member})
-
-  @doc """
-  The fetch-path entry point (implicit membership): registers `member` if new (a rebalance) or just
-  refreshes its session if known (no rebalance), and returns its `{:ok, generation, ranges}`. Called on
-  every `fetch`, so a member stays alive by fetching and needs no separate heartbeat. Returns
-  `{:error, :not_owner}` if this node no longer owns the topic's coordination (the caller re-resolves).
-  """
-  @spec poll(GenServer.server(), term(), term(), member()) :: reply()
-  def poll(server, group, topic, member), do: GenServer.call(server, {:poll, group, topic, member})
-
-  @doc """
-  Refreshes `member`'s session and returns its current `{:ok, generation, ranges}`, or
-  `{:error, :unknown_member}` if it was evicted (the caller must `join/4` again), or `{:error, :not_owner}`
-  if this node no longer owns the topic's coordination.
-  """
-  @spec heartbeat(GenServer.server(), term(), term(), member()) :: reply()
-  def heartbeat(server, group, topic, member), do: GenServer.call(server, {:heartbeat, group, topic, member})
-
-  @doc """
-  `join/4` as the group keys answer it (`Malachi.Wire` 32): the generation, the member's ranges, and the
-  session it must heartbeat within. Opens the group's epoch first if this coordinator has none for it yet,
-  and answers the control plane's error if it cannot (the member asks again).
+  Joins `member` to `{group, topic}`, triggering a rebalance, as the group keys answer it (`Malachi.Wire`
+  32): the generation, the member's ranges, and the session it must heartbeat within. Opens the group's
+  epoch first if this coordinator has none for it yet, and answers the control plane's error if it cannot
+  (the member asks again).
   """
   @spec join_group(GenServer.server(), term(), term(), member()) :: group_reply()
   def join_group(server, group, topic, member), do: GenServer.call(server, {:join_group, group, topic, member})
 
   @doc """
-  `heartbeat/4` as the group keys answer it (`Malachi.Wire` 33): the current generation and ranges, whatever
-  generation the member holds, so a member that missed a rebalance learns it here; `{:error,
+  Refreshes `member`'s session, as the group keys answer it (`Malachi.Wire` 33): the current generation and
+  ranges, whatever generation the member holds, so a member that missed a rebalance learns it here; `{:error,
   :unknown_member}` for one evicted (it joins again).
   """
   @spec heartbeat_group(GenServer.server(), term(), term(), member()) :: group_reply()
@@ -137,10 +110,6 @@ defmodule Malachi.Consumer.GroupCoordinator do
   @doc "Removes `member` from `{group, topic}`, triggering a rebalance."
   @spec leave(GenServer.server(), term(), term(), member()) :: :ok
   def leave(server, group, topic, member), do: GenServer.call(server, {:leave, group, topic, member})
-
-  @doc "Reads `member`'s current assignment without refreshing its session."
-  @spec assignment(GenServer.server(), term(), term(), member()) :: reply()
-  def assignment(server, group, topic, member), do: GenServer.call(server, {:assignment, group, topic, member})
 
   @doc "Runs one reconcile (evict timed-out members + rebalance) immediately. Also fired on the timer."
   @spec reconcile_now(GenServer.server()) :: :ok
@@ -175,53 +144,6 @@ defmodule Malachi.Consumer.GroupCoordinator do
   end
 
   @impl true
-  def handle_call({:join, group, topic, member}, _from, state) do
-    if state.owns_fun.(topic) do
-      {state, group_state} = join_member(state, {group, topic}, topic, member)
-      {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
-    else
-      {:reply, {:error, :not_owner}, state}
-    end
-  end
-
-  def handle_call({:poll, group, topic, member}, _from, state) do
-    if state.owns_fun.(topic) do
-      key = {group, topic}
-
-      case Map.get(state.groups, key) do
-        # known member: refresh its session only (no rebalance)
-        %{members: members} = group_state when is_map_key(members, member) ->
-          group_state = %{group_state | members: Map.put(members, member, state.clock.())}
-          state = put_in(state.groups[key], group_state)
-          {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
-
-        # new (or evicted) member: register it, which rebalances
-        _new ->
-          {state, group_state} = join_member(state, key, topic, member)
-          {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
-      end
-    else
-      {:reply, {:error, :not_owner}, state}
-    end
-  end
-
-  def handle_call({:heartbeat, group, topic, member}, _from, state) do
-    key = {group, topic}
-
-    case {state.owns_fun.(topic), Map.get(state.groups, key)} do
-      {false, _group_state} ->
-        {:reply, {:error, :not_owner}, state}
-
-      {true, %{members: members} = group_state} when is_map_key(members, member) ->
-        group_state = %{group_state | members: Map.put(members, member, state.clock.())}
-        state = put_in(state.groups[key], group_state)
-        {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
-
-      {true, _evicted_or_unknown} ->
-        {:reply, {:error, :unknown_member}, state}
-    end
-  end
-
   def handle_call({:leave, group, topic, member}, _from, state) do
     key = {group, topic}
 
@@ -239,16 +161,6 @@ defmodule Malachi.Consumer.GroupCoordinator do
       end
 
     {:reply, :ok, state}
-  end
-
-  def handle_call({:assignment, group, topic, member}, _from, state) do
-    case Map.get(state.groups, {group, topic}) do
-      %{members: members} = group_state when is_map_key(members, member) ->
-        {:reply, {:ok, group_state.generation, ranges_of(group_state, member)}, state}
-
-      _evicted_or_unknown ->
-        {:reply, {:error, :unknown_member}, state}
-    end
   end
 
   # The group key calls need the group's epoch. One the control plane has not opened yet for this

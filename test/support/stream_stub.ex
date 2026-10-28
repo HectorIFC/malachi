@@ -7,7 +7,9 @@ defmodule Malachi.Test.StreamStub do
   itself, `topic_routes` gives the routes set with `set_routes/3` (one range, 0, until then), an
   `open_stream` opens the next stream id, and every `append` is acknowledged unless `set_appends/2`
   says otherwise. `overrides`, given at start and changed with `set_override/3`, replace the answer to a
-  key: `:close` (the connection), `:silent` (no answer), `{:error, reason}`, or for an append
+  key: `:close` (the connection), `:silent` (no answer), `{:error, reason}`, or for `cluster_state`
+  `:streams_off` (the answer of a node of a release that served the stream keys only behind the
+  `producer_streams` flag, with it off), or for an append
   `{:refuse_append, reason}` (an acknowledgement naming it as failed, counted by `refused/1`), or for an
   open_consume `{:push_on_open, values}` (a page of the ones at or past the position the open asks for, the
   `n`th value at offset `n`, pushed right after the answer); `{:after, n, reply}` answers the first `n`
@@ -213,10 +215,10 @@ defmodule Malachi.Test.StreamStub do
   defp after_one(state, api_key, n, first, reply),
     do: %{state | overrides: Map.put(state.overrides, api_key, {:after, n - 1, first, reply})}
 
-  defp answer(stub, sock, 24, corr, _payload, _reply) do
+  defp answer(stub, sock, 24, corr, _payload, reply) do
     %{advertised_port: advertised, other_brokers: others} = Agent.get(stub.state, & &1)
     broker = %{id: "stub@127.0.0.1", host: "127.0.0.1", port: advertised || stub.port, status: :alive}
-    state = %{version: 1, streams_enabled: true, brokers: [broker | others], vnodes: [0]}
+    state = %{version: 1, streams_enabled: reply != :streams_off, brokers: [broker | others], vnodes: [0]}
     :gen_tcp.send(sock, ok_body(corr, Wire.encode_cluster_state_resp(state)))
   end
 

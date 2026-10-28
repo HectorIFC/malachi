@@ -104,15 +104,18 @@ else
 fi
 echo ""
 
-# Step 5: NorthGuard log stack functionality (produce by key -> fetch by opaque cursor)
-echo "Step 5: Testing NorthGuard log stack (produce/fetch)..."
+# Step 5: NorthGuard log stack functionality (append by key on a producer stream -> read the topic back),
+# over the wire through `Malachi.Loadtest.Client` connected to the node's own plain TCP listener as admin
+echo "Step 5: Testing NorthGuard log stack (produce/read)..."
 FUNC_TEST=$(docker exec "$CONTAINER_NAME" bin/malachi rpc '
+  alias Malachi.Loadtest.Client
   topic = "validation_topic"
-  :ok = Malachi.LogApi.create_topic(Malachi.LogBroker, topic)
-  rec = %Malachi.Log.Record{key: "vk", value: "validation_msg"}
-  {:ok, count} = Malachi.LogApi.produce_records(Malachi.LogBroker, topic, [rec])
-  {:ok, records, _cursor} = Malachi.LogApi.fetch(Malachi.LogBroker, topic, :start, 10)
-  values = Enum.map(records, & &1.value)
+  {:ok, client} = Client.connect(host: "127.0.0.1", port: Malachi.TCPAcceptorPool.port(), user: "admin", pass: System.fetch_env!("MALACHI_ADMIN_PASS"))
+  :ok = Client.create_topic(client, topic, 8)
+  rec = Malachi.Log.Record.new("validation_msg", key: "vk")
+  {:ok, count} = Client.produce(client, topic, [rec], 10_000)
+  {:ok, %{values: values}} = Client.read(client, topic)
+  Client.close(client)
   case {count, "validation_msg" in values} do
     {1, true} -> IO.puts("OK:produced=#{count}")
     other -> IO.puts("FAIL:#{inspect(other)}")

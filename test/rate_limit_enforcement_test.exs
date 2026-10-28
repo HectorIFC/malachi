@@ -13,7 +13,7 @@ defmodule Malachi.RateLimitEnforcementTest do
 
   alias Malachi.Auth
   alias Malachi.Metrics
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.StreamTCP
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
@@ -30,7 +30,7 @@ defmodule Malachi.RateLimitEnforcementTest do
   ]
 
   setup do
-    :ok = StreamsOn.setup(%{})
+    :ok = RouterTopology.clear()
     prior = for key <- @limit_keys, into: %{}, do: {key, Application.get_env(:malachi, key)}
     on_exit(fn -> for {key, value} <- prior, do: restore(key, value) end)
     :ok

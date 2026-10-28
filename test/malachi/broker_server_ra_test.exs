@@ -24,7 +24,6 @@ defmodule Malachi.BrokerServerRaTest do
   alias Malachi.Test.FaultySegmentStore
   alias Malachi.Test.ReadBack
   alias Malachi.Test.SilentRaMember
-  alias Malachi.Test.StreamPush
   alias Malachi.Test.TmpDir
   alias Malachi.Test.UnknownMessages
 
@@ -530,42 +529,10 @@ defmodule Malachi.BrokerServerRaTest do
     end)
   end
 
-  test "a subscriber is pushed records produced through a different frontend" do
-    # A streaming subscriber used to be pushed only on subscribe, on its own ack, and on a produce
-    # through the broker it subscribed to. A produce through another frontend woke that frontend's
-    # subscribers and not this one's, so a topic written on one node and streamed from another
-    # delivered nothing, with no error anywhere and both nodes healthy. An ack cannot recover it,
-    # having no records to acknowledge.
-    cluster = :"bs_sub_#{System.unique_integer([:positive])}"
-    on_exit(fn -> MetadataServer.delete(cluster) end)
-
-    name = :"sub_repl_#{System.unique_integer([:positive])}"
-    directory = TmpDir.path("malachi_sub")
-    on_exit(fn -> File.rm_rf!(directory) end)
-    {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
-    on_exit(fn -> stop_quietly(repl) end)
-
-    opts = [brokers: [{name, node()}], metadata_cluster: cluster, brokers_refresh_interval: 100]
-    {:ok, writer} = BrokerServer.start_link("unused", opts)
-    {:ok, streamer} = BrokerServer.start_link("unused", opts)
-
-    {:ok, _root} = BrokerServer.create_topic(writer, "events", 4)
-    :ok = BrokerServer.subscribe(streamer, "events", "g", 100, 10)
-
-    # Produced through the OTHER broker, so nothing on this path wakes the subscription.
-    {:ok, _} = BrokerServer.produce(writer, "events", [Record.new("v1", key: "k1")])
-
-    assert {:log_records, "events", records, _positions} = StreamPush.recv(3_000)
-    assert Enum.map(records, & &1.value) == ["v1"]
-
-    :ok = BrokerServer.stop(writer)
-    :ok = BrokerServer.stop(streamer)
-  end
-
   test "a consume stream is woken by records produced through a different frontend" do
-    # The stream keys' form of the subscriber case above: a consume stream armed on one frontend must be
-    # woken when its range grows through another, or a topic written on one node and streamed from another
-    # delivers nothing, with no error anywhere and both nodes healthy.
+    # A consume stream armed on one frontend must be woken when its range grows through another, or a topic
+    # written on one node and streamed from another delivers nothing, with no error anywhere and both nodes
+    # healthy.
     cluster = :"bs_consume_#{System.unique_integer([:positive])}"
     on_exit(fn -> MetadataServer.delete(cluster) end)
 

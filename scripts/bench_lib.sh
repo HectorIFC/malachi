@@ -1,7 +1,6 @@
 # shellcheck shell=bash
 # Shared by the harnesses that pin a server and a load generator to cpusets and record what they measured
-# (scripts/loadtest-ceiling.sh, benchmark/docker-pipeline.sh, benchmark/netem-hop.sh,
-# benchmark/stalled_subscriber_ab.sh).
+# (scripts/loadtest-ceiling.sh, benchmark/docker-pipeline.sh).
 
 # How many cores a cpu-list names. Handles single ids (0), ranges (1-3), and strides (0-10:2): Docker's
 # cpuset takes the first two forms, taskset all three. Counting comma tokens alone would read 1-3 as ONE

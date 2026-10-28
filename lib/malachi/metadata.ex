@@ -204,6 +204,8 @@ defmodule Malachi.Metadata do
       # command by the rule in `Malachi.Cluster.MachineVersion`: it enters at the next version, so an older member
       # refuses it with the state unchanged instead of guessing, and every command already in a log keeps its meaning.
       {:set_segment_replicas, 4} => 7,
+      # The unfenced commit of the retired data keys: no client issues it anymore, but a log written before
+      # they were removed still holds it, and replaying that log must apply it as it did.
       {:commit_offset, 4} => 0,
       # The fenced commit and the group epoch the group keys (#275) need: a commit that carries the
       # generation it was taken at, and a coordinator opening a group.
@@ -529,6 +531,9 @@ defmodule Malachi.Metadata do
   end
 
   defp do_apply(%__MODULE__{} = state, {:commit_offset, group, topic, offsets}) do
+    # No client issues this command anymore (the data keys that did are retired): it is applied for a log
+    # written before then, which replay must apply exactly as it did.
+    #
     # A consumer group's durable position, **merged per range** (last commit wins for each range) rather
     # than replaced: with a partitioned group, each member commits only the ranges it owns, and must not
     # clobber the positions of ranges owned by other members. Then **prune** offsets of ranges that are no

@@ -9,7 +9,7 @@ defmodule ProducerJsTest do
   alias Malachi.Loadtest.Conn
   alias Malachi.Loadtest.Router
   alias Malachi.TCPAcceptorPool
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.TmpDir
   alias Malachi.Wire
 
@@ -27,7 +27,7 @@ defmodule ProducerJsTest do
   end
 
   test "against the server, across a split: every value acknowledged is read back, once", ctx do
-    :ok = StreamsOn.setup(%{})
+    :ok = RouterTopology.clear()
     topic = "producer_js_#{System.unique_integer([:positive])}"
     {:ok, conn} = Conn.connect(port: TCPAcceptorPool.port())
     {:ok, conn} = Conn.authenticate(conn, user: "admin", pass: "admin123")

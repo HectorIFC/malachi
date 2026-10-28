@@ -20,7 +20,6 @@ defmodule Malachi.TCPAcceptor do
   alias Malachi.ConnectionStreams
   alias Malachi.I18n
   alias Malachi.IPAddress
-  alias Malachi.LogApi
   alias Malachi.TCPProtocol
   alias Malachi.Wire
 
@@ -410,8 +409,8 @@ defmodule Malachi.TCPAcceptor do
   defp oidc_client_error(reason) when reason in [:oidc_auth_disabled, :oidc_misconfigured], do: reason
   defp oidc_client_error(_validation_or_identity_error), do: :invalid_credentials
 
-  # Reads request frames and dispatches each; loops until the socket closes or errors. A `subscribe` frame
-  # switches the connection into `stream_loop/2` (server-push streaming) for the rest of its life.
+  # Reads request frames and dispatches each; loops until the socket closes or errors. A frame that opens a
+  # producer or consume stream switches the connection into `streams_loop/2` for the rest of its life.
   defp receive_loop(%{socket: socket, transport: transport, buffer: buffer} = state) do
     recv_timeout = Application.get_env(:malachi, :tcp_recv_timeout, 30_000)
 
@@ -419,7 +418,6 @@ defmodule Malachi.TCPAcceptor do
       {:ok, data} ->
         case process_buffered_frames(buffer <> data, state) do
           {:more, remaining} -> receive_loop(%{state | buffer: remaining})
-          {:stream, sub_corr, remaining} -> stream_loop(%{state | buffer: remaining}, sub_corr)
           {:streams, streams, remaining} -> streams_loop(%{state | buffer: remaining}, streams)
           {:close, _reason} -> close_oversized(state)
         end
@@ -430,17 +428,14 @@ defmodule Malachi.TCPAcceptor do
   end
 
   # Processes complete frames until the buffer is exhausted (`{:more, trailing}`), a frame opens a stream
-  # (`{:stream, sub_corr, trailing}`, carrying any frames buffered after the subscribe), or an oversized
-  # frame is seen (`{:close, reason}`).
+  # (`{:streams, streams, trailing}`, carrying any frames buffered after it), or an oversized frame is seen
+  # (`{:close, reason}`).
   defp process_buffered_frames(buffer, state) do
     case Wire.decode_frame(buffer, max_frame_size()) do
       {:ok, frame_body, rest} ->
         case process_authenticated(frame_body, state) do
           :ok ->
             process_buffered_frames(rest, state)
-
-          {:stream, sub_corr} ->
-            {:stream, sub_corr, rest}
 
           {:opened, kind, corr, opened} ->
             streams =
@@ -467,60 +462,6 @@ defmodule Malachi.TCPAcceptor do
   @compile {:inline, process_authenticated: 2}
   defp process_authenticated(frame_body, %{socket: socket, session: session, transport: transport}) do
     TCPProtocol.process_frame(socket, frame_body, session, transport)
-  end
-
-  # A subscribed connection becomes a one-stream duplex: switched to active mode so a single `receive`
-  # handles both the broker's `{:log_read, plan}` pushes (read here and forwarded to the client as
-  # response frames tagged with the subscribe's correlation id) and the client's inbound ack frames. Any frames buffered
-  # alongside the subscribe are drained first. The stream ends when the socket closes, or when a member's
-  # ack finds no coordinator to answer it (`TCPProtocol.process_stream_frame/3`); the broker drops the
-  # subscriber via the connection process's `:DOWN`.
-  defp stream_loop(%{buffer: buffer} = state, sub_corr) do
-    case handle_stream_buffer(buffer, state) do
-      {:more, remaining} ->
-        arm_active(state)
-        stream_recv(%{state | buffer: remaining}, sub_corr)
-
-      {:close, reason} ->
-        close_stream(state, reason)
-    end
-  end
-
-  defp close_stream(state, :frame_too_large), do: close_oversized(state)
-  defp close_stream(%{socket: socket, transport: transport}, _told), do: close_socket(socket, transport)
-
-  defp stream_recv(%{socket: socket, transport: transport, buffer: buffer} = state, sub_corr) do
-    receive do
-      {:log_read, plan} ->
-        # The broker decided this subscriber is owed records; the read and the write run here, in the
-        # connection, not in the loop that serializes appends (`Malachi.BrokerServer.execute_push/1`).
-        case LogApi.execute_push(plan) do
-          {:ok, _topic, records, positions} ->
-            frame = Wire.encode_ok(sub_corr, Wire.encode_fetch_resp(records, LogApi.encode_cursor(positions)))
-            transport.send(socket, frame)
-
-          :nothing ->
-            :ok
-        end
-
-        stream_recv(state, sub_corr)
-
-      {tag, ^socket, data} when tag in [:tcp, :ssl] ->
-        case handle_stream_buffer(buffer <> data, state) do
-          {:more, remaining} ->
-            arm_active(state)
-            stream_recv(%{state | buffer: remaining}, sub_corr)
-
-          {:close, reason} ->
-            close_stream(state, reason)
-        end
-
-      {tag, ^socket} when tag in [:tcp_closed, :ssl_closed] ->
-        close_socket(socket, transport)
-
-      {tag, ^socket, _reason} when tag in [:tcp_error, :ssl_error] ->
-        close_socket(socket, transport)
-    end
   end
 
   # A connection holding streams (`Malachi.ConnectionStreams`), producer and consume streams alike: switched
@@ -632,25 +573,6 @@ defmodule Malachi.TCPAcceptor do
   defp arm_if_room(state, streams) do
     if ConnectionStreams.room?(streams), do: arm_active(state)
     streams
-  end
-
-  # Applies each complete inbound frame (an ack, per `TCPProtocol.process_stream_frame/3`) and returns the
-  # trailing partial data to keep buffered, or `{:close, reason}` on an oversized frame or a stream that
-  # ends (a member ack its coordinator could not answer, already told to the client).
-  defp handle_stream_buffer(buffer, %{socket: socket, transport: transport} = state) do
-    case Wire.decode_frame(buffer, max_frame_size()) do
-      {:ok, frame_body, rest} ->
-        case TCPProtocol.process_stream_frame(socket, frame_body, transport) do
-          :ok -> handle_stream_buffer(rest, state)
-          {:close, _reason} = close -> close
-        end
-
-      :incomplete ->
-        {:more, buffer}
-
-      {:error, :frame_too_large} ->
-        {:close, :frame_too_large}
-    end
   end
 
   # The largest request frame the server will accept. A declared length beyond this is rejected as soon as

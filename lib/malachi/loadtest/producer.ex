@@ -10,7 +10,7 @@ defmodule Malachi.Loadtest.Producer do
   are events about the records handed to `produce/4`, each record carried with a tag of the caller's:
 
     * `{:acked, entries, latency_us}`: one append's records, acknowledged, `latency_us` after it was sent
-      (the round trip a legacy produce measures; time spent lingering is not in it);
+      (the round trip of one append; time spent lingering is not in it);
     * `{:failed, entries, reason}`: one append's records, refused with `reason` as the broker named it,
       or `"connection_lost"` for an append in flight when its connection dropped, which may or may not
       have landed.

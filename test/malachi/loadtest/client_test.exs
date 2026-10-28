@@ -9,12 +9,12 @@ defmodule Malachi.Loadtest.ClientTest do
   alias Malachi.Loadtest.Client
   alias Malachi.Log.Record
   alias Malachi.TCPAcceptorPool
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.StreamStub
   alias Malachi.Wire
 
   setup do
-    :ok = StreamsOn.setup(%{})
+    :ok = RouterTopology.clear()
     {:ok, client} = Client.connect(opts("admin", "admin123"))
     on_exit(fn -> Client.close(client) end)
     %{client: client, topic: "client_#{System.unique_integer([:positive])}"}

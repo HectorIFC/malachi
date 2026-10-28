@@ -1999,12 +1999,12 @@ defmodule Malachi.BrokerTest do
       {broker, _root_id} = broker_with_topic("events")
       broker = Broker.journal(broker)
 
-      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{{"events", 0} => 7})
+      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{{"events", 0} => {0, 7}}, 0)
       {broker, _reply} = Broker.create_topic(broker, "orders", 4)
 
       {commands, drained} = Broker.take_journal(broker)
 
-      assert [{:commit_offset, "billing", "events", _}, {:create_topic, "orders", 4}] = commands
+      assert [{:commit_offset, "billing", "events", _, 0}, {:create_topic, "orders", 4}] = commands
       assert Broker.take_journal(drained) == {[], drained}
     end
 
@@ -2039,22 +2039,6 @@ defmodule Malachi.BrokerTest do
 
       assert [%{state: :active, opened_at: opened_at}] = segments(replayed, root_id)
       assert is_integer(opened_at)
-    end
-
-    test "a replayed commit never moves a group backwards" do
-      # The machine applies commit_offset last-write-wins, which is right for the log and wrong for a
-      # replay: the read being replayed onto was taken first and may already carry a higher position
-      # another node committed. Rolling a group back is redelivery, so the higher one wins.
-      {broker, root_id} = broker_with_topic("events")
-      broker = Broker.journal(broker)
-
-      {broker, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => 10})
-      {commands, broker} = Broker.take_journal(broker)
-
-      {ahead, :ok} = Broker.commit_offset(broker, "billing", "events", %{root_id => 900})
-      replayed = Broker.replay_journal(ahead, commands)
-
-      assert Broker.committed_offsets(replayed, "billing", "events") == %{root_id => 900}
     end
 
     test "a replayed fenced commit never moves a group backwards, nor past a later generation" do

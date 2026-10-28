@@ -789,11 +789,6 @@ operation:
 |--------:|----------------|----------------------------------------------------------------|
 | 0       | `auth`         | **required first frame**; `username`/`password` → session token |
 | 1       | `create_topic` | topic name + keyspace bits                                      |
-| 2       | `produce`      | topic + records (routed by key); returns the produced count    |
-| 3       | `fetch`        | topic + opaque cursor / consumer group / **group member** → records + cursor |
-| 4       | `commit`       | durably commit a consumer group's position (from a cursor)      |
-| 5       | `subscribe`    | open a server-push stream for a group (or a **group member**), bounded by a credit window |
-| 6       | `stream_ack`   | ack N streamed records: commit the position **and** return credit (a **member** ack also heartbeats) |
 | 7       | `leave_group`  | remove a member from its group (fast rebalance on clean shutdown) |
 
 The admin api_keys (users 8 to 11, per-topic ACLs 14 to 16, storage policies 17 to 21, console roles 22
@@ -806,8 +801,8 @@ streams that carry each record's offset (`open_consume`, `consume_ack`, `fetch_r
 membership beside the data path (`join_group`, `group_heartbeat`, `commit_offsets`), with records in
 batches that may be zstd compressed (`Malachi.Wire`, `Malachi.Wire.Batch`, `scripts/lib/wire.js`). Any
 authenticated session gets `cluster_state`: every broker with its status and the address it advertises
-(`MALACHI_ADVERTISED_HOST`), the vnodes, and whether the `producer_streams` cluster flag is on. Keys 25 to 34
-answer `unsupported` until that flag is on. With it on, `topic_routes` answers anyone holding `:produce` or
+(`MALACHI_ADVERTISED_HOST`), the vnodes, and that the stream keys are served (a node of a release before
+they always were says whether its `producer_streams` cluster flag is on). `topic_routes` answers anyone holding `:produce` or
 `:consume` on the topic; `open_stream`, `append` and `close_stream` serve producer streams to anyone holding
 `:produce` on it, opened on the node that leads the range's active segment (another node answers `moved`,
 and routes that differ from the vnode's `stale_routes`), with a window the broker grants and adjusts on
@@ -827,8 +822,7 @@ moves other members' ranges leaves its checkpoints alone (`not_assigned` for a r
 `stale_generation` for a generation older than its hand-over, `unknown_member` for one evicted). The
 control plane, which orders every commit, refuses one below a generation the range was already committed
 at through these keys, so an owner's commit that reaches it after the range's next owner committed is
-refused too; the legacy commit and stream acknowledgement write the same checkpoint unfenced, which a
-group that only uses these keys never meets. A generation carries the group's epoch, which the control
+refused too. A generation carries the group's epoch, which the control
 plane raises each time a coordinator opens the group; a commit at an epoch another coordinator has since
 superseded is refused, and that coordinator opens the group again, so its members learn a new generation
 on their next heartbeat. A connection's commits land in the order it sent them. The group keys need the control

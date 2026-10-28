@@ -1,8 +1,9 @@
 defmodule Malachi.TCPProtocol do
   @moduledoc """
   The Malachi binary log protocol (`Malachi.Wire`). `process_frame/4` decodes a request frame,
-  dispatches by `api_key` to the NorthGuard log operations (create_topic/produce/fetch/commit), and sends
-  a response frame. Auth is handled by the acceptor (`TCPAcceptor`).
+  dispatches by `api_key` to the NorthGuard log operations (creating a topic, the routing, stream and group
+  keys, and the admin operations), and sends a response frame, or tells the acceptor a stream was opened.
+  Auth is handled by the acceptor (`TCPAcceptor`).
 
   This is also where the configured publish/subscribe rate limits are applied (`Malachi.RateLimiter`),
   keyed by the authenticated username and enforced per node. Both are off unless an operator configures
@@ -11,14 +12,13 @@ defmodule Malachi.TCPProtocol do
 
   A frame body comes from an untrusted client, so `process_frame/4` decodes inside a `try`: Wire's payload
   decoders raise on a malformed body, and the boundary answers a single error frame rather than crashing
-  the connection. The client deals in `topic` + key + an **opaque cursor**, never partitions or offsets.
+  the connection.
   """
 
   alias Malachi.Auth.AclStore
   alias Malachi.Auth.Authorization
   alias Malachi.Auth.ConsoleRole
   alias Malachi.BrokerServer
-  alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.Cluster.Policy
   alias Malachi.ConnectionStreams
   alias Malachi.Consumer.CoordinatorRouter
@@ -38,12 +38,13 @@ defmodule Malachi.TCPProtocol do
   @coordinator_name Malachi.LogGroupCoordinator
 
   @doc """
-  Processes one request frame body: decode, dispatch, and send a response frame; returns `:ok`. A
-  `subscribe` frame is the exception. It registers a push stream and returns `{:stream, correlation_id}`
-  (no immediate response), signalling the acceptor to switch that connection to its streaming loop.
+  Processes one request frame body: decode, dispatch, and send a response frame; returns `:ok`. An
+  `open_stream` or `open_consume` the broker opened is the exception: it returns `{:opened, kind,
+  correlation_id, opened}` (no response yet), for the acceptor to record the stream
+  (`stream_opened/6`), which answers the client.
   """
   @spec process_frame(term(), binary(), map(), atom()) ::
-          :ok | {:stream, non_neg_integer()} | {:opened, :producer | :consumer, non_neg_integer(), map()}
+          :ok | {:opened, :producer | :consumer, non_neg_integer(), map()}
   def process_frame(socket, frame_body, session, transport) do
     result =
       case frame_body do
@@ -63,9 +64,6 @@ defmodule Malachi.TCPProtocol do
       end
 
     case result do
-      {:stream, _sub_corr} = stream ->
-        stream
-
       {:opened, _kind, _corr, _opened} = opened ->
         opened
 
@@ -78,8 +76,7 @@ defmodule Malachi.TCPProtocol do
   @doc """
   Processes one client frame on a connection that holds streams (`Malachi.ConnectionStreams`): appends,
   read acks and closes go to the streams, `open_stream` and `open_consume` open another, and every other
-  request is answered as on any connection. A `subscribe` is refused: its push stream belongs to a
-  connection of its own. Returns the streams after the frame.
+  request is answered as on any connection. Returns the streams after the frame.
   """
   @spec process_streams_frame(term(), binary(), map(), atom(), ConnectionStreams.t()) :: ConnectionStreams.t()
   def process_streams_frame(socket, frame_body, session, transport, streams) do
@@ -133,10 +130,6 @@ defmodule Malachi.TCPProtocol do
             transport.send(socket, Wire.encode_error(correlation_id, :unknown_stream))
             streams
         end
-
-      api_key == Wire.subscribe_key() ->
-        transport.send(socket, Wire.encode_error(correlation_id, :unexpected_frame))
-        streams
 
       true ->
         case process_frame(socket, <<api_key::16, correlation_id::32, payload::binary>>, session, transport) do
@@ -198,8 +191,8 @@ defmodule Malachi.TCPProtocol do
     end
   end
 
-  # One append: the flag and the topic permission are checked again on every frame (an operator can revoke
-  # either while the stream is open). A refusal uses up no sequence, so the appends after it would break the
+  # One append: the topic permission is checked again on every frame (an operator can revoke it while the
+  # stream is open). A refusal uses up no sequence, so the appends after it would break the
   # sequence: it ends the stream, as a client that is refused retires it, and every later append is
   # answered `unknown_stream`. The publish quotas are charged inside `ProducerStreams.append/6`, once
   # the batch is decoded, by its inflated records and bytes (`charge_publish/3`).
@@ -210,18 +203,7 @@ defmodule Malachi.TCPProtocol do
         streams
 
       topic ->
-        refusal =
-          cond do
-            not ClusterFlagsCache.enabled?(Routing.flag()) -> :unsupported
-            not topic_allowed?(session, :produce, topic) -> :permission_denied
-            true -> nil
-          end
-
-        if refusal do
-          transport.send(socket, Wire.encode_error(correlation_id, refusal))
-          {:ok, producers} = ProducerStreams.close(streams.producers, stream_id)
-          %{streams | producers: producers}
-        else
+        if topic_allowed?(session, :produce, topic) do
           # `topic/2` above names only an open stream, so the append is taken or answered here
           charge = &charge_publish(session, &1, &2)
 
@@ -229,6 +211,10 @@ defmodule Malachi.TCPProtocol do
             ProducerStreams.append(streams.producers, stream_id, sequence, batch, max_inflated_batch_bytes(), charge)
 
           Enum.each(frames, &transport.send(socket, &1))
+          %{streams | producers: producers}
+        else
+          transport.send(socket, Wire.encode_error(correlation_id, :permission_denied))
+          {:ok, producers} = ProducerStreams.close(streams.producers, stream_id)
           %{streams | producers: producers}
         end
     end
@@ -263,62 +249,10 @@ defmodule Malachi.TCPProtocol do
 
   defp max_inflated_batch_bytes, do: Application.get_env(:malachi, :max_inflated_batch_bytes, 16_777_216)
 
-  @doc """
-  Processes one client frame while the connection is in streaming mode. The only inbound frame is a
-  `stream_ack` (applied for its window credit + durable commit); any other frame gets an error response
-  and the stream continues. A malformed frame is answered, not fatal. Returns `:ok`, or `{:close,
-  :not_owner}` for a member's ack its coordinator could not answer: the stream ends, the connection closes
-  without a response (an ack never gets one), and the broker drops the subscriber via the process
-  `:DOWN`.
-  """
-  @spec process_stream_frame(term(), binary(), atom()) :: :ok | {:close, :not_owner}
-  def process_stream_frame(socket, frame_body, transport) do
-    {api_key, correlation_id, payload} = Wire.decode_request(frame_body)
-
-    if api_key == Wire.stream_ack_key() do
-      {topic, group, member, cursor, count} = Wire.decode_stream_ack_req(payload)
-      # the subscription already gated :consume; the session's permissions are immutable, so an ack here
-      # is necessarily authorized. Fire-and-forget: credit comes back as more pushes. A member ack also
-      # heartbeats the coordinator and refreshes the member's ranges (an empty ack = a heartbeat).
-      if member != nil and group != nil do
-        member_ack({topic, group, member, cursor, count})
-      else
-        LogApi.stream_ack(broker_for(topic), topic, group, cursor, count)
-        :ok
-      end
-    else
-      transport.send(socket, Wire.encode_error(correlation_id, :unexpected_frame))
-      :ok
-    end
-  rescue
-    _malformed ->
-      transport.send(socket, Wire.encode_error(0, :malformed_request))
-      :ok
-  end
-
-  # A member's read ack goes through its coordinator before it returns the stream's credit. A coordinator
-  # that cannot answer (gone, or no longer the topic's) would leave the credit unreturned and the stream
-  # stalled with nothing to tell the client, so the stream ends instead. An ack never gets a response
-  # (`Malachi.Wire`), so the connection just closes, as it did when the coordinator's exit took it down:
-  # the client subscribes again, where the coordinator is, from the group's checkpoint.
-  defp member_ack({topic, group, member, cursor, count}) do
-    case LogApi.stream_ack_member(broker_for(topic), coordinator_for(topic), topic, group, member, cursor, count) do
-      {:error, :not_owner} ->
-        {:close, :not_owner}
-
-      _acked_or_refused ->
-        :ok
-    end
-  end
-
   # api_key is a value (not a literal), so match it against the Wire accessors with a cond.
   defp dispatch(api_key, correlation_id, payload, session) do
     cond do
       api_key == Wire.create_topic_key() -> create_topic(correlation_id, payload, session)
-      api_key == Wire.produce_key() -> produce(correlation_id, payload, session)
-      api_key == Wire.fetch_key() -> fetch(correlation_id, payload, session)
-      api_key == Wire.commit_key() -> commit(correlation_id, payload, session)
-      api_key == Wire.subscribe_key() -> subscribe(correlation_id, payload, session)
       api_key == Wire.leave_group_key() -> leave_group(correlation_id, payload, session)
       # admin management ops (user + ACL CRUD) live in their own dispatch to keep each cond small
       true -> dispatch_admin(api_key, correlation_id, payload, session)
@@ -353,16 +287,12 @@ defmodule Malachi.TCPProtocol do
     end
   end
 
-  # The routing and stream keys a routing client speaks (#275). `cluster_state` always answers: it is how a
-  # client learns whether the rest are on. The rest wait for the `producer_streams` cluster flag
-  # (`Malachi.Routing.flag/0`), which a node can only have once every node supports it.
+  # The routing, stream and group keys a routing client speaks (#275). Every other key, the retired data
+  # keys 2 to 6 among them, is `unknown_api_key`.
   defp dispatch_routing(api_key, correlation_id, payload, session) do
     cond do
       api_key == Wire.cluster_state_key() ->
         cluster_state(correlation_id, payload)
-
-      api_key in Wire.topic_routes_key()..Wire.commit_offsets_key() and not ClusterFlagsCache.enabled?(Routing.flag()) ->
-        Wire.encode_error(correlation_id, :unsupported)
 
       api_key == Wire.topic_routes_key() ->
         topic_routes(correlation_id, payload, session)
@@ -433,8 +363,9 @@ defmodule Malachi.TCPProtocol do
   end
 
   # A consume stream on one range (`Malachi.ConsumeStreams`), opened where the range is served, against
-  # the routes the client read, as a producer stream is. It spends one token of the subscribe quota, as a
-  # subscribe does (`read_allowed/2` says when): the credit window, not a quota, bounds what it reads. The
+  # the routes the client read, as a producer stream is. It spends one token of the subscribe quota (the
+  # `:subscribe` rate-limit action; `read_allowed/2` says when): the credit window, not a quota, bounds what
+  # it reads. The
   # pages go out with codec `none`, so a client that does not accept it is refused.
   defp open_consume(correlation_id, payload, session) do
     req = Wire.decode_open_consume_req(payload)
@@ -514,9 +445,8 @@ defmodule Malachi.TCPProtocol do
   # The keys whose answer waits on another process, run beside a connection that holds streams so the wait
   # holds none of them back (`Malachi.ConnectionStreams.run/3`): a `fetch_range` waiting for records, and the
   # group keys, which ask a coordinator that may be on another node and, for a commit, the control plane
-  # after it. Only while they are served: otherwise they answer `unsupported` in line.
-  defp waits_beside?(api_key),
-    do: (api_key == Wire.fetch_range_key() or group_key?(api_key)) and ClusterFlagsCache.enabled?(Routing.flag())
+  # after it.
+  defp waits_beside?(api_key), do: api_key == Wire.fetch_range_key() or group_key?(api_key)
 
   # A group request is decoded here, where a malformed one is answered `malformed_request` as on any
   # connection; only the asking runs beside it. Joins and commits run in the order they came, with any
@@ -649,14 +579,6 @@ defmodule Malachi.TCPProtocol do
   defp group_allowed(session, topic),
     do: if(topic_allowed?(session, :consume, topic), do: :ok, else: {:error, :permission_denied})
 
-  # A consumer-group member gets a stream scoped to its ranges (opaque); otherwise the stream is the whole
-  # group's.
-  defp subscribe_as(topic, group, member, window, max) when member != nil and group != nil,
-    do: LogApi.subscribe_member(broker_for(topic), coordinator_for(topic), topic, group, member, window, max)
-
-  defp subscribe_as(topic, group, _member, window, max),
-    do: LogApi.subscribe(broker_for(topic), topic, group, window, max)
-
   # A coordinator reached by name on this node or another (`CoordinatorRouter.resolve/2`) can be gone for a
   # moment while a vnode's leadership moves: that is `:not_owner`, which the client answers by asking again,
   # not an exit that takes the connection with it.
@@ -678,13 +600,9 @@ defmodule Malachi.TCPProtocol do
     end
   end
 
-  # Whether a consume stream on `topic` may still push: the flag and the consume permission.
+  # Whether a consume stream on `topic` may still push: the consume permission.
   defp consume_allowed(session, topic) do
-    cond do
-      not ClusterFlagsCache.enabled?(Routing.flag()) -> {:error, :unsupported}
-      not topic_allowed?(session, :consume, topic) -> {:error, :permission_denied}
-      true -> :ok
-    end
+    if topic_allowed?(session, :consume, topic), do: :ok, else: {:error, :permission_denied}
   end
 
   # The soft byte limit of a page, capped by the inflated batch size the server takes in.
@@ -717,95 +635,11 @@ defmodule Malachi.TCPProtocol do
     end
   end
 
-  # Registers the caller as a push subscriber and signals the acceptor to enter streaming mode. Bounds the
-  # client-supplied window/batch. On a permission failure returns an error frame (the connection stays in
-  # request/response mode).
-  defp subscribe(correlation_id, payload, session) do
-    {topic, group, member, window_raw, max_raw} = Wire.decode_subscribe_req(payload)
-
-    with_topic_permission(session, :consume, topic, correlation_id, fn ->
-      with_rate_limit(:subscribe, session, correlation_id, fn ->
-        window = stream_window(window_raw)
-        max = fetch_max(max_raw)
-
-        result = subscribe_as(topic, group, member, window, max)
-
-        # `:not_owner` (stale routing during a failover) answers an error frame instead of entering stream
-        # mode; the client re-resolves and re-subscribes against the new owner.
-        case result do
-          :ok -> {:stream, correlation_id}
-          {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
-        end
-      end)
-    end)
-  end
-
   defp create_topic(correlation_id, payload, session) do
     {topic, _keyspace_bits} = Wire.decode_create_topic_req(payload)
 
     with_topic_permission(session, :produce, topic, correlation_id, fn ->
       ok_or_error(correlation_id, LogApi.create_topic(broker_for(topic), topic), <<>>)
-    end)
-  end
-
-  defp produce(correlation_id, payload, session) do
-    {topic, records} = Wire.decode_produce_req(payload)
-
-    with_topic_permission(session, :produce, topic, correlation_id, fn ->
-      # this key carries no compression, so the bytes charged are the request's as received
-      case charge_publish(session, length(records), byte_size(payload)) do
-        :ok ->
-          case LogApi.produce_records(broker_for(topic), topic, records) do
-            {:ok, count} -> Wire.encode_ok(correlation_id, <<count::32>>)
-            {:error, reason} -> Wire.encode_error(correlation_id, normalize(reason))
-          end
-
-        {:error, reason} ->
-          Wire.encode_error(correlation_id, reason)
-      end
-    end)
-  end
-
-  defp fetch(correlation_id, payload, session) do
-    {topic, cursor, group, member, max_raw, wait_raw} = Wire.decode_fetch_req(payload)
-
-    with_topic_permission(session, :consume, topic, correlation_id, fn ->
-      max = fetch_max(max_raw)
-      wait_ms = fetch_wait(wait_raw)
-
-      result =
-        cond do
-          # a consumer-group member: the server scopes the fetch to the member's assigned ranges and
-          # returns records + an opaque cursor (the client never sees a range id)
-          member != nil and group != nil ->
-            LogApi.fetch_member(broker_for(topic), coordinator_for(topic), topic, group, member, max, wait_ms)
-
-          # an explicit cursor (client-managed paging) takes precedence over a group resume
-          cursor != nil ->
-            LogApi.fetch(broker_for(topic), topic, cursor, max, wait_ms)
-
-          group != nil ->
-            LogApi.fetch_group(broker_for(topic), topic, group, max, wait_ms)
-
-          true ->
-            LogApi.fetch(broker_for(topic), topic, :start, max, wait_ms)
-        end
-
-      case result do
-        {:ok, records, next_cursor} ->
-          Wire.encode_ok(correlation_id, Wire.encode_fetch_resp(records, next_cursor))
-
-        {:error, reason} ->
-          Wire.encode_error(correlation_id, normalize(reason))
-      end
-    end)
-  end
-
-  defp commit(correlation_id, payload, session) do
-    {topic, group, cursor} = Wire.decode_commit_req(payload)
-
-    with_topic_permission(session, :consume, topic, correlation_id, fn ->
-      ok_or_error(correlation_id, LogApi.commit(broker_for(topic), topic, group, cursor), <<>>)
     end)
   end
 
@@ -1010,14 +844,14 @@ defmodule Malachi.TCPProtocol do
     end)
   end
 
-  # Runs `fun` (which returns a response frame) only if the session's user is within the configured limit
-  # for `action`; otherwise a `rate_limited` error frame and a bump of the matching blocked counter, which
-  # is what makes `rate_limit_blocked{action=...}` able to move at all.
+  # Whether the session's user is within the configured limit for `action`: `:ok`, or `{:error,
+  # :rate_limited}` and a bump of the matching blocked counter, which is what makes
+  # `rate_limit_blocked{action=...}` able to move at all.
   #
-  # Ordering matters: this sits INSIDE the permission check, so a request the caller was never allowed to
-  # make cannot spend tokens from the quota. Unconfigured is the default and the whole cost is two config
-  # reads (the limit and the window). A subscribe spends one token; a produce is charged by its records and
-  # bytes (`charge_publish/3`).
+  # Ordering matters: the callers check it AFTER the permission, so a request the caller was never allowed
+  # to make cannot spend tokens from the quota. Unconfigured is the default and the whole cost is two config
+  # reads (the limit and the window). An `open_consume` and a `fetch_range` spend one `:subscribe` token; an
+  # append is charged by its records and bytes (`charge_publish/3`).
   #
   # The check runs in this connection's own process (`check_limit_in_caller/3`) rather than through the
   # limiter GenServer, which would put every connection in the system behind one process on the hottest
@@ -1028,13 +862,6 @@ defmodule Malachi.TCPProtocol do
   # `retry_after_ms` is computed by the limiter but deliberately not carried on the wire: the error frame's
   # payload is a bare reason string, and `Malachi.Wire` freezes that encoding, so carrying it would take a
   # new api_key.
-  defp with_rate_limit(action, session, correlation_id, fun) do
-    case rate_limit_check(action, session) do
-      :ok -> fun.()
-      {:error, :rate_limited} -> Wire.encode_error(correlation_id, :rate_limited)
-    end
-  end
-
   defp rate_limit_check(action, session) do
     case RateLimiter.action_config(action) do
       nil ->
@@ -1061,7 +888,7 @@ defmodule Malachi.TCPProtocol do
   defp normalize(reason) when is_atom(reason) or is_binary(reason), do: reason
   defp normalize(reason), do: inspect(reason)
 
-  # Bound the client-supplied page size and long-poll wait (opt-in, capped).
+  # Bound the client-supplied page size and `fetch_range` wait (opt-in, capped).
   defp fetch_max(max) when is_integer(max) and max > 0, do: min(max, 1_000)
   defp fetch_max(_max), do: 100
 

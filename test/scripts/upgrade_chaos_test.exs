@@ -215,6 +215,20 @@ defmodule UpgradeChaosTest do
              ]
     end
 
+    # OLD serves the stream keys only behind the producer_streams flag, which this build keeps as a retired
+    # no-op: the drill turns it on once, as soon as the OLD cluster is up, before anything is swapped.
+    test "switches the stream keys on once, after the OLD cluster is up and before the first swap", ctx do
+      assert {output, 0} = run_drill(ctx)
+      assert output =~ "the stream keys are on"
+      calls = docker_calls(ctx)
+      at = fn pattern -> for {call, i} <- Enum.with_index(calls), call =~ pattern, do: i end
+
+      assert [flag] = at.(~r/^exec malachi-cluster-1 .*malachi\.flag enable producer_streams --node malachi@malachi1$/)
+      assert [start] = at.("up -d --force-recreate malachi1 malachi2 malachi3")
+      assert [first_swap | _later] = at.("up -d malachi3 |")
+      assert start < flag and flag < first_swap
+    end
+
     test "keeps the log of every container before replacing it", ctx do
       assert {_output, 0} = run_drill(ctx)
 

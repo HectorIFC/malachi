@@ -96,7 +96,14 @@ defmodule Malachi.ProducerStreamsMultinodeTest do
     record = Record.new(value(index), key: "k")
 
     reqids =
-      BrokerServer.send_stream_produce({@broker, stream.node}, range_id, [record], index, :gen_server.reqids_new())
+      BrokerServer.send_stream_produce(
+        {@broker, stream.node},
+        range_id,
+        [record],
+        index,
+        :gen_server.reqids_new(),
+        :otel_ctx.get_current()
+      )
 
     await(stream, reqids, nil)
   end

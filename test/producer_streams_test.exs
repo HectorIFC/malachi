@@ -3,8 +3,8 @@ defmodule Malachi.ProducerStreamsTest do
   # routes, pipelined appends acknowledged in order, the sequence and window rules, the refusals, and the
   # move a split sends.
   #
-  # async: false. The `producer_streams` flag is the application's own cache (`ClusterFlagsPause`), and
-  # the routing reads the topology the consumer-group router publishes, cleared here for each test.
+  # async: false. The routing reads the topology the consumer-group router publishes, cleared here for each
+  # test.
   use ExUnit.Case, async: false
 
   import Malachi.Test.StreamTCP
@@ -12,29 +12,14 @@ defmodule Malachi.ProducerStreamsTest do
   import Malachi.Test.QuotaForensics, only: [within_one_window: 2, snapshot: 2, assert_refused: 4]
 
   alias Malachi.BrokerServer
-  alias Malachi.Cluster.ClusterFlagsCache
-  alias Malachi.DataPlaneRouter
-  alias Malachi.Routing
-  alias Malachi.Test.ClusterFlagsPause
-  alias Malachi.Test.ReadBack
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
-  @router_topology {Malachi.Consumer.CoordinatorRouter, :topology}
   @quota_window_ms 60_000
 
   setup do
-    :ok = ClusterFlagsPause.pause()
-    ClusterFlagsCache.put([Routing.flag()])
-
-    topology = :persistent_term.get(@router_topology, nil)
-    :persistent_term.erase(@router_topology)
-
-    on_exit(fn ->
-      if topology,
-        do: :persistent_term.put(@router_topology, topology),
-        else: :persistent_term.erase(@router_topology)
-    end)
+    :ok = RouterTopology.clear()
 
     {:ok, socket} = TCPHelper.connect()
     {:ok, _token} = TCPHelper.authenticate_wire(socket, "app", "app123")
@@ -66,24 +51,6 @@ defmodule Malachi.ProducerStreamsTest do
 
     test "a range the topic does not have is refused", ctx do
       assert {:error, "no_such_range"} = open(ctx.socket, ctx.topic, range: 99)
-    end
-
-    test "with the flag off the key is unsupported", ctx do
-      ClusterFlagsCache.put([])
-
-      req = %{
-        topic: ctx.topic,
-        range: 0,
-        routes_version: 0,
-        codec: :none,
-        window_appends: 1,
-        window_bytes: 1,
-        producer_id: nil,
-        label: nil
-      }
-
-      {1, payload} = TCPHelper.request(ctx.socket, Wire.open_stream_key(), 10, Wire.encode_open_stream_req(req))
-      assert Wire.decode_error_reason(payload) == "unsupported"
     end
 
     test "a session that may not produce on the topic is refused", ctx do
@@ -318,15 +285,6 @@ defmodule Malachi.ProducerStreamsTest do
       if code == Wire.ok_code(), do: {:ok, payload}, else: {:error, Wire.decode_error_reason(payload)}
     end
 
-    test "an append after the flag is turned off is unsupported", ctx do
-      {:ok, %{stream_id: id}} = open(ctx.socket, ctx.topic)
-      ClusterFlagsCache.put([])
-      send_append(ctx.socket, id, 0, batch(["a"]))
-      assert reply_to(ctx.socket) == {:error, "unsupported"}
-      # read in process: with the flag off the stream keys, fetch_range among them, are not served
-      assert ReadBack.values(DataPlaneRouter.shard_for(ctx.topic), ctx.topic) == []
-    end
-
     test "an append after the topic's grant is revoked is refused, under strict ACLs", ctx do
       user = "pstream_acl_#{System.unique_integer([:positive])}"
       :ok = Malachi.Auth.add_user(user, "secret-pass-123", [])
@@ -358,16 +316,16 @@ defmodule Malachi.ProducerStreamsTest do
       assert reply_to(socket) == {:error, "unknown_stream"}
     end
 
-    test "a subscribe is refused: one connection does not push records and take appends at once", ctx do
-      {:ok, _resp} = open(ctx.socket, ctx.topic)
+    test "a retired data key is an unknown key here too, and the stream goes on", ctx do
+      {:ok, %{stream_id: id}} = open(ctx.socket, ctx.topic)
 
-      :ok =
-        :gen_tcp.send(
-          ctx.socket,
-          Wire.encode_request(Wire.subscribe_key(), 11, Wire.encode_subscribe_req(ctx.topic, "g", nil, 10, 10))
-        )
+      for api_key <- 2..6 do
+        :ok = :gen_tcp.send(ctx.socket, Wire.encode_request(api_key, 11, <<"anything">>))
+        assert reply_to(ctx.socket) == {:error, "unknown_api_key"}
+      end
 
-      assert reply_to(ctx.socket) == {:error, "unexpected_frame"}
+      send_append(ctx.socket, id, 0, batch(["a"]))
+      assert {_ack, []} = acked_through(ctx.socket, 0)
     end
 
     test "a malformed frame is answered as one, and the connection goes on", ctx do

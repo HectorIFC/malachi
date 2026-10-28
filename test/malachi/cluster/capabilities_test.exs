@@ -203,8 +203,9 @@ defmodule Malachi.Cluster.CapabilitiesTest do
 
   describe "the registry this release ships" do
     test "holds producer_streams, and known/0 and advertised/0 agree" do
-      # producer_streams gates the routing and stream keys (#275). If this ever fails, the release that
-      # added or dropped a capability has to have changed both, and said so.
+      # producer_streams is retired and gates nothing, but stays advertised: a cluster that switched its flag
+      # on refuses to boot a node without it. If this ever fails, the release that added or dropped a
+      # capability has to have changed both, and said so.
       assert Capabilities.known() == [:producer_streams]
       assert Capabilities.advertised() == Capabilities.known()
     end

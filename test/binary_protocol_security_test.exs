@@ -5,9 +5,13 @@ defmodule Malachi.BinaryProtocolSecurityTest do
   # underlying infra (Auth/RateLimiter/LockoutManager) keeps its own unit tests.
   use ExUnit.Case, async: false
 
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.StreamTCP
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
+
+  # the stream keys route through the group router's topology, which another test's sharded broker can
+  # leave naming vnodes this broker does not hold
+  setup {Malachi.Test.RouterTopology, :clear}
 
   defp uniq, do: System.unique_integer([:positive])
 
@@ -41,7 +45,6 @@ defmodule Malachi.BinaryProtocolSecurityTest do
     end
 
     test "requires auth as the first frame: a non-auth frame is rejected" do
-      :ok = StreamsOn.setup(%{})
       socket = connect()
       # a producer stream's open before authenticating
       :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.open_stream_key(), 7, <<>>))
@@ -66,22 +69,16 @@ defmodule Malachi.BinaryProtocolSecurityTest do
   end
 
   describe "permissions" do
-    test "produce requires :produce" do
+    test "a producer stream requires :produce" do
       socket = connect_auth("consumer", "consumer123")
-      {code, payload} = TCPHelper.request(socket, Wire.produce_key(), 1, Wire.encode_produce_req("t_#{uniq()}", []))
-      assert code == Wire.error_code()
-      assert reason(payload) == "permission_denied"
+      assert StreamTCP.open(socket, "t_#{uniq()}", routes_version: 0) == {:error, "permission_denied"}
       :gen_tcp.close(socket)
     end
 
-    test "fetch requires :consume" do
+    test "a range read requires :consume" do
       socket = connect_auth("producer", "producer123")
-
-      {code, payload} =
-        TCPHelper.request(socket, Wire.fetch_key(), 1, Wire.encode_fetch_req("t_#{uniq()}", nil, nil, nil, 100, 0))
-
-      assert code == Wire.error_code()
-      assert reason(payload) == "permission_denied"
+      assert StreamTCP.fetch_range(socket, "t_#{uniq()}", routes_version: 0) == {:error, "permission_denied"}
+      assert StreamTCP.open_consume(socket, "t_#{uniq()}", routes_version: 0) == {:error, "permission_denied"}
       :gen_tcp.close(socket)
     end
   end
@@ -94,6 +91,13 @@ defmodule Malachi.BinaryProtocolSecurityTest do
       assert code == Wire.error_code()
       assert reason(payload) == "unknown_api_key"
 
+      # the retired data keys (produce, fetch, commit, subscribe, stream_ack) are unknown keys like any other
+      for api_key <- 2..6 do
+        {code, payload} = TCPHelper.request(socket, api_key, 70 + api_key, <<"anything">>)
+        assert code == Wire.error_code()
+        assert reason(payload) == "unknown_api_key"
+      end
+
       # the same connection still serves a valid request (framing/state intact)
       {ok_code, _} =
         TCPHelper.request(socket, Wire.create_topic_key(), 8, Wire.encode_create_topic_req("surv_#{uniq()}", 8))
@@ -103,7 +107,6 @@ defmodule Malachi.BinaryProtocolSecurityTest do
     end
 
     test "a truncated payload errors (malformed_request) with the correlation id preserved" do
-      :ok = StreamsOn.setup(%{})
       socket = connect_auth()
 
       # an open_stream payload cut after its range: put_str("t") <> <<range::32>>, no routes version on

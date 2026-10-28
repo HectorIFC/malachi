@@ -1222,16 +1222,8 @@ defmodule Malachi.Broker do
   def domain_violations(%__MODULE__{}, %Metadata{}), do: %{}
 
   @doc """
-  Durably records a consumer `group`'s committed position (`offsets`, per range) for `topic`,
-  through the control plane (Raft-backed when configured). Returns `{broker, reply}`.
-  """
-  @spec commit_offset(t(), Metadata.group(), Metadata.topic_name(), Metadata.offsets()) :: {t(), term()}
-  def commit_offset(%__MODULE__{} = broker, group, topic, offsets) do
-    apply_metadata(broker, {:commit_offset, group, topic, offsets})
-  end
-
-  @doc """
-  `commit_offset/4` for a group member's commit taken at `generation`, which the control plane refuses
+  Durably records a group member's committed position (`offsets`, per range) for `topic`, taken at
+  `generation`, through the control plane (Raft-backed when configured). The control plane refuses it
   whole with `{:error, :stale_generation}` when a range in it was committed at a higher generation (see
   `Malachi.Metadata`'s group fence). Returns `{broker, reply}`.
   """
@@ -1342,25 +1334,16 @@ defmodule Malachi.Broker do
     end
   end
 
-  # `commit_offset` is last-write-wins per range in the machine, which is correct for the Raft log,
+  # `commit_offset` merges per range in the machine, last write winning, which is correct for the Raft log,
   # where the order of application IS the order of truth. A replay inverts that order by construction:
   # the read being replayed onto was taken BEFORE this command, and may already carry a higher position
   # that another node committed meanwhile. Re-applying blind would move the group backwards, which is
-  # the duplicate delivery this replay exists to prevent, so the higher of the two wins per range.
+  # the duplicate delivery this replay exists to prevent, so the higher of the two wins per range. The
+  # fence still holds: a read that already carries a higher generation for one of its ranges refuses the
+  # commit, which leaves the read as it was.
   #
   # The cost is narrow and self-correcting: a deliberate backwards seek made inside the same window is
   # held back by one refresh, after which the log's own value (the seek) is what the cache reads.
-  defp replay_apply(metadata, {:commit_offset, group, topic, offsets}) do
-    merged =
-      metadata
-      |> Metadata.committed_offsets(group, topic)
-      |> Map.merge(offsets, fn _range_id, read, journaled -> max(read, journaled) end)
-
-    Metadata.apply(metadata, {:commit_offset, group, topic, merged}, System.system_time(:millisecond))
-  end
-
-  # The fenced commit replays the same way, and its fence still holds: a read that already carries a
-  # higher generation for one of its ranges refuses it, which leaves the read as it was.
   defp replay_apply(metadata, {:commit_offset, group, topic, offsets, generation}) do
     merged =
       metadata
@@ -1589,9 +1572,9 @@ defmodule Malachi.Broker do
     end
   end
 
-  # A checkpoint is a position a member sent (`Malachi.Wire` 34) or a cursor carried (the legacy commit),
-  # so it is checked as one: a checkpoint past the range's history must not start a reader where it reads
-  # nothing forever.
+  # A checkpoint is a position a member sent (`Malachi.Wire` 34), or one the retired data keys committed
+  # before them and a log still holds, so it is checked as one: a checkpoint past the range's history must
+  # not start a reader where it reads nothing forever.
   defp committed_start(broker, group, topic, range_id) do
     case Map.get(committed_offsets(broker, group, topic), range_id, :start) do
       :start -> {:ok, {0, 0}}
@@ -1624,89 +1607,6 @@ defmodule Malachi.Broker do
         |> Enum.sum()
     end
   end
-
-  @doc """
-  Reads one consume page over several ranges through `view`: up to `max_records` from EACH range, range
-  after range in `range_ids` order, each from its position in `positions` (`:start` when absent). This is
-  the fetch contract (`Malachi.LogApi.fetch/5`: up to `max` records per current range). Returns
-  `{:ok, {records, next_positions, skips}}`, the skips of every range read in range order, or the first
-  read that FAILED as `{:error, reason}`.
-
-  A range the control plane no longer knows is passed over, and any other read error fails the page
-  (the comment on the private reader in this module says why).
-  """
-  @spec consume_ranges(ReadView.t(), [Metadata.range_id()], Metadata.offsets(), pos_integer(), read_fun()) ::
-          {:ok, {[Record.t()], Metadata.offsets(), [Skip.t()]}} | {:error, term()}
-  def consume_ranges(%ReadView{} = view, range_ids, positions, max_records, read_fun) do
-    with {:ok, {pages, positions, skips}} <-
-           read_ranges(view, range_ids, positions, fn _taken -> max_records end, read_fun) do
-      {:ok, {records_of(pages), positions, skips}}
-    end
-  end
-
-  @doc """
-  Like `consume_ranges/5`, but `budget` is the page's, not each range's: a streaming push sizes it to the
-  subscriber's remaining credit, and a budget per range let a topic with N ranges push N times that and
-  run past the window.
-
-  Two passes. The first offers each range an equal share (at least one record), so the first range of a
-  busy topic cannot take the whole page. The second hands what the first left unused to the ranges that
-  filled their share and may hold more, in order, so a page is not cut short because the other ranges
-  had nothing. When the budget is smaller than the number of ranges only the first ones are read, which
-  is why a push rotates the order between pushes (`Malachi.BrokerServer.Subscribers.rotate/2`).
-  """
-  @spec consume_shared(ReadView.t(), [Metadata.range_id()], Metadata.offsets(), pos_integer(), read_fun()) ::
-          {:ok, {[Record.t()], Metadata.offsets(), [Skip.t()]}} | {:error, term()}
-  def consume_shared(%ReadView{} = view, range_ids, positions, budget, read_fun) do
-    share = max(div(budget, max(length(range_ids), 1)), 1)
-
-    with {:ok, {first, positions, skips}} <-
-           read_ranges(view, range_ids, positions, &min(share, budget - &1), read_fun),
-         taken = length(records_of(first)),
-         filled = for({range_id, records} <- first, length(records) >= share, do: range_id),
-         {:ok, {second, positions, more_skips}} <-
-           read_ranges(view, filled, positions, &(budget - taken - &1), read_fun) do
-      {:ok, {records_of(first) ++ records_of(second), positions, skips ++ more_skips}}
-    end
-  end
-
-  # Reads `range_ids` in order, each from its position, with the budget `budget_for` gives for how many
-  # records this pass has taken so far; stops at the first range it gives none. Answers the pages per
-  # range, `[{range_id, records}]` in range order, with the moved positions and the skips. A range the
-  # control plane no longer knows (a stale assignment whose range has since split) holds nothing for this
-  # reader and is passed over. Any other error is a failed read (an unreachable segment primary, a storage
-  # error) and fails the page: a page that came back short and successful would read as caught up, and a
-  # consumer commits past it. A client can retry a failure; it cannot detect a lie.
-  defp read_ranges(view, range_ids, positions, budget_for, read_fun) do
-    range_ids
-    |> Enum.reduce_while({:ok, {[], positions, [], 0}}, fn range_id, {:ok, {pages, positions, skips, taken}} ->
-      case budget_for.(taken) do
-        budget when budget <= 0 ->
-          {:halt, {:ok, {pages, positions, skips, taken}}}
-
-        budget ->
-          case read_consume_view(view, range_id, Map.get(positions, range_id, :start), budget, read_fun) do
-            {:ok, records, next_cursor, range_skips} ->
-              {:cont,
-               {:ok,
-                {[{range_id, records} | pages], Map.put(positions, range_id, next_cursor), skips ++ range_skips,
-                 taken + length(records)}}}
-
-            {:error, :no_such_range} ->
-              {:cont, {:ok, {pages, positions, skips, taken}}}
-
-            {:error, reason} ->
-              {:halt, {:error, reason}}
-          end
-      end
-    end)
-    |> case do
-      {:ok, {pages, positions, skips, _taken}} -> {:ok, {Enum.reverse(pages), positions, skips}}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp records_of(pages), do: Enum.flat_map(pages, fn {_range_id, records} -> records end)
 
   # --- routing & replication ---
 

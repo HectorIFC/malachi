@@ -24,6 +24,19 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
   end
 
   defp set_clock(clock, t), do: Agent.update(clock, fn _ -> t end)
+
+  # The members of `{group, topic}` and the ranges each holds, as the coordinator's state has them, read
+  # without the session refresh or the epoch opening a group key call can make.
+  defp assigned(c, group, topic) do
+    case :sys.get_state(c).groups do
+      %{{^group, ^topic} => %{members: members, assignment: assignment}} ->
+        Map.new(members, fn {member, _heartbeat} -> {member, Enum.sort(Map.get(assignment, member, []))} end)
+
+      _no_group ->
+        %{}
+    end
+  end
+
   defp set_ranges(ranges, rs), do: Agent.update(ranges, fn _ -> rs end)
 
   test "a lone member is assigned all ranges at generation 1" do
@@ -106,50 +119,36 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
     assert {:error, :unknown_member} = GroupCoordinator.heartbeat_group(c, "nope", "t", :m1)
   end
 
-  test "poll registers a new member (rebalance) and only heartbeats a known one (no rebalance)" do
-    %{coord: c} = start(ranges: [:r0, :r1])
-
-    {:ok, g1, ranges} = GroupCoordinator.poll(c, "g", "t", :m1)
-    assert Enum.sort(ranges) == [:r0, :r1]
-
-    {:ok, g2, _} = GroupCoordinator.poll(c, "g", "t", :m1)
-    assert g2 == g1
-
-    {:ok, g3, _} = GroupCoordinator.poll(c, "g", "t", :m2)
-    assert g3 > g1
-  end
-
-  test "poll re-registers a member that had been evicted" do
+  test "a member that had been evicted joins again and is handed its ranges" do
     %{coord: c, clock: clock} = start(ranges: [:r0], session_ms: 100)
-    GroupCoordinator.poll(c, "g", "t", :m1)
+    {:ok, _} = GroupCoordinator.join_group(c, "g", "t", :m1)
 
     set_clock(clock, 200)
     :ok = GroupCoordinator.reconcile_now(c)
     assert {:error, :unknown_member} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
 
-    {:ok, _, ranges} = GroupCoordinator.poll(c, "g", "t", :m1)
-    assert Enum.sort(ranges) == [:r0]
+    assert {:ok, %{ranges: [:r0]}} = GroupCoordinator.join_group(c, "g", "t", :m1)
   end
 
   describe "ownership guard (owns_fun)" do
-    test "poll and join are rejected with :not_owner when this node does not own the topic" do
+    test "a join and a heartbeat are rejected with :not_owner when this node does not own the topic" do
       %{coord: c} = start(ranges: [:r0, :r1], owns_fun: fn _topic -> false end)
-      assert {:error, :not_owner} = GroupCoordinator.poll(c, "g", "t", :m1)
       assert {:error, :not_owner} = GroupCoordinator.join_group(c, "g", "t", :m1)
+      assert {:error, :not_owner} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
     end
 
-    test "a rejected poll registers no member (no phantom assignment)" do
+    test "a rejected join registers no member (no phantom assignment)" do
       %{coord: c} = start(ranges: [:r0, :r1], owns_fun: fn _topic -> false end)
-      assert {:error, :not_owner} = GroupCoordinator.poll(c, "g", "t", :m1)
-      # the group must not exist: the assignment finds no member rather than a stale registration
-      assert GroupCoordinator.assignment(c, "g", "t", :m1) == {:error, :unknown_member}
+      assert {:error, :not_owner} = GroupCoordinator.join_group(c, "g", "t", :m1)
+      # the group must not exist: no member rather than a stale registration
+      assert assigned(c, "g", "t") == %{}
     end
 
     test "owns_fun is consulted per topic, so a node can own some topics and reject others" do
       %{coord: c} = start(ranges: [:r0, :r1], owns_fun: fn topic -> topic == "mine" end)
-      assert {:ok, 1, ranges} = GroupCoordinator.poll(c, "g", "mine", :m1)
+      assert {:ok, %{generation: 1, ranges: ranges}} = GroupCoordinator.join_group(c, "g", "mine", :m1)
       assert Enum.sort(ranges) == [:r0, :r1]
-      assert {:error, :not_owner} = GroupCoordinator.poll(c, "g", "theirs", :m1)
+      assert {:error, :not_owner} = GroupCoordinator.join_group(c, "g", "theirs", :m1)
     end
   end
 
@@ -182,21 +181,19 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
       assert GroupCoordinator.heartbeat_group(c, "g", "t", :ghost) == {:error, :unknown_member}
     end
 
-    test "the epoch is opened once per group, by the group keys only" do
+    test "the epoch is opened once per group" do
       {opened, open_fun} = epochs()
       %{coord: c} = start(ranges: [:r0], open_fun: open_fun)
 
-      # the legacy entry points never ask, and hand out the bare count
-      assert {:ok, 1, [:r0]} = GroupCoordinator.join(c, "legacy", "t", :m1)
-      assert Agent.get(opened, & &1) == 0
-
-      # a group the legacy path made gets its epoch on its first group key
       gen1 = gen(1, 1)
-      assert {:ok, %{generation: ^gen1}} = GroupCoordinator.heartbeat_group(c, "legacy", "t", :m1)
+      assert {:ok, %{generation: ^gen1}} = GroupCoordinator.join_group(c, "g", "t", :m1)
+      assert {:ok, %{generation: ^gen1}} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
+      assert :ok = GroupCoordinator.validate_commit(c, "g", "t", :m1, gen1, [:r0])
+      assert Agent.get(opened, & &1) == 1
+
+      # another group opens its own
       gen2 = gen(2, 1)
-      assert {:ok, %{generation: ^gen2}} = GroupCoordinator.join_group(c, "g", "t", :m1)
-      assert {:ok, %{generation: ^gen2}} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
-      assert :ok = GroupCoordinator.validate_commit(c, "g", "t", :m1, gen2, [:r0])
+      assert {:ok, %{generation: ^gen2}} = GroupCoordinator.join_group(c, "other", "t", :m1)
       assert Agent.get(opened, & &1) == 2
     end
 
@@ -234,7 +231,7 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
       second = Task.async(fn -> GroupCoordinator.join_group(c, "slow", "t", :m2) end)
 
       # the coordinator answers another group while the opening is under way
-      assert {:ok, 1, _} = GroupCoordinator.join(c, "other", "t", :m1)
+      assert GroupCoordinator.heartbeat_group(c, "other", "t", :m1) == {:error, :unknown_member}
       refute Task.yield(first, 50)
 
       send(opener, :go)
@@ -260,7 +257,7 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
 
       assert GroupCoordinator.join_group(c, "g", "t", :m1) == {:error, :timeout}
       # nothing changed: the member was not registered
-      assert GroupCoordinator.assignment(c, "g", "t", :m1) == {:error, :unknown_member}
+      assert assigned(c, "g", "t") == %{}
 
       gen = gen(2, 1)
       assert {:ok, %{generation: ^gen}} = GroupCoordinator.join_group(c, "g", "t", :m1)
@@ -268,25 +265,33 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
     end
 
     test "a refused join_group registers no one, so the group's members keep their ranges" do
-      %{coord: c} = start(ranges: [:r0, :r1], open_fun: fn _group, _topic -> {:error, :unsupported} end)
-      assert {:ok, 1, [:r0, :r1]} = GroupCoordinator.join(c, "g", "t", :old)
+      # the group opens once, then its epoch is dropped and every later opening is refused
+      {:ok, replies} = Agent.start_link(fn -> [{:ok, 1}] end)
+
+      open_fun = fn _group, _topic ->
+        Agent.get_and_update(replies, fn
+          [] -> {{:error, :unsupported}, []}
+          [r | rest] -> {r, rest}
+        end)
+      end
+
+      %{coord: c} = start(ranges: [:r0, :r1], open_fun: open_fun)
+      assert {:ok, %{ranges: [_, _]}} = GroupCoordinator.join_group(c, "g", "t", :old)
+      :ok = GroupCoordinator.drop_epoch(c, "g", "t", 1)
 
       for new <- [:n1, :n2, :n3] do
         assert GroupCoordinator.join_group(c, "g", "t", new) == {:error, :unsupported}
-        assert GroupCoordinator.assignment(c, "g", "t", new) == {:error, :unknown_member}
       end
 
-      assert {:ok, 1, [:r0, :r1]} = GroupCoordinator.assignment(c, "g", "t", :old)
+      assert assigned(c, "g", "t") == %{old: [:r0, :r1]}
     end
 
     test "a member the coordinator does not know opens nothing" do
       {opened, open_fun} = epochs()
       %{coord: c} = start(ranges: [:r0], open_fun: open_fun)
-      {:ok, 1, _} = GroupCoordinator.join(c, "legacy", "t", :m1)
 
-      assert GroupCoordinator.heartbeat_group(c, "legacy", "t", :ghost) == {:error, :unknown_member}
-      assert GroupCoordinator.validate_commit(c, "legacy", "t", :ghost, 1, []) == {:error, :unknown_member}
       assert GroupCoordinator.heartbeat_group(c, "none", "t", :ghost) == {:error, :unknown_member}
+      assert GroupCoordinator.validate_commit(c, "none", "t", :ghost, 1, []) == {:error, :unknown_member}
       assert Agent.get(opened, & &1) == 0
     end
 
@@ -323,7 +328,7 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
       send(opener, :go)
 
       assert Task.await(waiting) == {:error, :not_owner}
-      assert GroupCoordinator.assignment(c, "g", "t", :m1) == {:error, :unknown_member}
+      assert assigned(c, "g", "t") == %{}
     end
 
     test "a group whose last member is evicted drops its epoch with it" do
@@ -446,7 +451,6 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
       Agent.update(owns, fn _ -> false end)
       assert GroupCoordinator.validate_commit(c, "g", "t", :m1, generation, [:r0]) == {:error, :not_owner}
       assert GroupCoordinator.heartbeat_group(c, "g", "t", :m1) == {:error, :not_owner}
-      assert GroupCoordinator.heartbeat(c, "g", "t", :m1) == {:error, :not_owner}
       assert GroupCoordinator.join_group(c, "g", "t", :m1) == {:error, :not_owner}
 
       Agent.update(owns, fn _ -> true end)
@@ -466,8 +470,7 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
 
       set_clock(clock, 150)
       :ok = GroupCoordinator.reconcile_now(c)
-      assert {:ok, _, _} = GroupCoordinator.assignment(c, "g", "t", :m1)
-      assert GroupCoordinator.assignment(c, "g", "t", :m2) == {:error, :unknown_member}
+      assert Map.keys(assigned(c, "g", "t")) == [:m1]
     end
   end
 

@@ -7,10 +7,11 @@ defmodule Malachi.Broker.ReadView do
   It exists so a read can run outside the process that owns the broker. A `Malachi.Broker` carries the
   metadata cache of every vnode, all of which a read of a few ranges never looks at; a view carries
   only the ranges read, their ancestors' segments and their ends. Its size grows with the segments those
-  ranges still retain, not with the cluster. `Malachi.BrokerServer` builds one for each set of ranges a
-  batch of pushes reads and hands it to the subscribers' own processes, which read and write their
-  sockets there, so a cold read no longer runs inside the loop that serializes appends. The broker's own
-  reads take the same path through a view, so there is one read implementation whoever runs it.
+  ranges still retain, not with the cluster. `Malachi.BrokerServer` builds one for a range whose consume
+  stream or `fetch_range` it wakes and hands it to the connection, which reads and writes its socket
+  there (`Malachi.ConsumeStreams`), so a cold read never runs inside the loop that serializes appends. The
+  broker's own reads take the same path through a view, so there is one read implementation whoever runs
+  it.
 
   A view is a snapshot. A segment that seals, is deleted, or a range that grows after it was taken is
   not in it, and reads through it are bounded by what it holds: the end it holds for a range is the

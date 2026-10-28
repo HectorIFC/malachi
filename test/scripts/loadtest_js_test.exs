@@ -16,7 +16,7 @@ defmodule LoadtestJsTest do
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Test.PollingHelper
   alias Malachi.Test.ReadBack
-  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.RouterTopology
 
   @moduletag :tmp_dir
 
@@ -29,8 +29,8 @@ defmodule LoadtestJsTest do
   end
 
   setup do
-    # the generator produces on the stream keys, which the producer_streams flag serves
-    :ok = StreamsOn.setup(%{})
+    # the topic routing reads the consumer-group router's topology, cleared for each test
+    :ok = RouterTopology.clear()
     probe = LoadtestProbes.watch_auth()
     on_exit(fn -> LoadtestProbes.stop_auth(probe) end)
     :ok

@@ -1,44 +1,31 @@
 defmodule Malachi.Loadtest.ProducerTest do
   # The routing producer the load generator and the chaos checker stream through, against the real TCP
-  # server with the `producer_streams` flag on: every record's outcome comes back as an event, lingering
+  # server: every record's outcome comes back as an event, lingering
   # joins records into one append, the window holds a closed loop back, and the routing survives what moves
   # a range (a split), stale routes, a refused open and a dropped connection.
   #
-  # async: false. The flag is the application's own cache (`ClusterFlagsPause`), and the topic routing reads
-  # the topology the consumer-group router publishes, which is cleared for each test and put back.
+  # async: false. The topic routing reads the topology the consumer-group router publishes, which is cleared
+  # for each test and put back.
   use ExUnit.Case, async: false
 
   import Malachi.Test.StreamTCP, only: [fetch_range: 3, page_records: 1]
 
   alias Malachi.BrokerServer
-  alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.DataPlaneRouter
   alias Malachi.Loadtest.Conn
   alias Malachi.Loadtest.Producer
   alias Malachi.Loadtest.Router
   alias Malachi.Log.Record
-  alias Malachi.Routing
   alias Malachi.TCPAcceptorPool
-  alias Malachi.Test.ClusterFlagsPause
   alias Malachi.Test.PollingHelper
+  alias Malachi.Test.RouterTopology
   alias Malachi.Test.StreamStub
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
   alias Malachi.Wire.Batch
 
-  @router_topology {Malachi.Consumer.CoordinatorRouter, :topology}
-
   setup do
-    :ok = ClusterFlagsPause.pause()
-    ClusterFlagsCache.put([Routing.flag()])
-    topology = :persistent_term.get(@router_topology, nil)
-    :persistent_term.erase(@router_topology)
-
-    on_exit(fn ->
-      if topology,
-        do: :persistent_term.put(@router_topology, topology),
-        else: :persistent_term.erase(@router_topology)
-    end)
+    :ok = RouterTopology.clear()
 
     topic = "producer_#{System.unique_integer([:positive])}"
     admin = connect!(user: "admin", pass: "admin123")

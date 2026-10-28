@@ -100,41 +100,6 @@ defmodule Malachi.Test.TCPHelper do
     end
   end
 
-  # ---- streaming helpers ----
-
-  @doc "Sends a subscribe frame (opens a push stream); no immediate response is expected."
-  def subscribe(socket, topic, group, window, max, correlation_id) do
-    subscribe(socket, topic, group, nil, window, max, correlation_id)
-  end
-
-  @doc "Sends a subscribe frame for a consumer-group `member` (server-scoped push stream)."
-  def subscribe(socket, topic, group, member, window, max, correlation_id) do
-    payload = Wire.encode_subscribe_req(topic, group, member, window, max)
-    :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.subscribe_key(), correlation_id, payload))
-  end
-
-  @doc """
-  Reads one server push and asserts it carries `correlation_id` (the subscribe's). Returns
-  `{records, next_cursor}` decoded from the fetch-response payload.
-  """
-  def recv_push(socket, correlation_id, opts \\ []) do
-    {:ok, frame_body} = recv_frame(socket, opts)
-    {^correlation_id, error_code, payload} = Wire.decode_response(frame_body)
-    ^error_code = Wire.ok_code()
-    Wire.decode_fetch_resp(payload)
-  end
-
-  @doc "Sends a stream_ack frame (durable commit + window credit); fire-and-forget, no response."
-  def stream_ack(socket, topic, group, cursor, count, correlation_id) do
-    stream_ack(socket, topic, group, nil, cursor, count, correlation_id)
-  end
-
-  @doc "Sends a stream_ack frame for a consumer-group `member` (heartbeat + refresh + commit + credit)."
-  def stream_ack(socket, topic, group, member, cursor, count, correlation_id) do
-    payload = Wire.encode_stream_ack_req(topic, group, member, cursor, count)
-    :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.stream_ack_key(), correlation_id, payload))
-  end
-
   @doc """
   Creates a test socket listener for local testing.
 

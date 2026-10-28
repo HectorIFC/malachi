@@ -44,10 +44,11 @@ Three invariants are certified. An acknowledged write is never lost: a checker p
 values through the whole window on the stream keys (a producer stream per range, opened where the routes
 say, a few appends in flight), sends again every value whose append failed, records only **acknowledged**
 writes, and at the end reads every range back with `fetch_range` to prove each of them is still readable.
-Every drill switches the stream keys on (`mix malachi.flag enable producer_streams`) as soon as its
-cluster is up, before its checker or its traffic starts. The cluster reconverges to 3/3 healthy after
-every event. And a clean produce plus fetch passes once the chaos ends: errors *during* an event are
-expected, errors after it are not.
+The upgrade drill switches the stream keys on (`mix malachi.flag enable producer_streams`) as soon as its
+cluster is up, before its checker or its traffic starts, because that cluster starts on an older release
+that serves them only behind the flag; every other drill runs this build, which always serves them. The
+cluster reconverges to 3/3 healthy after every event. And a clean produce plus fetch passes once the
+chaos ends: errors *during* an event are expected, errors after it are not.
 
 `CHECKER_WINDOW_S` (default 150) sets how long the durability checker runs, and so roughly how long
 the drill takes.
