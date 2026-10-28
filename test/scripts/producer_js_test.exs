@@ -10,6 +10,7 @@ defmodule ProducerJsTest do
   alias Malachi.Loadtest.Router
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.StreamsOn
+  alias Malachi.Test.TmpDir
   alias Malachi.Wire
 
   @selftest Path.expand("../../scripts/lib/producer.selftest.js", __DIR__)
@@ -42,7 +43,7 @@ defmodule ProducerJsTest do
       send(parent, {:split, BrokerServer.split_range(DataPlaneRouter.shard_for(topic), {topic, 0})})
     end)
 
-    input = Path.join(System.tmp_dir!(), "producer_js_#{System.unique_integer([:positive])}.txt")
+    input = TmpDir.path("producer_js") <> ".txt"
     File.write!(input, Enum.join(values, "\n"))
     on_exit(fn -> File.rm(input) end)
 
