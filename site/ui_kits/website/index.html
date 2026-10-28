@@ -18,7 +18,7 @@
 <link rel="stylesheet" href="../../styles.css">
 <link rel="stylesheet" href="../../tokens/marketing.css">
 <link rel="stylesheet" href="site.css">
-<noscript><style>.js-only{display:none!important}</style></noscript>
+<noscript><style>.js-only{display:none!important}.tabs{display:grid;gap:16px}.panel[hidden],.vs-panel[hidden],.level[hidden]{display:grid!important}</style></noscript>
 <script src="site.js" defer></script>
 <script src="scenes.js" defer></script>
 <script src="model.js" defer></script>
@@ -101,7 +101,7 @@
 <canvas class="js-only" tabindex="0" role="img" aria-label="3D model of topic orders: one sealed range split into two active ranges, each a row of segments made of record frames. Drag or use the arrow keys to rotate."></canvas>
 </div>
 <div class="model-side">
-<fieldset class="seg levels js-only" hidden>
+<fieldset class="seg levels js-only">
 <legend class="label">Highlight</legend>
 <label><input type="radio" name="level" value="topic" checked><span>Topic</span></label>
 <label><input type="radio" name="level" value="range"><span>Range</span></label>
@@ -109,9 +109,9 @@
 <label><input type="radio" name="level" value="record"><span>Record</span></label>
 </fieldset>
 <div class="level" data-level="topic"><h3>Topic</h3><p>A topic is a keyspace divided into ranges. Its active ranges cover the keyspace exactly once, and they split and merge at runtime. Here, range 1 split into ranges 2 and 3.</p></div>
-<div class="level" data-level="range"><h3>Range</h3><p>A range owns one block of the keyspace. Every record whose key lands in that block is appended to it, in a sequence of segments. After a split the sealed parent stays as history its children read through.</p></div>
-<div class="level" data-level="segment"><h3>Segment</h3><p>The unit of replication. The active segment takes appends at its write position; a sealed segment is immutable, and retention deletes the oldest first.</p></div>
-<div class="level" data-level="record"><h3>Record</h3><p>A record frame: a short header, then the payload its CRC32 covers: key, value and headers. Malachi does not interpret the value.</p></div>
+<div class="level" data-level="range" hidden><h3>Range</h3><p>A range owns one block of the keyspace. Every record whose key lands in that block is appended to it, in a sequence of segments. After a split the sealed parent stays as history its children read through.</p></div>
+<div class="level" data-level="segment" hidden><h3>Segment</h3><p>The unit of replication. The active segment takes appends at its write position; a sealed segment is immutable, and retention deletes the oldest first.</p></div>
+<div class="level" data-level="record" hidden><h3>Record</h3><p>A record frame: a short header, then the payload its CRC32 covers: key, value and headers. Malachi does not interpret the value.</p></div>
 <ul class="legend" aria-label="Legend">
 <li><span class="sh sh-active" aria-hidden="true"></span>active</li>
 <li><span class="sh sh-sealed" aria-hidden="true"></span>sealed</li>
@@ -123,12 +123,12 @@
 <section class="wrap block" id="features" aria-labelledby="features-title">
 <p class="label">What you get</p>
 <h2 id="features-title">The NorthGuard shape, on the BEAM.</h2>
-<div class="tabs" data-tabs>
-<div class="tablist" role="tablist" aria-label="Features" hidden>
-<button role="tab" id="tab-ranges" aria-controls="p-ranges" type="button">Ranges instead of partitions</button>
-<button role="tab" id="tab-segments" aria-controls="p-segments" type="button">Segments with a lifecycle</button>
-<button role="tab" id="tab-raft" aria-controls="p-raft" type="button">A Raft control plane</button>
-<button role="tab" id="tab-auth" aria-controls="p-auth" type="button">Auth and ACLs</button>
+<div class="tabs is-tabbed" data-tabs>
+<div class="tablist js-only" role="tablist" aria-label="Features">
+<button role="tab" aria-selected="true" tabindex="0" id="tab-ranges" aria-controls="p-ranges" type="button">Ranges instead of partitions</button>
+<button role="tab" aria-selected="false" tabindex="-1" id="tab-segments" aria-controls="p-segments" type="button">Segments with a lifecycle</button>
+<button role="tab" aria-selected="false" tabindex="-1" id="tab-raft" aria-controls="p-raft" type="button">A Raft control plane</button>
+<button role="tab" aria-selected="false" tabindex="-1" id="tab-auth" aria-controls="p-auth" type="button">Auth and ACLs</button>
 </div>
 <article class="panel" id="p-ranges">
 <h3>Ranges instead of partitions</h3>
@@ -139,7 +139,7 @@
 <div><dt>Wire nouns</dt><dd>topic · key · cursor</dd></div>
 </dl>
 </article>
-<article class="panel" id="p-segments">
+<article class="panel" id="p-segments" hidden>
 <h3>Segments with a lifecycle</h3>
 <p>A segment is the unit of replication. It takes appends while active and becomes immutable once sealed, by size, by age, or on failure. Every record frame carries a checksum, and a scrubber re-verifies sealed segments and rebuilds a damaged copy from a replica that still verifies.</p>
 <dl class="facts">
@@ -148,7 +148,7 @@
 <div><dt>Before every ack</dt><dd>fsync</dd></div>
 </dl>
 </article>
-<article class="panel" id="p-raft">
+<article class="panel" id="p-raft" hidden>
 <h3>A Raft control plane</h3>
 <p>Topic, range and segment metadata lives in vnodes, each a Raft group on <code>ra</code>, sharded on a hash ring by topic. Records do not go through Raft: the primary ships batches to its followers and acknowledges a write once a quorum has fsynced it.</p>
 <dl class="facts">
@@ -157,7 +157,7 @@
 <div><dt>Group commit triggers</dt><dd>10 ms · 20k records · 10 MB</dd></div>
 </dl>
 </article>
-<article class="panel" id="p-auth">
+<article class="panel" id="p-auth" hidden>
 <h3>Auth and ACLs</h3>
 <p>Every producer and consumer authenticates. Users and per-topic ACLs are replicated across the cluster in their own Raft group. Passwords are hashed with Argon2, TLS is required in production, nodes can talk over mutual TLS, and failed logins lock an account out progressively.</p>
 <dl class="facts">
@@ -190,11 +190,11 @@
 <section class="wrap block" id="vs" aria-labelledby="vs-title">
 <p class="label">Compared</p>
 <h2 id="vs-title">How Malachi differs from the logs you know.</h2>
-<div class="tabs" data-tabs>
-<div class="tablist" role="tablist" aria-label="Comparisons" hidden>
-<button role="tab" id="tab-kafka" aria-controls="p-kafka" type="button">vs Apache Kafka</button>
-<button role="tab" id="tab-redpanda" aria-controls="p-redpanda" type="button">vs Redpanda</button>
-<button role="tab" id="tab-pulsar" aria-controls="p-pulsar" type="button">vs Apache Pulsar</button>
+<div class="tabs is-tabbed" data-tabs>
+<div class="tablist js-only" role="tablist" aria-label="Comparisons">
+<button role="tab" aria-selected="true" tabindex="0" id="tab-kafka" aria-controls="p-kafka" type="button">vs Apache Kafka</button>
+<button role="tab" aria-selected="false" tabindex="-1" id="tab-redpanda" aria-controls="p-redpanda" type="button">vs Redpanda</button>
+<button role="tab" aria-selected="false" tabindex="-1" id="tab-pulsar" aria-controls="p-pulsar" type="button">vs Apache Pulsar</button>
 </div>
 <article class="vs-panel" id="p-kafka">
 <h3>Grow a hot topic without moving its keys.</h3>
@@ -205,7 +205,7 @@
 </div>
 <p class="src small">Sources: <a href="https://kafka.apache.org/43/operations/basic-kafka-operations/">Kafka docs, Basic operations</a> · <a href="https://kafka.apache.org/43/design/design/">Kafka docs, Design</a> · <a href="https://docs.confluent.io/platform/current/kafka/post-deployment.html">Confluent Platform docs</a></p>
 </article>
-<article class="vs-panel" id="p-redpanda">
+<article class="vs-panel" id="p-redpanda" hidden>
 <h3>Shrink back when traffic drops.</h3>
 <figure class="scene" data-scene="redpanda"><div class="vs-heads" aria-hidden="true"><span>Redpanda partitions</span><span>Malachi ranges</span></div><div class="scene-box" data-desc="Animation: Redpanda partitions compared with Malachi ranges as traffic rises and falls" aria-describedby="cap-redpanda"><canvas aria-hidden="true"></canvas></div><figcaption class="cap-row"><span class="muted small" id="cap-redpanda">Traffic rises, then falls. Left: two partitions are added and stay after traffic falls. Right: the range splits, then the cold halves merge back.</span></figcaption></figure>
 <div class="vs-cols">
@@ -214,7 +214,7 @@
 </div>
 <p class="src small">Source: <a href="https://docs.redpanda.com/current/develop/config-topics/">Redpanda docs, Manage Topics</a></p>
 </article>
-<article class="vs-panel" id="p-pulsar">
+<article class="vs-panel" id="p-pulsar" hidden>
 <h3>One system to run.</h3>
 <figure class="scene" data-scene="pulsar"><div class="vs-heads" aria-hidden="true"><span>Pulsar: brokers, bookies, metadata store</span><span>Malachi: nodes</span></div><div class="scene-box" data-desc="Animation: the write path in Pulsar compared with Malachi" aria-describedby="cap-pulsar"><canvas aria-hidden="true"></canvas></div><figcaption class="cap-row"><span class="muted small" id="cap-pulsar">Left: a write goes to a broker, which stores it on bookies and coordinates through a separate metadata store. Right: a write goes to a primary node, which copies it to two others; metadata runs inside the same nodes.</span></figcaption></figure>
 <div class="vs-cols">

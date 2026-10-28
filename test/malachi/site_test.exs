@@ -1554,6 +1554,17 @@ defmodule Malachi.SiteTest do
       root |> then(&Site.verify(&1, @config)) |> Enum.filter(&String.contains?(&1, "marketing.css references"))
     end
 
+    test "without JavaScript every panel and level the tabs hide is shown, and the tab strips stay out of sight", %{
+      root: root
+    } do
+      stage!(root)
+      html = read(root, "doc/index.html")
+
+      assert html =~ ~s(<noscript><style>)
+      assert html =~ ".panel[hidden],.vs-panel[hidden],.level[hidden]{display:grid!important}"
+      assert html =~ ~s(class="tablist js-only")
+    end
+
     test "the quickstart reads the admin password from the reader's shell, never a shared default", %{root: root} do
       stage!(root)
       html = read(root, "doc/index.html")
