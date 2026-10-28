@@ -119,6 +119,19 @@ defmodule Malachi.Loadtest.ClientTest do
     assert Client.read(client, topic, ranges: [0]) == {:error, :stale_assignment}
   end
 
+  test "a member of whose assigned ranges a split retired only some is told its assignment is stale too",
+       %{client: client, topic: topic} do
+    :ok = Client.create_topic(client, topic, 4)
+    {:ok, 5} = Client.produce(client, topic, records(for(i <- 1..5, do: "p#{i}")), 5_000)
+    shard = DataPlaneRouter.shard_for(topic)
+    {:ok, _left, _right} = BrokerServer.split_range(shard, {topic, 0})
+    [{^topic, child} | _] = BrokerServer.active_range_ids(shard, topic)
+
+    # the child still answers pages; range 0's records are in the children, so reading the child alone is
+    # no read of the assignment
+    assert Client.read(client, topic, ranges: [0, child]) == {:error, :stale_assignment}
+  end
+
   test "a commit the group refuses is the commit's error", %{client: client, topic: topic} do
     :ok = Client.create_topic(client, topic, 4)
     assert {:error, "unknown_member"} = Client.commit(client, topic, "rg", "ghost", 0, %{0 => {0, 0}})

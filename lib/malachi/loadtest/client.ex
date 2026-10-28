@@ -96,11 +96,11 @@ defmodule Malachi.Loadtest.Client do
   `{:ok, %{values: values, positions: positions}}`, where `values` are in the order each range holds them
   and `positions` holds, by range read, where its next page starts: what a member commits once it has read
   them. A member of a group of more than one reads with `ranges:`, since a commit naming a range the group
-  did not hand it is refused (`not_assigned`); one handed no range reads nothing; one whose ranges a
-  split retired is answered `{:error, :stale_assignment}`, before or during the read, and joins again for
-  the ranges made of them. Routing answers (routes moved or held back, a dropped connection, no broker that takes one, routes
-  not readable yet) are waited out until `opts[:timeout_ms]` (10 s unless given). `{:error, reason}` on any
-  other refusal, or `{:error, :timeout}`.
+  did not hand it is refused (`not_assigned`); one handed no range reads nothing; one handed any range a
+  split retired, before or during the read, is answered `{:error, :stale_assignment}` and joins again for
+  the ranges made of it. Routing answers (routes moved or held back, a dropped connection, no broker that
+  takes one, routes not readable yet) are waited out until `opts[:timeout_ms]` (10 s unless given).
+  `{:error, reason}` on any other refusal, or `{:error, :timeout}`.
   """
   @spec read(t(), String.t(), keyword()) :: {:ok, %{values: [binary()], positions: map()}} | {:error, term()}
   def read(%__MODULE__{} = client, topic, opts \\ []) do
@@ -141,14 +141,22 @@ defmodule Malachi.Loadtest.Client do
   defp unassigned(%{ranges: []}), do: {:ok, %{values: [], positions: %{}}}
   defp unassigned(_acc), do: {:error, :stale_assignment}
 
-  # Read through once every range it reads (the active ones, or those of `ranges:` among them) answered a
-  # page with nothing new since its last one that brought some.
+  # Read through once every range it reads (the active ones, or those of `ranges:`) answered a page with
+  # nothing new since its last one that brought some. A range of `ranges:` no longer active was retired by
+  # a split: its records are in ranges the assignment does not name, so the read is stale, never done.
   defp drained(fetcher, topic, deadline, acc, page) do
-    reading = if acc.ranges == nil, do: page.active, else: Enum.filter(page.active, &(&1 in acc.ranges))
+    reading = acc.ranges || page.active
 
-    if Enum.all?(reading, &Map.has_key?(acc.quiet, &1)),
-      do: {fetcher, {:ok, %{values: acc.values, positions: acc.positions}}},
-      else: drain(fetcher, topic, deadline, acc)
+    cond do
+      Enum.any?(reading, &(&1 not in page.active)) ->
+        {fetcher, {:error, :stale_assignment}}
+
+      Enum.all?(reading, &Map.has_key?(acc.quiet, &1)) ->
+        {fetcher, {:ok, %{values: acc.values, positions: acc.positions}}}
+
+      true ->
+        drain(fetcher, topic, deadline, acc)
+    end
   end
 
   defp page_into(acc, %{values: [], range: range, to: to}),
