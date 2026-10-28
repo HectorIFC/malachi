@@ -749,7 +749,10 @@ defmodule Malachi.BrokerServer do
     with_consume_range(range_id, state, fn state ->
       case Broker.consume_start(state.broker, range_id, start) do
         {:ok, position} ->
-          if wait_ms == 0 or Broker.consume_ready?(state.broker, range_id, position) do
+          # a range whose end the recovery has not learned is answered at once, for its read to refuse
+          # (`metadata_unavailable`): held, it would wait on an end nothing can make it pass
+          if wait_ms == 0 or Broker.unrecovered?(state.broker, range_id) or
+               Broker.consume_ready?(state.broker, range_id, position) do
             {:reply, fetch_reply(state, %{range_id: range_id, position: position}), state}
           else
             ref = make_ref()

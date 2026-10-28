@@ -144,8 +144,10 @@ defmodule Malachi.BrokerServerRaTest do
 
     test "refuses the fetch instead of answering an empty page", %{broker: broker} do
       assert ReadBack.values(broker, "events") == {:error, :metadata_unavailable}
-      # A long poll is refused too, rather than answered empty once its wait ends.
-      {:ok, position, view, reporter} = BrokerServer.fetch_range(broker, {"events", 0}, :earliest, 200)
+      # A long poll is refused too, and at once, rather than held on an end it can never pass.
+      started = System.monotonic_time(:millisecond)
+      {:ok, position, view, reporter} = BrokerServer.fetch_range(broker, {"events", 0}, :earliest, 5_000)
+      assert System.monotonic_time(:millisecond) - started < 1_000, "the long poll was held"
 
       assert ConsumeStreams.read_page(view, {"events", 0}, position, 100, 1_048_576, reporter) ==
                {:error, :metadata_unavailable}
