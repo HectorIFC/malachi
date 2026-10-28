@@ -779,8 +779,8 @@ defmodule DockerClusterTest do
 
         echo "starting the generator"
         case "${STUB_LOADTEST:-json}" in
-          json) echo "{\"records_per_s\":1000,\"batch\":$batch,\"latency_ms\":{\"p50\":1.5,\"p99\":9.5},\"errors\":0,\"dropped\":0,\"overloaded\":0,\"reconnects\":0}" ;;
-          errors) echo "{\"records_per_s\":1000,\"batch\":$batch,\"latency_ms\":{\"p50\":1.5,\"p99\":9.5},\"errors\":7,\"dropped\":0,\"overloaded\":0,\"reconnects\":0}" ;;
+          json) echo "{\"records_per_s\":1000,\"batch\":$batch,\"latency_ms\":{\"p50\":1.5,\"p99\":9.5},\"errors\":0,\"dropped\":0,\"overloaded\":0}" ;;
+          errors) echo "{\"records_per_s\":1000,\"batch\":$batch,\"latency_ms\":{\"p50\":1.5,\"p99\":9.5},\"errors\":7,\"dropped\":0,\"overloaded\":0}" ;;
           garbage) echo "{not json" ;;
           none) echo "generator exploded" >&2; exit 1 ;;
           hang) exec "$REAL_SLEEP" 30 ;;

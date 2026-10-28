@@ -10,7 +10,7 @@
 # brought up per case so one case's data cannot fill the tmpfs and make the next one fail on a full disk
 # (that artifact previously showed up as phantom dropped connections). For the same reason the measured
 # window is kept short (default warmup 1 + duration 4): at ~500k rec/s a single case writes well under 1g.
-# The per-case row now also prints err/drop/over/recon, so a run that drops connections or sheds load can
+# The per-case row now also prints err/drop/over/rl, so a run that drops connections or sheds load can
 # never be mistaken for a clean result again; on a fresh server all four should read 0.
 #
 # Usage: benchmark/docker-compare.sh   (override the window with DUR=.. WARM=.. if you raise the tmpfs size)
@@ -24,10 +24,10 @@ trap 'rm -rf "$WORK"' EXIT
 DUR="${DUR:-4}"
 WARM="${WARM:-1}"
 
-# Extract "rec/s ops/s p50 p99 err drop over recon" from a --json report line on stdin. The backpressure
-# fields (dropped/overloaded/rate_limited/reconnects) are surfaced alongside throughput so they can never
+# Extract "rec/s ops/s p50 p99 err drop over rl" from a --json report line on stdin. The backpressure
+# fields (dropped/overloaded/rate_limited) are surfaced alongside throughput so they can never
 # hide a run.
-READ_JSON='let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const line=s.split("\n").find(l=>l.trim().startsWith("{"));if(!line){process.stdout.write("       (no json)");return}const d=JSON.parse(line);const l=d.latency_ms;process.stdout.write(`${String(d.records_per_s).padStart(8)} rec/s ${String(d.ops_per_s).padStart(6)} ops/s  p50=${String(l.p50).padStart(6)} p99=${String(l.p99).padStart(6)}  err=${d.errors} drop=${d.dropped} over=${d.overloaded} rl=${d.rate_limited} recon=${d.reconnects}`)})'
+READ_JSON='let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const line=s.split("\n").find(l=>l.trim().startsWith("{"));if(!line){process.stdout.write("       (no json)");return}const d=JSON.parse(line);const l=d.latency_ms;process.stdout.write(`${String(d.records_per_s).padStart(8)} rec/s ${String(d.ops_per_s).padStart(6)} ops/s  p50=${String(l.p50).padStart(6)} p99=${String(l.p99).padStart(6)}  err=${d.errors} drop=${d.dropped} over=${d.overloaded} rl=${d.rate_limited}`)})'
 
 matrix() { # label SRV_CPUSET LT_CPUSET
   local label="$1"

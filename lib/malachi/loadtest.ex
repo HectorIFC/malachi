@@ -4,15 +4,25 @@ defmodule Malachi.Loadtest do
   across all schedulers (unlike a single-threaded event loop). It drives produce/fetch/mixed/stream load
   and control-plane (user/acl) load against a running Malachi server, measuring throughput and latency.
 
+  The data path is the stream keys alone (`Malachi.Wire` keys 24 to 34): a producing connection is a
+  routing client (`Malachi.Loadtest.Producer`), a `stream` connection a consumer
+  (`Malachi.Loadtest.Consumer`) and a `fetch` connection a fetcher (`Malachi.Loadtest.Fetcher`). The
+  setup reads the cluster state first, on the setup connection, and fails with a `SetupError` when the
+  server does not answer it or the cluster does not serve the stream keys (the `producer_streams` flag
+  off); it never falls back to other keys. The `user` and `acl` scenarios are one authenticated
+  connection each, in a closed loop.
+
   `run/1` is the entry point (the `mix malachi.loadtest` task is a thin wrapper). Metrics are collected
   lock-free: an `:counters` array for ops/records/errors plus backpressure events (dropped connections,
-  server-shed `overloaded` produces, quota-refused `rate_limited` produces, and reconnects) and a
-  `Malachi.Histogram` for latency. A genuine error (any refusal other than those two) is also counted
-  under the reason the server gave, in a table the report returns as `error_reasons`, so a run that
-  records errors says which ones; the reasons always add up to `errors`. A worker connects and
-  authenticates, waits at a barrier so all connections start together, runs its scenario for
-  `warmup + duration`, and records only during the measured window. It is resilient: a shed produce
-  backs off and continues, and a dropped connection reconnects (capped) rather than aborting.
+  server-shed `overloaded` refusals, quota-refused `rate_limited` refusals) and what routing did (`moved`,
+  `redirects`, `route_refreshes`), and a `Malachi.Histogram` for latency. A genuine error (any refusal
+  other than those two) is also counted under the reason the server gave, in a table the report returns
+  as `error_reasons`, so a run that records errors says which ones; the reasons always add up to
+  `errors`. A worker connects and authenticates, waits at a barrier so all connections start together,
+  runs its scenario for `warmup + duration`, and records only during the measured window. It is
+  resilient: a shed request is counted and the worker goes on, and a dropped connection reconnects
+  rather than aborting: on the data path the routing clients retry after a backoff until the run ends,
+  and in the admin scenarios (`user`, `acl`) the worker reconnects up to a cap and then stops.
 
   How the connections are OPENED is a strategy (`:connect_strategy`), because each one pays a full
   credential verification on the server and opening hundreds at once is a self-inflicted auth storm:
@@ -45,25 +55,20 @@ defmodule Malachi.Loadtest do
     defexception [:message]
   end
 
-  # Every enum option, with its values and default. Mirrored by ENUM_FLAGS in scripts/loadtest.js, which
-  # takes `protocol` in the Node generator's own change (#275, after this one).
+  # Every enum option, with its values and default. Mirrored by ENUM_FLAGS in scripts/loadtest.js.
   @enums [
     scenario: {[:produce, :fetch, :mixed, :stream, :user, :acl], :produce},
     connect_strategy: {[:bounded, :stagger, :all_at_once], :bounded},
-    payload: {Payload.modes(), :constant},
-    protocol: {[:auto, :streams, :legacy], :auto}
+    payload: {Payload.modes(), :constant}
   ]
 
   # A knob only some values of an enum read, with the message for passing it with another one. Silently
   # ignoring `connect_stagger_ms` under `:bounded`, or a payload seed with constant bytes, would let a run
-  # claim a setting it never applied. Mirrored by KNOB_REQUIRES in scripts/loadtest.js, which takes the
-  # lingering knobs in the Node generator's own change (#275, after this one).
+  # claim a setting it never applied. Mirrored by KNOB_REQUIRES in scripts/loadtest.js.
   @knobs [
     connect_concurrency: {:connect_strategy, [:bounded], "the :bounded connect strategy"},
     connect_stagger_ms: {:connect_strategy, [:stagger], "the :stagger connect strategy"},
-    payload_seed: {:payload, [:json, :random], "the :json and :random payloads"},
-    linger_ms: {:protocol, [:auto, :streams], "the :auto and :streams protocols"},
-    linger_bytes: {:protocol, [:auto, :streams], "the :auto and :streams protocols"}
+    payload_seed: {:payload, [:json, :random], "the :json and :random payloads"}
   ]
 
   @ops 1
@@ -71,18 +76,18 @@ defmodule Malachi.Loadtest do
   @errors 3
   @dropped 4
   @overloaded 5
-  @reconnects 6
-  @rate_limited 7
+  @rate_limited 6
   # What routing did on the stream keys (`Malachi.Loadtest.Producer.stats/1`): streams told their range
   # moved on, opens redirected by stale routes, and route reads after the setup's.
-  @moved 8
-  @redirects 9
-  @refreshes 10
-  @counters 10
+  @moved 7
+  @redirects 8
+  @refreshes 9
+  @counters 9
 
-  # Backpressure: on a shed produce the worker backs off briefly and keeps going; on a dropped
-  # connection it reconnects with a short backoff, capped so a server that is truly down stops the worker
-  # instead of spinning. A shed is either `:overloaded` (the broker's group-commit valve) or
+  # Backpressure: on a shed fetch the worker backs off briefly and keeps going; on a dropped connection
+  # it reconnects with a short backoff. The admin scenarios' single connection is capped at
+  # @max_reconnect_tries, so a server that is truly down stops that worker instead of spinning; the data
+  # path's routing clients retry until the run ends. A shed is either `:overloaded` (the broker's group-commit valve) or
   # `:rate_limited` (this user over the configured publish quota); they are counted apart because they
   # tell an operator different things, and a run that hides one behind the other is a silent zero.
   # Above this, the payload pool is announced on stderr before it is generated (see attach_pool/1).
@@ -92,15 +97,14 @@ defmodule Malachi.Loadtest do
   @reconnect_backoff_ms 20
   @max_reconnect_tries 10
 
-  # Metrics + measurement window + the bits needed to reconnect/re-prime (conn_opts, pipeline), bundled so
-  # the per-op loops take a single context rather than many args.
+  # Metrics + measurement window + what a reconnect needs (conn_opts), bundled so the per-op loops take a
+  # single context rather than many args.
   @typep m :: %{
            ops: :counters.counters_ref(),
            hist: term(),
            warmup_end: integer(),
            measure_end: integer(),
            conn_opts: keyword(),
-           pipeline: pos_integer(),
            reasons: :ets.tid()
          }
 
@@ -205,7 +209,6 @@ defmodule Malachi.Loadtest do
       connect_strategy: enums.connect_strategy,
       payload: enums.payload,
       payload_seed: payload_seed!(opts, enums.payload),
-      protocol: enums.protocol,
       linger_ms: Options.non_negative!(opts, :linger_ms, 0),
       linger_bytes: Keyword.get(opts, :linger_bytes),
       # How long the setup waits for its prepopulate to be acknowledged. Not a flag: a seam for the tests,
@@ -241,8 +244,8 @@ defmodule Malachi.Loadtest do
 
   # One batch's worth unless given, counted as the stream client counts it, with the longest key the run
   # uses. The client buffers each batch's share of a range whole and an append never splits one
-  # (`Malachi.Loadtest.Producer`): with one range a batch is one append, as a legacy produce is; with
-  # several, each range's share is, and shares of successive batches join one append while they fit.
+  # (`Malachi.Loadtest.Producer`): with one range a batch is one append; with several, each range's share
+  # is, and shares of successive batches join one append while they fit.
   defp linger_bytes!(%{linger_bytes: nil} = cfg) do
     longest_key = byte_size("k#{cfg.keys - 1}")
     %{cfg | linger_bytes: cfg.batch * Producer.record_bytes(cfg.record_size, longest_key)}
@@ -253,42 +256,35 @@ defmodule Malachi.Loadtest do
   defp linger_bytes!(%{linger_bytes: bytes}),
     do: raise(ArgumentError, "linger_bytes must be a positive integer, got: #{inspect(bytes)}")
 
-  # Which keys the run produces on, decided once, on the setup connection, before any worker starts: the
-  # stream keys when the cluster serves them (`producer_streams`), the legacy ones otherwise. `:auto`
-  # takes whichever the cluster answers; `:streams` refuses to measure a cluster that does not serve them,
-  # rather than quietly measuring the legacy keys under a stream label; `:legacy` never asks.
-  defp choose_protocol(%{protocol: :legacy} = cfg, admin),
-    do: {Map.merge(cfg, %{protocol_used: :legacy, router: nil}), admin}
-
-  defp choose_protocol(cfg, admin) do
+  # The cluster state, read once, on the setup connection, before any worker starts: the router every
+  # worker starts from. A node that does not answer it, or a cluster that does not serve the stream keys
+  # (the `producer_streams` flag off), fails the setup here, naming why: the generator speaks no other keys.
+  defp read_cluster(cfg, admin) do
     conn_opts = conn_opts_for(cfg, 0)
     router = Router.new({Keyword.fetch!(conn_opts, :host), Keyword.get(conn_opts, :port, 4040)})
 
     case Router.bootstrap(router, admin) do
       {:ok, router, admin} ->
         if Router.streams_enabled?(router),
-          do: {Map.merge(cfg, %{protocol_used: :streams, router: router}), admin},
-          else: {legacy_or_refuse(cfg, admin, "the producer_streams flag is off"), admin}
+          do: {Map.put(cfg, :router, router), admin},
+          else: refuse_cluster(admin, "the producer_streams flag is off")
 
-      {:legacy, _no_or_malformed_answer, admin} ->
-        {legacy_or_refuse(cfg, admin, "the server does not answer cluster_state"), admin}
+      {:error, reason, admin} ->
+        refuse_cluster(admin, "the server does not answer cluster_state: #{reason}")
 
       {:error, reason} ->
         raise SetupError, "could not read the cluster state: the connection failed (#{inspect(reason)})"
     end
   end
 
-  defp legacy_or_refuse(%{protocol: :auto} = cfg, _admin, _why),
-    do: Map.merge(cfg, %{protocol_used: :legacy, router: nil})
-
-  defp legacy_or_refuse(%{protocol: :streams}, admin, why) do
+  defp refuse_cluster(admin, why) do
     Conn.close(admin)
-    raise SetupError, "--protocol streams, but the cluster does not serve the stream keys (#{why})"
+    raise SetupError, "the cluster does not serve the stream keys (#{why})"
   end
 
   # The json and random values are generated once, here, before any connection opens: generating them
   # inside the measured window would make the generator the bottleneck (see `Malachi.Loadtest.Payload`).
-  # Only a run that produces needs them; constant bytes keep the single pre-encoded request they always had.
+  # Only a run that produces needs them; constant bytes keep the one batch each connection builds for itself.
   #
   # The batches live in `:persistent_term` for the run, under a key of their own, and `cfg` carries only
   # the key and the count. `cfg` is copied into every worker by the closure that spawns it, so a pool held
@@ -319,24 +315,20 @@ defmodule Malachi.Loadtest do
     end
   end
 
-  # The pool goes into `:persistent_term` once the setup knows which keys the run produces on: the stream
-  # keys route each record to its range and encode each range's share apart, so they take the records as
-  # they are; the legacy produce takes batches encoded once, here. Only then, so the setup connection never
-  # waits while the values are generated (an idle connection is closed after `MALACHI_TCP_RECV_TIMEOUT`),
-  # and the records leave `cfg` before any worker copies it.
+  # The pool goes into `:persistent_term` once the setup has read the cluster state, as records: the
+  # client routes each record to its range and encodes each range's share apart. Generated before the
+  # setup connection opens, so it never waits while the values are generated (an idle connection is closed
+  # after `MALACHI_TCP_RECV_TIMEOUT`), and published here, so the records leave `cfg` before any worker
+  # copies it.
   defp publish_pool(%{pool: nil} = cfg), do: cfg
 
   defp publish_pool(%{pool: %{records: records} = pool} = cfg) do
-    batches =
-      if cfg.protocol_used == :streams,
-        do: records,
-        else: records |> Tuple.to_list() |> Enum.map(&Wire.encode_produce_records/1) |> List.to_tuple()
-
-    :persistent_term.put(pool.key, batches)
+    :persistent_term.put(pool.key, records)
     %{cfg | pool: Map.delete(pool, :records)}
   end
 
-  # Only the produce loop pipelines; a run that uses the pool for its prepopulate alone sends one at a time.
+  # Only the produce loop pipelines; a run that uses the pool for its prepopulate alone needs one batch per
+  # connection.
   defp pool_pipeline(%{scenario: scenario, pipeline: pipeline}) when scenario in [:produce, :mixed], do: pipeline
   defp pool_pipeline(_cfg), do: 1
 
@@ -492,7 +484,7 @@ defmodule Malachi.Loadtest do
                   "is the server up and are the credentials right?"
       end
 
-    {cfg, admin} = choose_protocol(cfg, admin)
+    {cfg, admin} = read_cluster(cfg, admin)
     cfg = publish_pool(cfg)
 
     {admin, cfg} =
@@ -509,8 +501,6 @@ defmodule Malachi.Loadtest do
   # it, and placing it changes the routes, so every worker opening with the routes read before would be
   # redirected once: a stream is opened, and closed, on each range first, so the routes read name the
   # segments every worker will find. That is preparing the topic, not measured work.
-  defp read_routes(conn, %{protocol_used: :legacy} = cfg, _topic), do: {conn, cfg}
-
   defp read_routes(conn, cfg, topic) do
     place_segments(cfg, topic)
 
@@ -620,13 +610,15 @@ defmodule Malachi.Loadtest do
 
   defp prepopulate({conn, %{prepopulate: n} = cfg}, _topic) when n <= 0, do: {conn, cfg}
 
-  defp prepopulate({conn, %{protocol_used: :streams} = cfg}, topic) do
+  # //1 keeps the range empty when prepopulate < batch (1..0 without a step enumerates DOWN and would send
+  # two spurious batches).
+  defp prepopulate({conn, cfg}, topic) do
     producer = Producer.new(cfg.router, conn_opts_for(cfg, 0), max_inflight: 16, label: "malachi-loadtest-setup")
 
     try do
       producer =
         1..div(cfg.prepopulate, cfg.batch)//1
-        |> Enum.reduce({producer, prepopulate_source(cfg, topic)}, fn _, {producer, source} ->
+        |> Enum.reduce({producer, prepopulate_source(cfg)}, fn _, {producer, source} ->
           {entries, source} = next_entries(source)
           {producer, events} = Producer.produce(producer, topic, entries, mono_ms())
           expect_landed(events, topic)
@@ -646,22 +638,12 @@ defmodule Malachi.Loadtest do
     end
   end
 
-  defp prepopulate({conn, cfg}, topic) do
-    # //1 keeps the range empty when prepopulate < batch (1..0 without a step enumerates DOWN and
-    # would send two spurious batches).
-    conn =
-      1..div(cfg.prepopulate, cfg.batch)//1
-      |> Enum.reduce({conn, 2, prepopulate_source(cfg, topic)}, fn _, acc -> prepopulate_one(acc, topic) end)
-      |> elem(0)
-
-    {conn, cfg}
-  end
-
   # A prepopulate the broker stops answering fails the setup after one wait, not after one wait per batch.
   defp expect_answered(:idle, _topic), do: :ok
   defp expect_answered(:timeout, topic), do: raise(SetupError, "could not prepopulate #{inspect(topic)}: it timed out")
 
-  # A prepopulate record refused fails the setup with the broker's reason, as a refused legacy produce does.
+  # A prepopulate record refused fails the setup with the broker's reason: a backlog shorter than asked for
+  # would otherwise be measured as if the setup had worked.
   defp expect_landed(events, topic) do
     case Enum.find(events, &match?({:failed, _entries, _reason}, &1)) do
       nil ->
@@ -672,29 +654,17 @@ defmodule Malachi.Loadtest do
     end
   end
 
-  defp prepopulate_one({conn, corr, source}, topic) do
-    {payload, source} = next_payload(source)
-    conn = conn |> Conn.request(Wire.produce_key(), corr, payload) |> expect_setup_ok("prepopulate", topic, [])
-    {conn, corr + 1, source}
-  end
-
-  defp prepopulate_source(%{pool: nil} = cfg, topic) do
+  defp prepopulate_source(%{pool: nil} = cfg) do
     value = :binary.copy("x", cfg.record_size)
     batch = for i <- 1..cfg.batch, do: %Record{value: value, key: "k#{i}", timestamp: 0, headers: []}
-
-    if cfg.protocol_used == :streams,
-      do: {:records, entries(batch)},
-      else: {:fixed, Wire.encode_produce_req(topic, batch)}
+    {:records, entries(batch)}
   end
 
-  defp prepopulate_source(%{protocol_used: :streams} = cfg, _topic),
-    do: {:record_pool, :persistent_term.get(cfg.pool.key), 0}
-
-  defp prepopulate_source(cfg, topic), do: {:pool, topic, :persistent_term.get(cfg.pool.key), 0}
+  defp prepopulate_source(cfg), do: {:record_pool, :persistent_term.get(cfg.pool.key), 0}
 
   # A setup request either succeeded, or was refused with one of the `tolerated` reasons, or fails the run
-  # with a SetupError naming the step, the topic and the reason. A backlog shorter than asked for, or a
-  # topic that was never created, would otherwise be measured as if the setup had worked.
+  # with a SetupError naming the step, the topic and the reason. A topic that was never created would
+  # otherwise be measured as if the setup had worked.
   defp expect_setup_ok({:ok, 0, _resp, conn}, _step, _topic, _tolerated), do: conn
 
   defp expect_setup_ok({:ok, _code, resp, conn}, step, topic, tolerated) do
@@ -762,8 +732,8 @@ defmodule Malachi.Loadtest do
 
         prepared(Producer.prepare(producer, topic_for(cfg, index), 15_000), &Producer.close/1)
 
-      # connected only: the streams open when the barrier lifts, as a legacy subscribe goes out then, so
-      # every page pushed is pushed inside the measured run
+      # connected only: the streams open when the barrier lifts, so every page pushed is pushed inside the
+      # measured run
       :consumer ->
         consumer = Consumer.new(cfg.router, conn_opts, window: cfg.window, max: cfg.max, on_refusal: :stop)
         prepared(Consumer.prepare(consumer, topic_for(cfg, index)), &Consumer.close/1)
@@ -784,10 +754,10 @@ defmodule Malachi.Loadtest do
     {:error, reason}
   end
 
-  # On the stream keys a worker that produces, consumes or fetches is a whole routing client: a producer,
-  # a consumer (the `stream` scenario: a consume stream on every range) or a fetcher (`fetch`, and the
-  # reading half of `mixed`: one `fetch_range` per range in turn). The admin scenarios keep one connection.
-  defp stream_client(%{protocol_used: :streams} = cfg, index) do
+  # A worker that produces, consumes or fetches is a whole routing client: a producer, a consumer (the
+  # `stream` scenario: a consume stream on every range) or a fetcher (`fetch`, and the reading half of
+  # `mixed`: one `fetch_range` per range in turn). The admin scenarios keep one connection.
+  defp stream_client(cfg, index) do
     case scenario_for(cfg.scenario, index) do
       :produce -> :producer
       :stream -> :consumer
@@ -795,8 +765,6 @@ defmodule Malachi.Loadtest do
       _admin -> nil
     end
   end
-
-  defp stream_client(_legacy, _index), do: nil
 
   defp close_client(%Producer{} = producer), do: Producer.close(producer)
   defp close_client(%Consumer{} = consumer), do: Consumer.close(consumer)
@@ -815,46 +783,34 @@ defmodule Malachi.Loadtest do
       warmup_end: warmup_end,
       measure_end: measure_end,
       conn_opts: conn_opts,
-      pipeline: cfg.pipeline,
       reasons: cfg.reasons
     }
 
-    conn = drive(cfg, conn, ctx, m)
+    conn = drive(conn, ctx, m)
 
     close_client(conn)
     send(parent, {:done, self()})
   end
 
-  # Per-connection context. A legacy produce pre-encodes its payload (zero per-op record encoding); a
-  # stream produce carries records, since the client routes each to its range and encodes each range's
-  # share per append, a cost on the generator's side that a legacy run does not pay. The others carry the
-  # mutable state the closed loop threads (fetch/stream cursor, admin op counter).
+  # Per-connection context. A produce carries records, since the client routes each to its range and
+  # encodes each range's share per append; an admin scenario carries the counter its closed loop threads.
+  # A fetch or stream worker's client keeps its own state.
   defp build_ctx(cfg, index) do
     topic = topic_for(cfg, index)
-    base = %{topic: topic, batch: cfg.batch, max: cfg.max, window: cfg.window}
+    base = %{topic: topic}
 
     case scenario_for(cfg.scenario, index) do
-      :produce ->
-        Map.put(base, :op, {:produce, produce_source(cfg, index, topic)})
-
-      :fetch ->
-        Map.put(base, :op, {:fetch, %{group: "grp_#{index}", member: "mem_#{index}", cursor: nil}})
-
-      :stream ->
-        Map.put(base, :op, {:stream, %{group: "sgrp_#{index}", member: "smem_#{index}"}})
-
-      :user ->
-        Map.put(base, :op, {:user, %{seq: index * 1_000_000}})
-
-      :acl ->
-        Map.put(base, :op, {:acl, %{seq: index * 1_000_000}})
+      :produce -> Map.put(base, :op, {:produce, produce_source(cfg, index)})
+      read when read in [:fetch, :stream] -> base
+      :user -> Map.put(base, :op, {:user, %{seq: index * 1_000_000}})
+      :acl -> Map.put(base, :op, {:acl, %{seq: index * 1_000_000}})
     end
   end
 
-  # Where a connection's produce payloads come from. Constant bytes: one request encoded once and sent
-  # forever, exactly as every published series was measured. A pool: the next encoded batch on every
-  # send, from this connection's own starting batch (see `Malachi.Loadtest.Payload`).
-  defp produce_source(%{pool: nil} = cfg, index, topic) do
+  # Where a connection's produce records come from. Constant bytes: one batch built once and handed over
+  # forever. A pool: the next batch on every hand-over, from this connection's own starting batch (see
+  # `Malachi.Loadtest.Payload`).
+  defp produce_source(%{pool: nil} = cfg, index) do
     value = :binary.copy("x", cfg.record_size)
 
     records =
@@ -862,27 +818,12 @@ defmodule Malachi.Loadtest do
         %Record{value: value, key: "k#{rem(index * cfg.batch + i, cfg.keys)}", timestamp: 0, headers: []}
       end
 
-    if cfg.protocol_used == :streams,
-      do: {:records, entries(records)},
-      else: {:fixed, Wire.encode_produce_req(topic, records)}
+    {:records, entries(records)}
   end
 
-  defp produce_source(%{protocol_used: :streams} = cfg, index, _topic) do
+  defp produce_source(cfg, index) do
     batches = :persistent_term.get(cfg.pool.key)
     {:record_pool, batches, Payload.start_batch(index, cfg.pool.batches, cfg.connections)}
-  end
-
-  defp produce_source(cfg, index, topic) do
-    batches = :persistent_term.get(cfg.pool.key)
-    {:pool, topic, batches, Payload.start_batch(index, cfg.pool.batches, cfg.connections)}
-  end
-
-  # The payload to send next and the source to take the one after from.
-  defp next_payload({:fixed, payload} = source), do: {payload, source}
-
-  defp next_payload({:pool, topic, batches, cursor}) do
-    payload = Wire.encode_produce_req_with(topic, elem(batches, cursor))
-    {payload, {:pool, topic, batches, rem(cursor + 1, tuple_size(batches))}}
   end
 
   # The records to hand the stream client next, untagged (the generator counts them, it does not track
@@ -898,15 +839,13 @@ defmodule Malachi.Loadtest do
   defp scenario_for(:mixed, index), do: if(rem(index, 2) == 0, do: :produce, else: :fetch)
   defp scenario_for(other, _index), do: other
 
-  @spec drive(map(), client, map(), m()) :: client when client: Conn.t() | Producer.t() | Consumer.t() | Fetcher.t()
-  defp drive(_cfg, %Producer{} = producer, ctx, m), do: stream_produce(producer, ctx, m)
-  defp drive(_cfg, %Consumer{} = consumer, ctx, m), do: start_consume(consumer, ctx, m)
-  defp drive(_cfg, %Fetcher{} = fetcher, ctx, m), do: stream_fetch(fetcher, ctx, m)
-  defp drive(_cfg, conn, %{op: {:stream, s}} = ctx, m), do: stream_loop(conn, ctx, s, m)
-  defp drive(cfg, conn, %{op: {:produce, _}} = ctx, m) when cfg.pipeline > 1, do: pipelined(conn, ctx, m)
-  defp drive(_cfg, conn, ctx, m), do: closed_loop(conn, ctx, m, 2)
+  @spec drive(client, map(), m()) :: client when client: Conn.t() | Producer.t() | Consumer.t() | Fetcher.t()
+  defp drive(%Producer{} = producer, ctx, m), do: stream_produce(producer, ctx, m)
+  defp drive(%Consumer{} = consumer, ctx, m), do: start_consume(consumer, ctx, m)
+  defp drive(%Fetcher{} = fetcher, ctx, m), do: stream_fetch(fetcher, ctx, m)
+  defp drive(%Conn{} = conn, ctx, m), do: closed_loop(conn, ctx, m, 2)
 
-  # --- closed loop (threads ctx so fetch/admin state advances) ---
+  # --- closed loop (the admin scenarios; threads ctx so the op counter advances) ---
 
   defp closed_loop(conn, ctx, m, corr) do
     now = mono_ms()
@@ -919,11 +858,6 @@ defmodule Malachi.Loadtest do
       measuring = now >= m.warmup_end
 
       case status do
-        # The server refused this produce (backpressure or quota): back off briefly, keep the connection.
-        shed_status when shed_status in [:overloaded, :rate_limited] ->
-          shed(m, shed_status, measuring)
-          closed_loop(conn, ctx, m, corr + 1)
-
         # Transport error: the connection dropped. Reconnect and keep going within the window.
         :halt ->
           case after_drop(m) do
@@ -938,85 +872,16 @@ defmodule Malachi.Loadtest do
     end
   end
 
-  # --- pipelined loop (produce only; W in flight per connection) ---
-
-  defp pipelined(conn, ctx, m) do
-    result =
-      Enum.reduce_while(1..m.pipeline, {conn, ctx, %{}, 2}, fn _, {conn, ctx, inflight, corr} ->
-        case send_produce(ctx, conn, corr) do
-          {:ok, conn, ctx} -> {:cont, {conn, ctx, Map.put(inflight, corr, mono_us()), corr + 1}}
-          {:error, conn, ctx} -> {:halt, {:send_failed, conn, ctx}}
-        end
-      end)
-
-    case result do
-      # A send error is a broken socket, the same as a recv error: count the drop and reconnect,
-      # instead of silently draining the pipeline and ending the worker early with no drop recorded.
-      {:send_failed, conn, ctx} -> reconnect_pipelined(conn, ctx, m)
-      {conn, ctx, inflight, next} -> pipe_loop(conn, ctx, m, inflight, next)
-    end
-  end
-
-  # On :give_up the dead conn is returned so the worker's final Conn.close stays shape-safe.
-  defp reconnect_pipelined(dead_conn, ctx, m) do
-    case after_drop(m) do
-      {:ok, conn} -> pipelined(replace(dead_conn, conn), ctx, m)
-      :give_up -> dead_conn
-    end
-  end
-
-  defp pipe_loop(conn, _ctx, _m, inflight, _next) when map_size(inflight) == 0, do: conn
-
-  defp pipe_loop(conn, ctx, m, inflight, next) do
-    case Conn.recv_frame(conn) do
-      {:ok, body, conn} ->
-        {corr, code, resp} = Wire.decode_response(body)
-        now = mono_ms()
-        measuring = now >= m.warmup_end
-        {t0, inflight} = Map.pop(inflight, corr)
-        status = produce_status(code, resp)
-        if shed?(status), do: shed(m, status, measuring)
-        if t0 && not shed?(status), do: record(m, status, mono_us() - t0, measuring)
-
-        refill =
-          if now < m.measure_end do
-            send_produce(ctx, conn, next)
-          else
-            {:idle, conn, ctx}
-          end
-
-        case refill do
-          {:ok, conn, ctx} -> pipe_loop(conn, ctx, m, Map.put(inflight, next, mono_us()), next + 1)
-          {:idle, conn, ctx} -> pipe_loop(conn, ctx, m, inflight, next)
-          # Broken socket on send: same treatment as a recv error below.
-          {:error, conn, ctx} -> reconnect_pipelined(conn, ctx, m)
-        end
-
-      # The connection dropped: reconnect and re-prime the pipeline within the window.
-      {:error, _reason} ->
-        reconnect_pipelined(conn, ctx, m)
-    end
-  end
-
-  defp send_produce(%{op: {:produce, source}} = ctx, conn, corr) do
-    {payload, source} = next_payload(source)
-    ctx = %{ctx | op: {:produce, source}}
-
-    case Conn.send_frame(conn, Wire.produce_key(), corr, payload) do
-      :ok -> {:ok, conn, ctx}
-      {:error, _} -> {:error, conn, ctx}
-    end
-  end
-
   # --- stream produce (producer streams, `Malachi.Loadtest.Producer`) ---
   #
   # The client keeps `pipeline` appends in flight per range at most, fewer when the broker's window is
   # smaller, and hands over the next batch whenever the range buffers have room. What came back is taken
   # first, without waiting, so an acknowledgement is timed when it arrives rather than when the loop next
   # had nothing to send. At the deadline nothing more is sent, and the appends in flight are waited for
-  # and recorded, as a legacy pipelined connection waits for its requests in flight.
+  # and recorded.
 
-  # How long the appends in flight at the deadline are waited for: the legacy loop's receive timeout.
+  # How long the appends in flight at the deadline are waited for: as long as a connection waits for an
+  # answer (`Malachi.Loadtest.Conn`'s receive timeout).
   @drain_ms 15_000
 
   defp stream_produce(producer, ctx, m) do
@@ -1087,10 +952,9 @@ defmodule Malachi.Loadtest do
     :counters.add(m.ops, @dropped, stats.dropped)
   end
 
-  # One acknowledged append is one op, its records and its round trip, as a legacy produce is; a refused
-  # one is counted under its reason (the two sheds apart, as a legacy refusal is), without the backoff the
-  # legacy loop takes: the window already holds this client back. An append in flight when its connection
-  # dropped is in `dropped`, not in `errors`, as a legacy pipelined request is.
+  # One acknowledged append is one op, its records and its round trip; a refused one is counted under its
+  # reason (the two sheds apart), without a backoff: the window already holds this client back. An append
+  # in flight when its connection dropped is in `dropped`, not in `errors`.
   defp record_events(m, events, measuring) do
     Enum.each(events, fn
       {:acked, entries, latency_us} -> record(m, {:ok, length(entries)}, latency_us, measuring)
@@ -1104,21 +968,21 @@ defmodule Malachi.Loadtest do
   defp record_refusal(m, "rate_limited", true), do: :counters.add(m.ops, @rate_limited, 1)
   defp record_refusal(m, reason, true), do: count_error(m, reason)
 
-  # A consume stream refused, on its open or later, counted warmup or not, as a refused legacy subscribe is:
-  # the two sheds apart, any other reason as an error.
+  # A consume stream refused, on its open or later, counted warmup or not: the broker sends nothing more on
+  # it, so a warmup would otherwise swallow every refusal at the open. The two sheds apart, any other
+  # reason as an error.
   defp count_refusal(m, "overloaded"), do: :counters.add(m.ops, @overloaded, 1)
   defp count_refusal(m, "rate_limited"), do: :counters.add(m.ops, @rate_limited, 1)
   defp count_refusal(m, reason), do: count_error(m, reason)
 
   # --- stream consume (consume streams, `Malachi.Loadtest.Consumer`) ---
   #
-  # The opens go out when the barrier lifts, as a legacy subscribe does, and nothing waits for them: the
-  # pages the brokers push are read until the deadline, from the first, whichever range they come from:
-  # one op per page with records, and its records, as a legacy push is (no latency: a push carries no
-  # client-side start). A range the broker refuses, on its open or later, is counted once, warmup or not
-  # (`rate_limited` and `overloaded` as sheds, anything else as an error under its reason), and neither it
-  # nor a range a split makes of it is read again, as a refused legacy subscribe ends that worker's
-  # stream; the other ranges read on. The consumer acks every page itself, so the credit comes back as the
+  # The opens go out when the barrier lifts, and nothing waits for them: the pages the brokers push are
+  # read until the deadline, from the first, whichever range they come from: one op per page with
+  # records, and its records (no latency: a push carries no client-side start). A range the broker
+  # refuses, on its open or later, is counted once, warmup or not (`rate_limited` and `overloaded` as
+  # sheds, anything else as an error under its reason), and neither it nor a range a split makes of it is
+  # read again; the other ranges read on. The consumer acks every page itself, so the credit comes back as the
   # pages are read.
 
   defp start_consume(consumer, ctx, m) do
@@ -1161,14 +1025,13 @@ defmodule Malachi.Loadtest do
 
   # --- stream fetch (`fetch_range`, `Malachi.Loadtest.Fetcher`) ---
   #
-  # A closed loop, as a legacy fetch is: one `fetch_range` of the next range in turn, an op with the records
-  # it brought (a page with none is still an op), timed over its round trip alone (reading routes or
-  # connecting before it is not, as a legacy reconnect is not). A `fetch_range` spends a token of the
-  # subscribe quota, so one refused `rate_limited` (or `overloaded`) is the server shedding load: counted
-  # apart, after the short backoff a shed produce takes. Any other refusal, or routes that could not be read,
-  # is an error under its reason, once per attempt: while the routes back off after a failed read the worker
-  # waits the backoff out rather than count it again. A redirect is no op; a dropped connection, or one that
-  # cannot be made, waits a little before the next try, as a legacy reconnect does.
+  # A closed loop: one `fetch_range` of the next range in turn, an op with the records it brought (a page
+  # with none is still an op), timed over its round trip alone (reading routes or connecting before it is
+  # not). A `fetch_range` spends a token of the subscribe quota, so one refused `rate_limited` (or
+  # `overloaded`) is the server shedding load: counted apart, after a short backoff. Any other refusal, or
+  # routes that could not be read, is an error under its reason, once per attempt: while the routes back
+  # off after a failed read the worker waits the backoff out rather than count it again. A redirect is no
+  # op; a dropped connection, or one that cannot be made, waits `@reconnect_backoff_ms` before the next try.
 
   defp stream_fetch(fetcher, ctx, m) do
     now = mono_ms()
@@ -1195,115 +1058,7 @@ defmodule Malachi.Loadtest do
     end
   end
 
-  # --- stream loop (server push + credit acks) ---
-  #
-  # A successful subscribe sends no response: the server just starts pushing frames tagged with the
-  # subscribe correlation id (payload = a fetch_resp), and the client returns credit + advances via
-  # stream_ack. So we fire the subscribe and then read pushes, recving with the time left in the window
-  # so we stop promptly at the deadline. A non-ok frame means the subscribe was rejected.
-
-  defp stream_loop(conn, ctx, s, m) do
-    payload = Wire.encode_subscribe_req(ctx.topic, s.group, s.member, ctx.window, ctx.max)
-
-    case Conn.send_frame(conn, Wire.subscribe_key(), 2, payload) do
-      :ok -> stream_recv(conn, ctx, s, m)
-      # A send error is a broken socket, the same as a recv error in stream_recv/4: count the drop and
-      # resubscribe, instead of ending the worker with nothing recorded.
-      {:error, _} -> resubscribe(conn, ctx, s, m)
-    end
-  end
-
-  # On :give_up the dead conn is returned so the worker's final Conn.close stays shape-safe. A server that
-  # authenticates and then drops every subscribe keeps this reconnecting until the deadline, one backoff
-  # apart and each counted in `dropped`: the retry cap in after_drop/1 only bounds failed connects.
-  defp resubscribe(dead_conn, ctx, s, m) do
-    case after_drop(m) do
-      {:ok, conn} -> stream_loop(replace(dead_conn, conn), ctx, s, m)
-      :give_up -> dead_conn
-    end
-  end
-
-  defp stream_recv(conn, ctx, s, m) do
-    remaining = m.measure_end - mono_ms()
-
-    if remaining <= 0 do
-      conn
-    else
-      case Conn.recv_frame(conn, remaining) do
-        {:ok, body, conn} ->
-          handle_push(conn, ctx, s, m, Wire.decode_response(body))
-
-        # The recv waited for exactly the time left in the window, so a timeout is the deadline and not a
-        # lost connection: the stream ends here with nothing counted. Counting it made every stream run that
-        # went quiet before the end report one drop per connection.
-        {:error, :timeout} ->
-          conn
-
-        # The connection dropped: reconnect and re-subscribe within the window.
-        {:error, _reason} ->
-          resubscribe(conn, ctx, s, m)
-      end
-    end
-  end
-
-  defp handle_push(conn, ctx, s, m, {_corr, 0, resp}) do
-    {records, next_cursor} = Wire.decode_fetch_resp(resp)
-    n = length(records)
-    if mono_ms() >= m.warmup_end and n > 0, do: record_push(m, n)
-    ack = Wire.encode_stream_ack_req(ctx.topic, s.group, s.member, next_cursor, n)
-    # Unchecked on purpose. The socket has no send_timeout (Conn.socket_opts/0), so a send on a live socket
-    # blocks until the kernel takes the bytes and an error only comes back once the socket is already gone.
-    # The stream_recv/4 right below then fails on the same socket and takes the drop path, so a failed ack
-    # costs one wasted round trip and a live socket cannot lose credit this way.
-    _ = Conn.send_frame(conn, Wire.stream_ack_key(), 3, ack)
-    stream_recv(conn, ctx, s, m)
-  end
-
-  # A refused subscribe. The server sends no frame for a subscription it did not accept, so there is
-  # nothing left to wait for and this worker's stream ends here. That makes the refusal terminal, like a
-  # dropped connection, and it is counted whatever the window `after_drop/1` counts drops in: the
-  # subscribe goes out the moment the barrier lifts, so a warmup (2s by default) would otherwise swallow
-  # every refusal, and the worker never gets a second chance to record one. No backoff either, for the
-  # same reason: there is nothing left to back off from.
-  defp handle_push(conn, _ctx, _s, m, {_corr, _code, resp}) do
-    case error_status(resp) do
-      {:error, reason} -> count_error(m, reason)
-      shed_status -> :counters.add(m.ops, shed_counter(shed_status), 1)
-    end
-
-    conn
-  end
-
   # --- ops (closed-loop round trips); each returns {status, conn, ctx} ---
-
-  defp do_op(%{op: {:produce, source}} = ctx, conn, corr) do
-    {payload, source} = next_payload(source)
-    ctx = %{ctx | op: {:produce, source}}
-
-    case Conn.request(conn, Wire.produce_key(), corr, payload) do
-      {:ok, 0, <<count::32>>, conn} -> {{:ok, count}, conn, ctx}
-      {:ok, _code, resp, conn} -> {error_status(resp), conn, ctx}
-      {:error, _reason} -> {:halt, conn, ctx}
-    end
-  end
-
-  defp do_op(%{op: {:fetch, st}} = ctx, conn, corr) do
-    payload = Wire.encode_fetch_req(ctx.topic, st.cursor, st.group, st.member, ctx.max, 0)
-
-    case Conn.request(conn, Wire.fetch_key(), corr, payload) do
-      {:ok, 0, resp, conn} ->
-        {records, next_cursor} = Wire.decode_fetch_resp(resp)
-        # at the tail (nothing new) reset to start so the reader keeps pulling the growing backlog
-        st = %{st | cursor: if(records == [], do: nil, else: next_cursor)}
-        {{:ok, length(records)}, conn, %{ctx | op: {:fetch, st}}}
-
-      {:ok, _code, resp, conn} ->
-        {genuine_error(resp), conn, ctx}
-
-      {:error, _reason} ->
-        {:halt, conn, ctx}
-    end
-  end
 
   # Admin: user create/delete cycle (control-plane, ra-backed). One op = one round trip pair.
   defp do_op(%{op: {:user, st}} = ctx, conn, corr) do
@@ -1352,26 +1107,8 @@ defmodule Malachi.Loadtest do
   defp admin_cleanup({:ok, _code, resp, conn}, _sent_on, ctx, op), do: {genuine_error(resp), conn, %{ctx | op: op}}
   defp admin_cleanup({:error, _reason}, sent_on, ctx, op), do: {:halt, sent_on, %{ctx | op: op}}
 
-  # Produce response payload is `<<count::32>>`; count it as records (pipelined path).
-  defp produce_status(0, <<count::32>>), do: {:ok, count}
-  defp produce_status(_code, resp), do: error_status(resp)
-
-  # A produce error response is one of the server's two refusals, both light events the worker backs off
-  # on (`:overloaded` from the group-commit valve, `:rate_limited` from the configured publish quota), or a
-  # genuine error that keeps its reason.
-  defp error_status(resp) do
-    case Wire.decode_error_reason(resp) do
-      "overloaded" -> :overloaded
-      "rate_limited" -> :rate_limited
-      reason -> {:error, reason}
-    end
-  end
-
-  # Any other operation's error response: always genuine, and always with the reason the server gave.
+  # An admin op's error response: always genuine, and always with the reason the server gave.
   defp genuine_error(resp), do: {:error, Wire.decode_error_reason(resp)}
-
-  # A refusal the worker retries through, as opposed to a completed op or a genuine error.
-  defp shed?(status), do: status in [:overloaded, :rate_limited]
 
   # --- recording ---
 
@@ -1391,7 +1128,7 @@ defmodule Malachi.Loadtest do
     :ets.update_counter(m.reasons, reason, 1, {reason, 0})
   end
 
-  # The server refused a produce: count it under its own reason (during the measured window) and back off
+  # The server shed a fetch: count it under its own reason (during the measured window) and back off
   # briefly so the worker does not immediately re-flood the broker.
   defp shed(m, status, measuring) do
     if measuring, do: :counters.add(m.ops, shed_counter(status), 1)
@@ -1406,15 +1143,7 @@ defmodule Malachi.Loadtest do
   # server is down (retry cap hit) or the window has closed.
   defp after_drop(m) do
     :counters.add(m.ops, @dropped, 1)
-
-    case reconnect(m, 0) do
-      {:ok, conn} ->
-        :counters.add(m.ops, @reconnects, 1)
-        {:ok, conn}
-
-      :give_up ->
-        :give_up
-    end
+    reconnect(m, 0)
   end
 
   # Closes a dropped connection once its replacement is up and hands the replacement on. A transport error
@@ -1448,7 +1177,7 @@ defmodule Malachi.Loadtest do
     end
   end
 
-  # stream pushes count as one op per page plus its records.
+  # A page a consume stream pushed counts as one op plus its records.
   # No latency sample: a server push carries no client-side start timestamp, and recording 0 made
   # every stream run report p50=0.0 as if it measured sub-microsecond latency. Stream latency is
   # simply not measured client-side; the histogram stays honest (empty).
@@ -1467,7 +1196,6 @@ defmodule Malachi.Loadtest do
     dropped = :counters.get(ops, @dropped)
     overloaded = :counters.get(ops, @overloaded)
     rate_limited = :counters.get(ops, @rate_limited)
-    reconnects = :counters.get(ops, @reconnects)
     secs = cfg.duration
 
     cfg
@@ -1484,7 +1212,6 @@ defmodule Malachi.Loadtest do
       dropped: dropped,
       overloaded: overloaded,
       rate_limited: rate_limited,
-      reconnects: reconnects,
       moved: :counters.get(ops, @moved),
       redirects: :counters.get(ops, @redirects),
       route_refreshes: :counters.get(ops, @refreshes),
@@ -1506,11 +1233,8 @@ defmodule Malachi.Loadtest do
       payload: cfg.payload,
       payload_seed: cfg.payload_seed,
       payload_pool_values: cfg.pool && cfg.pool.batches * cfg.batch,
-      # the keys the run produced on, as decided against the cluster; lingering only applies on streams.
-      # Not yet in `regimeFields`: the Node generator takes them in its own change (#275, after this one).
-      protocol: cfg.protocol_used,
-      linger_ms: if(cfg.protocol_used == :streams, do: cfg.linger_ms),
-      linger_bytes: if(cfg.protocol_used == :streams, do: cfg.linger_bytes)
+      linger_ms: cfg.linger_ms,
+      linger_bytes: cfg.linger_bytes
     }
   end
 
@@ -1566,7 +1290,7 @@ defmodule Malachi.Loadtest do
         port: Keyword.get(cfg.conn_opts, :port, 4040)
       ] ++
         connect_options(cfg) ++
-        protocol_options(cfg) ++
+        linger_options(cfg) ++
         payload_options(cfg) ++ auth_options(cfg.conn_opts) ++ tls_options(cfg.conn_opts) ++ json_option(cfg)
 
     Enum.join(["mix malachi.loadtest" | Enum.map(options, &render_option/1)], " ")
@@ -1583,13 +1307,8 @@ defmodule Malachi.Loadtest do
     end
   end
 
-  # The protocol as asked for, not as decided: a reproduction against the same cluster decides the same
-  # way, and one against another cluster should decide for itself. The lingering knobs travel with it
-  # unless it is :legacy, which refuses them.
-  defp protocol_options(%{protocol: :legacy}), do: [protocol: "legacy"]
-
-  defp protocol_options(cfg),
-    do: [protocol: cfg.protocol, "linger-ms": cfg.linger_ms, "linger-bytes": cfg.linger_bytes]
+  # The lingering shapes every append, so it travels with every command, defaults included.
+  defp linger_options(cfg), do: ["linger-ms": cfg.linger_ms, "linger-bytes": cfg.linger_bytes]
 
   # Only when the values are not constant bytes, so the command every published run recorded is unchanged.
   # The seed travels with the mode: it is what makes the values reproducible.
@@ -1747,7 +1466,7 @@ defmodule Malachi.Loadtest do
 
     #{r.scenario} (#{r.connections} conns, pipeline #{r.pipeline}) over #{r.duration_s}s
       #{r.records_per_s} rec/s  #{r.ops_per_s} ops/s  #{r.mb_per_s} MB/s
-      protocol=#{r.protocol}  errors=#{r.errors}  dropped=#{r.dropped}  reconnects=#{r.reconnects}
+      errors=#{r.errors}  dropped=#{r.dropped}
       routing: moved=#{r.moved}  redirects=#{r.redirects}  route_refreshes=#{r.route_refreshes}
       server-refused: overloaded=#{r.overloaded}  rate_limited=#{r.rate_limited}
       latency ms: p50=#{l.p50} p99=#{l.p99} p99.9=#{l.p99_9} p99.99=#{l.p99_99}

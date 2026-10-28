@@ -21,7 +21,7 @@ defmodule LoadtestAB do
   alias Malachi.Bench.ABRun
   alias Malachi.Bench.PairedStats
 
-  @backpressure ~w(errors dropped overloaded rate_limited reconnects)
+  @backpressure ~w(errors dropped overloaded rate_limited)
 
   def analyze(results, out) do
     dirs = results |> File.ls!() |> Enum.filter(&File.dir?(Path.join(results, &1))) |> Enum.sort()

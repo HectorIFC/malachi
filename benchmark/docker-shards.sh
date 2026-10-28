@@ -6,7 +6,7 @@
 #
 # For each DATA_SHARDS in 1/2/4 it brings up a FRESH 4-core server (cpuset 4-7, group commit on) so one
 # run's tmpfs data cannot corrupt the next, runs produce batch 100 conns 256 from the Elixir client
-# (cpuset 0-3), and prints rec/s plus err/drop/over/recon. On a fresh server err/drop should be 0; a
+# (cpuset 0-3), and prints rec/s plus err/drop/over. On a fresh server err/drop should be 0; a
 # nonzero value means the 1g tmpfs filled (lower DUR).
 #
 # The client fans out over many topics (--topics), because a topic is pinned to one shard: a single-topic
@@ -31,7 +31,7 @@ FAILED=0
 echo "Building images (first run compiles all deps; slow)..."
 $COMPOSE build || { echo "build failed"; exit 1; }
 
-printf "%-8s | %10s %8s %8s %10s %10s\n" shards "rec/s" errors dropped overload reconn
+printf "%-8s | %10s %8s %8s %10s\n" shards "rec/s" errors dropped overload
 printf -- "--------------------------------------------------------------------\n"
 
 for n in $SHARDS; do
@@ -54,8 +54,8 @@ for n in $SHARDS; do
     # A caseless client must fail the run, not blend in as a blank row.
     printf "%-8s | %s\n" "$n" "(no json)"; FAILED=1; continue
   fi
-  read -r recs errs drop over recon < <(echo "$json" | jq -r '[.records_per_s,.errors,.dropped,.overloaded,.reconnects]|@tsv')
-  printf "%-8s | %10s %8s %8s %10s %10s\n" "$n" "$recs" "$errs" "$drop" "$over" "$recon"
+  read -r recs errs drop over < <(echo "$json" | jq -r '[.records_per_s,.errors,.dropped,.overloaded]|@tsv')
+  printf "%-8s | %10s %8s %8s %10s\n" "$n" "$recs" "$errs" "$drop" "$over"
 done
 
 echo

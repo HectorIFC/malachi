@@ -323,7 +323,7 @@ if [ "$SMOKE" = 1 ]; then
 fi
 echo
 
-printf "%-4s | %10s %8s %8s %8s %8s %8s\n" rf "rec/s" "p50 ms" "p99 ms" dropped overload reconn
+printf "%-4s | %10s %8s %8s %8s %8s\n" rf "rec/s" "p50 ms" "p99 ms" dropped overload
 printf -- "----------------------------------------------------------------\n"
 
 # Waits until all three nodes report healthy. `up --wait` cannot be used: the formation race makes a
@@ -497,15 +497,15 @@ for rf in $RFS; do
     continue
   fi
 
-  read -r recs p50 p99 err drop over recon < <(jq -r \
-    '[.records_per_s,.latency_ms.p50,.latency_ms.p99,.errors,.dropped,.overloaded,.reconnects]|@tsv' <<< "$json")
+  read -r recs p50 p99 err drop over < <(jq -r \
+    '[.records_per_s,.latency_ms.p50,.latency_ms.p99,.errors,.dropped,.overloaded]|@tsv' <<< "$json")
   outcome="ok"
   # Errors are a lower number, not a failed run: RF=3 on a real disk is expected to time some out.
   if [ "$err" != "0" ]; then
     drop="$drop(err=$err)"
     outcome="ok with errors"
   fi
-  printf "%-4s | %10s %8s %8s %8s %8s %8s\n" "$rf" "$recs" "$p50" "$p99" "$drop" "$over" "$recon"
+  printf "%-4s | %10s %8s %8s %8s %8s\n" "$rf" "$recs" "$p50" "$p99" "$drop" "$over"
   echo "     regime: ${LABELS[$rf]}"
   [ -n "$cpu" ] && echo "     mid-window CPU: $cpu"
 

@@ -8,7 +8,7 @@
 #
 # For each cell (shards x batch x pipeline) it brings up a FRESH 4-core server (cpuset 4-7, group commit
 # on) so one cell's tmpfs data cannot corrupt the next, runs produce from the Elixir client (cpuset 0-3),
-# and prints rec/s, p50, p99, and err/drop/over/recon. Latency matters here: pipelining trades latency for
+# and prints rec/s, p50, p99, and err/drop/over. Latency matters here: pipelining trades latency for
 # throughput, so p50/p99 rising while rec/s rises is the expected signal.
 #
 # Connections are kept at 64 so in-flight records (~conns*pipeline*batch) stay under the 200k overload
@@ -70,7 +70,7 @@ trap 'rm -rf "$WORK"' EXIT
 echo "Building images (first run compiles all deps; slow)..."
 $COMPOSE build || { echo "build failed"; exit 1; }
 
-printf "%-7s %-6s %-6s %-4s | %10s %8s %8s %8s %8s %8s\n" shards batch pipe rep "rec/s" "p50 ms" "p99 ms" dropped overload reconn
+printf "%-7s %-6s %-6s %-4s | %10s %8s %8s %8s %8s\n" shards batch pipe rep "rec/s" "p50 ms" "p99 ms" dropped overload
 printf -- "--------------------------------------------------------------------------------------\n"
 
 for rep in $(seq 1 "$REPS"); do
@@ -100,10 +100,10 @@ for rep in $(seq 1 "$REPS"); do
           '{scenario: $scenario, payload: $payload, shards: $shards, batch: $batch, pipeline: $pipeline, rep: $rep, conns: $conns,
             srv_cpuset: $srv, lt_cpuset: $lt, tree: $tree, loadtest: .}' <<< "$json" >> "$OUT"
       fi
-      read -r recs p50 p99 err drop over recon < <(echo "$json" \
-        | jq -r '[.records_per_s,.latency_ms.p50,.latency_ms.p99,.errors,.dropped,.overloaded,.reconnects]|@tsv')
+      read -r recs p50 p99 err drop over < <(echo "$json" \
+        | jq -r '[.records_per_s,.latency_ms.p50,.latency_ms.p99,.errors,.dropped,.overloaded]|@tsv')
       [ "$err" != "0" ] && drop="$drop(err=$err)"
-      printf "%-7s %-6s %-6s %-4s | %10s %8s %8s %8s %8s %8s\n" "$s" "$b" "$p" "$rep" "$recs" "$p50" "$p99" "$drop" "$over" "$recon"
+      printf "%-7s %-6s %-6s %-4s | %10s %8s %8s %8s %8s\n" "$s" "$b" "$p" "$rep" "$recs" "$p50" "$p99" "$drop" "$over"
      done
     done
   done

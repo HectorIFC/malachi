@@ -52,18 +52,18 @@ defmodule Malachi.Loadtest.Router do
   def new({host, port} = bootstrap) when is_binary(host) and is_integer(port), do: %__MODULE__{bootstrap: bootstrap}
 
   @doc """
-  Reads the cluster state through `conn`, an authenticated connection to the router's bootstrap address.
-  `{:legacy, :no_cluster_state, conn}` from a node too old to answer it (any refusal of the key), and
-  `{:legacy, :malformed_cluster_state, conn}` from one whose answer is not a cluster state, so the client
-  keeps to the legacy keys; otherwise the router, which says in `streams_enabled?/1` whether the
-  stream keys are served.
+  Reads the cluster state through `conn`, an authenticated connection to the router's bootstrap address:
+  the router, which says in `streams_enabled?/1` whether the stream keys are served. `{:error,
+  "no_cluster_state", conn}` from a node that refuses the key (with any reason), and `{:error,
+  "malformed_cluster_state", conn}` from one whose answer is not a cluster state: a node that answers
+  neither can route nothing, and the caller decides what that means for it. `{:error, reason}` when the
+  connection failed.
   """
-  @spec bootstrap(t(), Conn.t()) ::
-          {:ok, t(), Conn.t()} | {:legacy, :no_cluster_state | :malformed_cluster_state, Conn.t()} | {:error, term()}
+  @spec bootstrap(t(), Conn.t()) :: {:ok, t(), Conn.t()} | {:error, String.t(), Conn.t()} | {:error, term()}
   def bootstrap(%__MODULE__{} = router, conn) do
     case Conn.request(conn, Wire.cluster_state_key(), 24, Wire.encode_cluster_state_req()) do
       {:ok, 0, payload, conn} -> decoded(router, payload, conn)
-      {:ok, _code, _refusal, conn} -> {:legacy, :no_cluster_state, conn}
+      {:ok, _code, _refusal, conn} -> {:error, "no_cluster_state", conn}
       {:error, _reason} = failed -> failed
     end
   end
@@ -74,30 +74,24 @@ defmodule Malachi.Loadtest.Router do
     {:ok, put_cluster_state(router, Wire.decode_cluster_state_resp(payload)), conn}
   rescue
     _malformed in [FunctionClauseError, MatchError, CaseClauseError, ArgumentError] ->
-      {:legacy, :malformed_cluster_state, conn}
+      {:error, "malformed_cluster_state", conn}
   end
 
   @doc """
   Reads the cluster state and `topic`'s routes again through `conn`: after a move, or a connection to a
   primary that failed, either may have changed. `{:error, reason, conn}` when the server refused either
-  (the topic does not exist, the stream keys were turned off), with `reason` as it answered.
+  (the topic does not exist, the stream keys were turned off), with `reason` as it answered, or as
+  `bootstrap/2` names an unanswered cluster state.
   """
   @spec refresh(t(), Conn.t(), String.t()) ::
           {:ok, t(), Conn.t()} | {:error, String.t(), Conn.t()} | {:error, term()}
   def refresh(%__MODULE__{} = router, conn, topic) do
-    with {:ok, router, conn} <- refresh_cluster(router, conn) do
+    with {:ok, router, conn} <- bootstrap(router, conn) do
       case Conn.request(conn, Wire.topic_routes_key(), 25, Wire.encode_topic_routes_req(topic)) do
         {:ok, 0, payload, conn} -> {:ok, put_routes(router, Wire.decode_topic_routes_resp(payload)), conn}
         {:ok, _code, refusal, conn} -> {:error, Wire.decode_error_reason(refusal), conn}
         {:error, _reason} = failed -> failed
       end
-    end
-  end
-
-  defp refresh_cluster(router, conn) do
-    case bootstrap(router, conn) do
-      {:legacy, reason, conn} -> {:error, Atom.to_string(reason), conn}
-      other -> other
     end
   end
 

@@ -357,15 +357,14 @@ defmodule Mix.Tasks.Malachi.Docs.Results do
     for {key, label} <- @latency_labels, do: {label, suffix(latency[key], " ms")}
   end
 
-  # Both generators count the drops and the sheds; only the BEAM one has reconnects, of its legacy stream,
-  # and a row a result does not carry is left out (`table/2`). A section with nothing counted would read as
-  # "no backpressure occurred" rather than "this tool does not measure it", so it is left out entirely.
+  # Both generators count the drops and the sheds, and a row a result does not carry is left out
+  # (`table/2`). A section with nothing counted would read as "no backpressure occurred" rather than "this
+  # tool does not measure it", so it is left out entirely.
   defp backpressure_section(result) do
     rows = [
       {"Dropped connections", result["dropped"]},
       {"Server-shed produces", result["overloaded"]},
-      {"Quota-refused produces", result["rate_limited"]},
-      {"Reconnects", result["reconnects"]}
+      {"Quota-refused produces", result["rate_limited"]}
     ]
 
     if Enum.all?(rows, fn {_label, value} -> value == nil end) do

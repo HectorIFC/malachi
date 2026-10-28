@@ -50,7 +50,7 @@ defmodule Malachi.Loadtest.Client do
   defp bootstrap(conn, opts, conn_opts) do
     case Router.bootstrap(Router.new({Keyword.fetch!(opts, :host), Keyword.fetch!(opts, :port)}), conn) do
       {:ok, router, conn} -> {:ok, %__MODULE__{router: router, conn: conn, conn_opts: conn_opts}}
-      {:legacy, reason, conn} -> close_with(conn, {:error, reason})
+      {:error, reason, conn} -> close_with(conn, {:error, reason})
       {:error, _reason} = error -> close_with(conn, error)
     end
   end

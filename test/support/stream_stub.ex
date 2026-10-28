@@ -12,7 +12,8 @@ defmodule Malachi.Test.StreamStub do
   open_consume `{:push_on_open, values}` (a page of the ones at or past the position the open asks for, the
   `n`th value at offset `n`, pushed right after the answer); `{:after, n, reply}` answers the first `n`
   requests to the key as usual (`{:after, n, first, reply}`: with `first`) and every later one with `reply`,
-  and `{:delay, ms, reply}` answers with
+  `{:cycle, replies}` answers the requests to the key with `replies` in turn, over and over, across every
+  connection (`:default` among them answers as usual), and `{:delay, ms, reply}` answers with
   `reply` after `ms` milliseconds. A `fetch_range` gets an empty page. Routes can
   also change from one read to the next (`set_routes_sequence/2`); an `open_stream` answers with the
   version last read, by any connection (the stub keeps one for all), `opened/1` counts the opens, and
@@ -183,8 +184,8 @@ defmodule Malachi.Test.StreamStub do
   end
 
   # The answer a request to `api_key` gets: its override, `:default` without one; `{:after, n, reply}`
-  # answers the first `n` requests to the key as usual and every later one with `reply`, and `{:after, n,
-  # first, reply}` the first `n` with `first`.
+  # answers the first `n` requests to the key as usual and every later one with `reply`, `{:after, n,
+  # first, reply}` the first `n` with `first`, and `{:cycle, replies}` the next of `replies`.
   defp override(stub, api_key) do
     Agent.get_and_update(stub.state, fn state ->
       case Map.get(state.overrides, api_key, :default) do
@@ -199,6 +200,9 @@ defmodule Malachi.Test.StreamStub do
 
         {:after, n, first, reply} ->
           {first, after_one(state, api_key, n, first, reply)}
+
+        {:cycle, [reply | rest]} ->
+          {reply, %{state | overrides: Map.put(state.overrides, api_key, {:cycle, rest ++ [reply]})}}
 
         reply ->
           {reply, state}

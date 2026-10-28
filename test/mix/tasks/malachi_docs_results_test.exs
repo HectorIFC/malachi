@@ -139,7 +139,8 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
     end
 
     test "the backpressure section appears only for a run that counted it, with the rows it carries", context do
-      # A Node run counts the drops and the sheds, and has no reconnects.
+      # Both generators count the drops and the sheds. A result published before the reconnects field went
+      # still carries it, and no row renders it.
       publish(context, "loadtest-node.json", loadtest_result(%{"dropped" => 1, "overloaded" => 0, "rate_limited" => 0}))
 
       publish(
@@ -160,7 +161,7 @@ defmodule Mix.Tasks.Malachi.Docs.ResultsTest do
       assert elixir =~ "| Server-shed produces | 3 |"
       # the two refusals are reported apart: saturation and quota mean different things to an operator
       assert elixir =~ "| Quota-refused produces | 2 |"
-      assert elixir =~ "| Reconnects | 1 |"
+      refute elixir =~ "Reconnects"
     end
 
     test "a result that counted none of the backpressure has no section for it", context do

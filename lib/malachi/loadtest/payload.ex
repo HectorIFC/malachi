@@ -70,7 +70,6 @@ defmodule Malachi.Loadtest.Payload do
   import Bitwise
 
   alias Malachi.Log.Record
-  alias Malachi.Wire
 
   @modes [:constant, :json, :random]
   @default_seed 1
@@ -294,33 +293,12 @@ defmodule Malachi.Loadtest.Payload do
   end
 
   @doc """
-  The pool for `mode`, as a tuple of batches already encoded by `Malachi.Wire.encode_produce_records/1`,
-  so a produce only joins one to its topic. Value `pos` of the pool is keyed `k<rem(pos, keys)>`. The tuple
-  is meant to be shared rather than handed to every connection: `Malachi.Loadtest` keeps it in
+  The pool for `mode`, as a tuple of batches of records: value `pos` of the pool is keyed
+  `k<rem(pos, keys)>`. The client that routes each record to its range (`Malachi.Loadtest.Producer`)
+  encodes each range's share of a batch on its own, so the pool holds the records, not encoded bytes. The
+  tuple is meant to be shared rather than handed to every connection: `Malachi.Loadtest` keeps it in
   `:persistent_term` for the run, since a term sent or captured into a process is copied there, small
   batches included.
-  """
-  @spec encoded_batches(
-          mode(),
-          non_neg_integer(),
-          pos_integer(),
-          pos_integer(),
-          pos_integer(),
-          pos_integer(),
-          pos_integer()
-        ) :: tuple()
-  def encoded_batches(mode, seed, record_size, batch, keys, connections, pipeline) do
-    mode
-    |> record_batches(seed, record_size, batch, keys, connections, pipeline)
-    |> Tuple.to_list()
-    |> Enum.map(&Wire.encode_produce_records/1)
-    |> List.to_tuple()
-  end
-
-  @doc """
-  The same pool as `encoded_batches/7`, value for value and key for key, as batches of records: what a
-  client that routes each record to its range (`Malachi.Loadtest.Producer`) takes, since it encodes each
-  range's share of a batch on its own.
   """
   @spec record_batches(
           mode(),

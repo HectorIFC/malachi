@@ -1778,7 +1778,7 @@ defmodule ChaosChecker do
           stream_router_again(hosts, deadline, idx, why)
         end
 
-      {:legacy, _reason, conn} ->
+      {:error, _no_or_malformed, conn} ->
         Conn.close(conn)
         stream_router_again(hosts, deadline, idx, "#{inspect(address)} does not answer cluster_state")
 

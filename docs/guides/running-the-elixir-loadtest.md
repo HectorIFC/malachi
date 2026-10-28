@@ -190,11 +190,10 @@ ceiling harness pins `bounded` at 32 explicitly, each pacing knob is only accept
 that reads it, and a connection that still fails aborts the run with a `SetupError` naming how many of
 how many failed, instead of a crashed worker's exit dump.
 
-This generator records fewer latency percentiles than the Node one, which keeps a full histogram, and
-counts backpressure that the Node one does not: server-shed produces in every scenario, and dropped
-connections and reconnects outside the stream scenario (the Node generator counts those two only for a
-stream run and writes null for them elsewhere). Both pages render only what the run recorded, so the
-two sections legitimately show different fields rather than one of them looking incomplete.
+This generator records fewer latency percentiles than the Node one, which keeps a full histogram. Both
+count the same backpressure (dropped connections, server-shed and quota-refused requests) in every
+scenario. Both pages render only what the run recorded, so the two latency sections legitimately show
+different rows rather than one of them looking incomplete.
 
 Two things about that `meta` block are worth knowing. The recorded command is rebuilt from the
 **effective** configuration rather than copied from what you typed, so a knob you left at its default
@@ -209,10 +208,15 @@ the recorded ref then reads `<sha>-dirty` rather than naming a commit.
 ## Reading the output
 
 Beyond throughput and the latency tail, this generator reports `dropped` connections, `overloaded`
-(produces the server shed under backpressure) and `reconnects`, the first and last of which the Node one
-reports only for a stream run. Those three
-are the difference between a server that is slow and a server that is shedding, and a throughput
-number taken while any of them is climbing describes the backpressure rather than the capacity.
+(requests the server shed under backpressure) and `rate_limited` (requests a configured quota refused),
+as the Node one does. Those three are the difference between a server that is slow and a server that is
+shedding, and a throughput number taken while any of them is climbing describes the backpressure rather
+than the capacity. A dropped connection is reconnected and the run goes on; the drop is what is counted.
+
+It speaks only the stream keys: a server that does not answer `cluster_state`, or a cluster with the
+`producer_streams` flag off, fails the run before any worker connects, naming why
+(`mix malachi.flag enable producer_streams` turns the flag on). What routing did is in `moved`,
+`redirects` and `route_refreshes`.
 
 A run that completes with `ops: 0` prints a warning naming the likely cause instead of reporting a
 silent zero.

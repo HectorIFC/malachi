@@ -157,13 +157,20 @@ defmodule Malachi.Loadtest.RouterTest do
       end
     end
 
-    test "a node that refuses cluster_state is one the client speaks the legacy keys to" do
+    test "a node that refuses cluster_state is an error naming it, with the connection kept" do
       conn = listener(&Wire.encode_error(&1, :unknown_api_key))
-      assert {:legacy, :no_cluster_state, conn} = Router.bootstrap(Router.new(@bootstrap), conn)
+      assert {:error, "no_cluster_state", conn} = Router.bootstrap(Router.new(@bootstrap), conn)
       Conn.close(conn)
     end
 
-    test "a refresh against such a node is an error naming it, not a legacy answer" do
+    test "a node whose answer is not a cluster state is an error naming it, with the connection kept" do
+      # an empty ok, as a server that answers every key with one sends
+      conn = listener(&Wire.encode_ok(&1, <<>>))
+      assert {:error, "malformed_cluster_state", conn} = Router.bootstrap(Router.new(@bootstrap), conn)
+      Conn.close(conn)
+    end
+
+    test "a refresh against such a node is an error naming it" do
       conn = listener(&Wire.encode_error(&1, :unknown_api_key))
       assert {:error, "no_cluster_state", conn} = Router.refresh(Router.new(@bootstrap), conn, "t")
       Conn.close(conn)

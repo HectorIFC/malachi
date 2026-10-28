@@ -5,7 +5,13 @@ defmodule Mix.Tasks.Malachi.Loadtest do
   #{@shortdoc}.
 
   One BEAM process per connection, so N connections use every scheduler (unlike a single-threaded
-  client). Connects to an already-running server over the binary wire protocol and drives load.
+  client). Connects to an already-running server over the binary wire protocol and drives load on the
+  stream keys: each producing, `stream` or `fetch` connection is a whole routing client, a producer
+  routing every record to its range's primary (`Malachi.Loadtest.Producer`), a `stream` worker reading
+  every range on consume streams (`Malachi.Loadtest.Consumer`), a `fetch` worker paging every range in
+  turn with `fetch_range` (`Malachi.Loadtest.Fetcher`); the report counts `moved`, `redirects` and
+  `route_refreshes`. A server that does not answer `cluster_state`, or a cluster that does not serve the
+  stream keys (the `producer_streams` flag off), fails the run before any worker connects.
 
       mix malachi.loadtest --scenario produce --connections 512 --batch 10 --duration 10
 
@@ -15,18 +21,11 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     * `--connections` concurrent connections (128)
     * `--duration` measured seconds (10), `--warmup` seconds excluded (2)
     * `--batch` records per produce (10), `--record-size` bytes (256), `--keys` cardinality (1000)
-    * `--pipeline` in-flight requests per connection, produce only (1 = closed-loop); on the stream keys,
-      the appends each range's stream keeps in flight, further capped by the window the broker grants
-    * `--protocol` auto | streams | legacy (default auto): the keys a produce goes on. auto takes the
-      producer streams when the cluster serves them (the `producer_streams` flag) and the legacy produce
-      otherwise; streams refuses a cluster that does not serve them; legacy never asks. On streams each
-      connection is a whole routing client: a producer routes every record to its range's primary
-      (`Malachi.Loadtest.Producer`), a `stream` worker reads every range on consume streams
-      (`Malachi.Loadtest.Consumer`), a `fetch` worker pages every range in turn with `fetch_range`
-      (`Malachi.Loadtest.Fetcher`); the report counts `moved`, `redirects` and `route_refreshes`.
+    * `--pipeline` the appends each range's stream keeps in flight, produce only (1 = closed-loop),
+      further capped by the window the broker grants
     * `--linger-ms` (0) and `--linger-bytes` (one batch): how long a range's share of each batch waits to
       go out with others as one append, and how many bytes of them make one go at once; an append takes
-      whole shares only, as many as fit. Only accepted with auto or streams
+      whole shares only, as many as fit
     * `--max` records per fetch/push (100), `--window` stream credit (100)
     * `--prepopulate` records to seed before fetch/stream/mixed (10000 for those)
     * `--topic` (auto), `--topics` distinct topics to fan out over (1); N > 1 spreads load across
@@ -58,7 +57,7 @@ defmodule Mix.Tasks.Malachi.Loadtest do
 
   # Every enum flag, as CLI spelling => internal atom in the order the help lists them; the table is the
   # validation (anything else is a clean Mix error naming the choices). Mirrored by ENUM_FLAGS in
-  # scripts/loadtest.js, which takes `protocol` in the Node generator's own change (#275, after this one).
+  # scripts/loadtest.js.
   @enums [
     scenario: [
       {"produce", :produce},
@@ -69,8 +68,7 @@ defmodule Mix.Tasks.Malachi.Loadtest do
       {"acl", :acl}
     ],
     connect_strategy: [{"bounded", :bounded}, {"stagger", :stagger}, {"all-at-once", :all_at_once}],
-    payload: [{"constant", :constant}, {"json", :json}, {"random", :random}],
-    protocol: [{"auto", :auto}, {"streams", :streams}, {"legacy", :legacy}]
+    payload: [{"constant", :constant}, {"json", :json}, {"random", :random}]
   ]
 
   @switches [
@@ -104,7 +102,6 @@ defmodule Mix.Tasks.Malachi.Loadtest do
     measure_marker: :string,
     payload: :string,
     payload_seed: :integer,
-    protocol: :string,
     linger_ms: :integer,
     linger_bytes: :integer
   ]
