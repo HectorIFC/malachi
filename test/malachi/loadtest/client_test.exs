@@ -110,6 +110,15 @@ defmodule Malachi.Loadtest.ClientTest do
     assert Client.read(client, topic, ranges: []) == {:ok, %{values: [], positions: %{}}}
   end
 
+  test "a member whose assigned range a split retired is told its assignment is stale, not read nothing",
+       %{client: client, topic: topic} do
+    :ok = Client.create_topic(client, topic, 4)
+    {:ok, 5} = Client.produce(client, topic, records(for(i <- 1..5, do: "r#{i}")), 5_000)
+    {:ok, _left, _right} = BrokerServer.split_range(DataPlaneRouter.shard_for(topic), {topic, 0})
+
+    assert Client.read(client, topic, ranges: [0]) == {:error, :stale_assignment}
+  end
+
   test "a commit the group refuses is the commit's error", %{client: client, topic: topic} do
     :ok = Client.create_topic(client, topic, 4)
     assert {:error, "unknown_member"} = Client.commit(client, topic, "rg", "ghost", 0, %{0 => {0, 0}})
@@ -165,7 +174,9 @@ defmodule Malachi.Loadtest.ClientTest do
       assert {:error, _reason} = Client.connect(host: "127.0.0.1", port: refusing.port, user: "u", pass: "p")
 
       closing = steered(%{Wire.cluster_state_key() => :close})
+      before = own_ports()
       assert {:error, _reason} = Client.connect(host: "127.0.0.1", port: closing.port, user: "u", pass: "p")
+      assert own_ports() == before, "the connection a failed cluster state read used is closed"
     end
 
     test "a read waits out a dropped connection, a redirect, routes held back and a broker that takes no connection" do

@@ -96,7 +96,9 @@ defmodule Malachi.Loadtest.Client do
   `{:ok, %{values: values, positions: positions}}`, where `values` are in the order each range holds them
   and `positions` holds, by range read, where its next page starts: what a member commits once it has read
   them. A member of a group of more than one reads with `ranges:`, since a commit naming a range the group
-  did not hand it is refused (`not_assigned`); one handed no range reads nothing. Routing answers (routes moved or held back, a dropped connection, no broker that takes one, routes
+  did not hand it is refused (`not_assigned`); one handed no range reads nothing; one whose ranges a
+  split retired is answered `{:error, :stale_assignment}`, before or during the read, and joins again for
+  the ranges made of them. Routing answers (routes moved or held back, a dropped connection, no broker that takes one, routes
   not readable yet) are waited out until `opts[:timeout_ms]` (10 s unless given). `{:error, reason}` on any
   other refusal, or `{:error, :timeout}`.
   """
@@ -124,7 +126,7 @@ defmodule Malachi.Loadtest.Client do
     else
       case Fetcher.fetch_page(fetcher, topic, mono_ms()) do
         {fetcher, {:page, page}} -> drained(fetcher, topic, deadline, page_into(acc, page), page)
-        {fetcher, :unassigned} -> {fetcher, {:ok, %{values: [], positions: %{}}}}
+        {fetcher, :unassigned} -> {fetcher, unassigned(acc)}
         {fetcher, {:held, ms}} -> retry(fetcher, topic, deadline, acc, ms)
         {fetcher, routing} when routing in [:redirected, :dropped] -> retry(fetcher, topic, deadline, acc, @retry_ms)
         {fetcher, {:error, reason}} when reason in @routing_errors -> retry(fetcher, topic, deadline, acc, @retry_ms)
@@ -132,6 +134,12 @@ defmodule Malachi.Loadtest.Client do
       end
     end
   end
+
+  # None of the ranges asked for is active: a member handed none reads nothing; one handed ranges a split
+  # has since retired has an assignment the group moved on from, and is told so rather than answered an
+  # empty read while their records are in the ranges made of them.
+  defp unassigned(%{ranges: []}), do: {:ok, %{values: [], positions: %{}}}
+  defp unassigned(_acc), do: {:error, :stale_assignment}
 
   # Read through once every range it reads (the active ones, or those of `ranges:` among them) answered a
   # page with nothing new since its last one that brought some.
