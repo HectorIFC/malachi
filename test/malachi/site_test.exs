@@ -1494,6 +1494,14 @@ defmodule Malachi.SiteTest do
       refute css =~ "../assets/fonts/"
     end
 
+    test "the Bricolage font is set to optional, so the page does not shift when the font arrives late", %{root: root} do
+      stage!(root)
+      css = read(root, "doc/tokens/marketing.css")
+
+      assert css =~ "font-display:optional"
+      refute css =~ "font-display:swap"
+    end
+
     test "verify reports a url() in a staged stylesheet that names a file which is not staged", %{root: root} do
       stage!(root)
       File.write!(Path.join(root, "doc/tokens/marketing.css"), ~s[@font-face{src:url("../nope/x.woff2")}])
