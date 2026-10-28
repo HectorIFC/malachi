@@ -161,7 +161,7 @@ defmodule Malachi.Site do
 
     landing = root |> read!(@landing_source) |> fill(meta) |> stage_paths() |> with_marker()
     llms = merge_llms(summary_block(fill(read!(root, @llms_source), meta)), Path.join(doc, "llms.txt"))
-    pages = for rel <- @page_sources, do: {dest_of(rel), read!(root, rel)}
+    pages = for rel <- @page_sources, do: {dest_of(rel), stage_asset(dest_of(rel), read!(root, rel))}
     fonts = font_files!(root)
     sitemap_xml = sitemap(doc, meta)
 
@@ -188,6 +188,14 @@ defmodule Malachi.Site do
     |> String.replace("../../", "")
   end
 
+  # A stylesheet reaches the kit's fonts by a path from the kit's own folder. Staged one level up, the fonts sit at
+  # fonts/, so that path is rewritten here. Any other url() is checked by css_url_errors/1, not rewritten.
+  defp stage_asset(dest, text) do
+    if String.ends_with?(dest, ".css"),
+      do: String.replace(text, "../assets/fonts/", "../fonts/"),
+      else: text
+  end
+
   # The marker tells the staged page apart from the ExDoc redirect that `mix docs` writes to doc/index.html.
   defp with_marker(html) do
     if String.contains?(html, @landing_marker),
@@ -211,11 +219,38 @@ defmodule Malachi.Site do
 
     index_errors(doc, meta) ++
       page_errors(doc) ++
+      css_url_errors(doc) ++
       ensure_file(doc, "robots.txt") ++
       staged_font_errors(root, doc) ++
       sitemap_errors(doc, meta) ++
       llms_errors(doc, meta)
   end
+
+  @css_url ~r/url\(\s*["']?([^"')\s]+)["']?\s*\)/
+
+  # A url() in a staged stylesheet resolves from that stylesheet's own folder. One that names a local file which is
+  # not staged leaves the page with a fallback font or a missing image, and nothing else reports it.
+  defp css_url_errors(doc) do
+    @page_sources
+    |> Enum.map(&dest_of/1)
+    |> Enum.filter(&String.ends_with?(&1, ".css"))
+    |> Enum.flat_map(fn css ->
+      path = Path.join(doc, css)
+
+      case File.read(path) do
+        {:ok, text} ->
+          for [_, ref] <- Regex.scan(@css_url, text),
+              local_url?(ref),
+              not File.regular?(Path.expand(ref, Path.dirname(path))),
+              do: "doc/#{css} references #{ref}, which is not staged"
+
+        {:error, _} ->
+          []
+      end
+    end)
+  end
+
+  defp local_url?(ref), do: not (String.contains?(ref, ":") or String.starts_with?(ref, ["/", "#"]))
 
   # The files the staged page loads by path. A page without them renders unstyled, so each one must be staged.
   defp page_errors(doc) do

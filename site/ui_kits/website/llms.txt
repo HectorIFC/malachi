@@ -5,10 +5,12 @@
 Malachi is in active development and not production-ready. The quickstart below runs plaintext on localhost only; configure TLS before serving real traffic.
 
 ```
+# Set your own admin password (12 characters or more) in the shell first:
+# export MALACHI_ADMIN_PASS='your own password'
 docker run \
   -p 127.0.0.1:4040:4040 \
   -p 127.0.0.1:4041:4041 \
-  -e MALACHI_ADMIN_PASS=change_me \
+  -e MALACHI_ADMIN_PASS \
   -e MALACHI_REQUIRE_TLS=false \
   hectorcardoso/malachi:latest
 ```

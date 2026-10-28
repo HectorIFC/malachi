@@ -1486,6 +1486,29 @@ defmodule Malachi.SiteTest do
       assert read(root, "doc/index.html") =~ ~s(href="introduction.html")
     end
 
+    test "the staged marketing stylesheet reaches the font in doc/fonts/, not a path that is not staged", %{root: root} do
+      stage!(root)
+      css = read(root, "doc/tokens/marketing.css")
+
+      assert css =~ ~s[url("../fonts/bricolage-grotesque-latin-wght-normal.woff2")]
+      refute css =~ "../assets/fonts/"
+    end
+
+    test "verify reports a url() in a staged stylesheet that names a file which is not staged", %{root: root} do
+      stage!(root)
+      File.write!(Path.join(root, "doc/tokens/marketing.css"), ~s[@font-face{src:url("../nope/x.woff2")}])
+
+      assert "doc/tokens/marketing.css references ../nope/x.woff2, which is not staged" in Site.verify(root, @config)
+    end
+
+    test "the quickstart reads the admin password from the reader's shell, never a shared default", %{root: root} do
+      stage!(root)
+      html = read(root, "doc/index.html")
+
+      refute html =~ "change_me"
+      assert html =~ "  -e MALACHI_ADMIN_PASS \\\n"
+    end
+
     test "keeps every file ExDoc wrote, except the redirect the landing page replaces", %{root: root} do
       doc = Path.join(root, "doc")
       before = doc |> doc_files(root) |> Enum.reject(&(&1 == "index.html"))

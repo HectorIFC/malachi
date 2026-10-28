@@ -231,10 +231,12 @@
 <p class="lead">Malachi listens on 4040 and the dashboard on 4041. It is in active development and not production-ready.</p>
 <div class="quick">
 <div class="code-head"><span class="label">Quickstart</span><button class="copy js-only" type="button" data-copy="qs">Copy</button></div>
-<pre class="code" id="qs"><code>docker run \
+<pre class="code" id="qs"><code># Set your own admin password (12 characters or more) in the shell first:
+# export MALACHI_ADMIN_PASS='your own password'
+docker run \
   -p 127.0.0.1:4040:4040 \
   -p 127.0.0.1:4041:4041 \
-  -e MALACHI_ADMIN_PASS=change_me \
+  -e MALACHI_ADMIN_PASS \
   -e MALACHI_REQUIRE_TLS=false \
   hectorcardoso/malachi:latest</code></pre>
 </div>

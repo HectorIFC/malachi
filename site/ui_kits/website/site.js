@@ -14,9 +14,9 @@ btns.forEach(function(b,i){b.addEventListener("click",function(){sel(i)});b.addE
 /* Scene controller: runs only while visible and the tab is visible; click or Space pauses; static frame under reduced motion. */
 function pausable(hit,onToggle){var st={paused:false,on:false};if(!hit)return{enable:function(){},relabel:function(){}};hit.setAttribute("role","img");
 function lab(){var d=hit.getAttribute("data-desc")||"Animation";hit.setAttribute("aria-label",st.on?d+". "+(st.paused?"Paused. Click or press Space to play.":"Click or press Space to pause."):d+".")}
-function tog(){if(!st.on)return;st.paused=!st.paused;hit.classList.toggle("is-paused",st.paused);lab();onToggle(st.paused)}
+function tog(){if(!st.on)return;st.paused=!st.paused;hit.classList.toggle("is-paused",st.paused);hit.setAttribute("aria-pressed",String(st.paused));lab();onToggle(st.paused)}
 hit.addEventListener("click",tog);hit.addEventListener("keydown",function(e){if(e.key===" "||e.key==="Enter"){e.preventDefault();tog()}});
-return{enable:function(on){st.on=on;if(on){hit.tabIndex=0;hit.classList.add("is-pausable")}else{hit.removeAttribute("tabindex");hit.classList.remove("is-pausable")}lab()},relabel:lab}}
+return{enable:function(on){st.on=on;if(on){hit.tabIndex=0;hit.setAttribute("role","button");hit.setAttribute("aria-pressed",String(st.paused));hit.classList.add("is-pausable")}else{hit.removeAttribute("tabindex");hit.setAttribute("role","img");hit.removeAttribute("aria-pressed");hit.classList.remove("is-pausable")}lab()},relabel:lab}}
 var COL={},scenes=[];
 function readCols(){var cs=getComputedStyle(root);["--state-active","--state-sealed","--state-behind","--state-damaged","--state-unknown","--brand-accent","--muted-foreground","--border","--foreground","--card","--muted","--background","--ring","--input","--accent"].forEach(function(k){COL[k]=cs.getPropertyValue(k).trim()})}
 readCols();
