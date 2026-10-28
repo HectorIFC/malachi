@@ -134,7 +134,8 @@ check('a run that reads once gives up on a broker that takes the connection and 
       assert.strictEqual(await cli.exitWithin(40000), 1, args.join(' '));
       const waited = Date.now() - started;
       assert.match(cli.out(), /Error: metadata_unavailable/, args.join(' '));
-      // ten seconds and the connect still on its way then (15 s at most, its authentication included)
+      // ten seconds and the connect still on its way then: one address only, which takes the connection at
+      // once and then leaves its authentication unanswered for the 15 s it is given
       assert.ok(waited >= 10000 && waited < 27000, `${args.join(' ')}: gave up after ${waited} ms`);
     }
   } finally {

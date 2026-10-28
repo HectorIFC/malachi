@@ -61,12 +61,13 @@ class GroupMember {
   //     takes.
   //   - A cluster that does not answer is asked again until `waitMs` has passed (0, the default: asked once;
   //     Infinity: as long as it takes), then the join rejects with what the last try met: no broker took the
-  //     connection (`metadata_unavailable`), the join was not answered in time, or it was answered after its
-  //     session ended (`answered_after_session`).
+  //     connection (`metadata_unavailable`), the join was not answered in time, its connection dropped (the
+  //     transport's reason), or it was answered after its session ended (`answered_after_session`).
   //   - Each join is given the connection's request timeout to be answered in, or what is left of `waitMs`
   //     when that is less, never under MIN_JOIN_TIMEOUT_MS.
-  //   - A connect still on its way when `waitMs` ends is waited for (./client.js bounds one, and then its
-  //     authentication, at 15 s).
+  //   - The connection being opened when `waitMs` ends is waited for: ./links.js tries the bootstrap address
+  //     and then each broker the cluster state lists, in turn, and ./client.js bounds each connect, and then
+  //     its authentication, at 15 s.
   async join({ waitMs = 0 } = {}) {
     const until = monoMs() + waitMs;
     for (;;) {

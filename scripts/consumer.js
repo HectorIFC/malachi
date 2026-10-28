@@ -35,8 +35,8 @@ const RETRY_MS = 200;
 // Answers that mean no broker took the fetch (the range's broker, or every one the routes are read from):
 // waited out, as a broker that restarts comes back, and so is a group join no broker answers. A follower
 // waits as long as it takes; a run that reads once gives up once UNREACHABLE_WAIT_MS passed since the first
-// of those was asked, waiting then for the attempt still on its way (./client.js bounds each connect, and
-// then its authentication, at 15 s; a request at its timeout).
+// of those was asked, waiting then for the attempt still on its way, which may try several brokers in turn
+// (./client.js bounds each connect, and then its authentication, at 15 s; a request at its timeout).
 const UNREACHABLE = new Set(['connect_failed', 'metadata_unavailable']);
 const UNREACHABLE_WAIT_MS = 10000;
 
