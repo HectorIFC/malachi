@@ -35,7 +35,10 @@ g.clear=function(){var d=Math.min(2,window.devicePixelRatio||1);if(Math.abs(cv.w
 document.addEventListener("visibilitychange",function(){scenes.forEach(function(s){s.sync()})});
 mqRM.addEventListener("change",function(){scenes.forEach(function(s){s.mode()})});
 new MutationObserver(function(){readCols();scenes.forEach(function(s){s.redraw()})}).observe(root,{attributes:true,attributeFilter:["class"]});
-window.MSite={scenes:scenes,Scene:Scene,stage:stage,COL:COL,rm:mqRM,onTheme:function(f){new MutationObserver(function(){readCols();f()}).observe(root,{attributes:true,attributeFilter:["class"]})}};
+/* Runs f once el is within 300px of the viewport (at once when IntersectionObserver is missing), so a canvas far down
+   the page costs nothing at load. */
+function whenNear(el,f){if(!el)return;if(!("IntersectionObserver" in window)){f();return}var io=new IntersectionObserver(function(es){if(es.some(function(e){return e.isIntersecting})){io.disconnect();f()}},{rootMargin:"300px 0px"});io.observe(el)}
+window.MSite={scenes:scenes,Scene:Scene,stage:stage,COL:COL,rm:mqRM,whenNear:whenNear,onTheme:function(f){new MutationObserver(function(){readCols();f()}).observe(root,{attributes:true,attributeFilter:["class"]})}};
 
 /* Thesis canvas: seeded simulation of one topic's keyspace. K key rows; ranges are buddy blocks. */
 function thesis(){
@@ -92,6 +95,6 @@ new MutationObserver(function(){colors();draw(running?acc/TICK:0)}).observe(root
 if("IntersectionObserver" in window)new IntersectionObserver(function(es){visible=es[0].isIntersecting;sync()}).observe(cv);
 var rt=0;new ResizeObserver(function(){clearTimeout(rt);rt=setTimeout(function(){var had=S.cols.length;layout();if(mqRM.matches||had<ncols){mode()}else draw(acc/TICK)},120)}).observe(cv);
 }
-function init(){applyTheme();tabs();thesis()}
+function init(){applyTheme();tabs();whenNear(document.getElementById("thesis"),thesis)}
 if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",init);else init();
 })();

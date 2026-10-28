@@ -113,6 +113,6 @@ var NX=[360,450,540];NX.forEach(function(x){box(c,x-32,82,64,84,8,C["--card"],C[
 dot(c,450,22,4,C["--foreground"]);
 if(t<0.6)dot(c,450,L(26,82,P(t,0,0.6)),3,C["--brand-accent"]);else if(t<1.3){var q=P(t,0.6,1.3);dot(c,L(450,360,q),124,3,C["--brand-accent"]);dot(c,L(450,540,q),124,3,C["--brand-accent"])}})}
 var B={hook:hook,split:split,replicate:replicate,cursor:cursor,kafka:kafka,redpanda:redpanda,pulsar:pulsar};
-function init(){document.querySelectorAll("[data-scene]").forEach(function(f){var b=B[f.getAttribute("data-scene")];if(b)b(f)})}
+function init(){document.querySelectorAll("[data-scene]").forEach(function(f){var b=B[f.getAttribute("data-scene")];if(b)M.whenNear(f,function(){b(f)})})}
 if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",init);else init();
 })();

@@ -39,7 +39,7 @@ var col=colorOf(b),a=alphaOf(b);ctx.globalAlpha=a;
 FACES.forEach(function(f){var n=rot(f[1][0],f[1][1],f[1][2]);if(n[2]<=0.001)return;ctx.beginPath();f[0].forEach(function(k,j){var q=pts[k];if(j)ctx.lineTo(q[0],q[1]);else ctx.moveTo(q[0],q[1])});ctx.closePath();
 ctx.fillStyle=col;ctx.fill();var shade=f[1][1]===1?0:(Math.abs(n[0])>Math.abs(n[1])?0.3:0.16);if(shade){ctx.fillStyle="rgba(0,0,0,"+shade+")";ctx.fill()}})});
 ctx.globalAlpha=1}
-function req(){draw()}
+var started=false;function req(){if(started)draw()}
 var drag=null;
 cv.addEventListener("pointerdown",function(e){drag={x:e.clientX,y:e.clientY};cv.setPointerCapture(e.pointerId)});
 cv.addEventListener("pointermove",function(e){if(!drag)return;yaw+=(e.clientX-drag.x)*0.008;pitch=Math.max(0.12,Math.min(1.25,pitch+(e.clientY-drag.y)*0.006));drag={x:e.clientX,y:e.clientY};req()});
@@ -48,8 +48,8 @@ cv.addEventListener("keydown",function(e){var k=e.key;if(k==="ArrowLeft")yaw-=0.
 var fs=root.querySelector(".levels"),panels=[].slice.call(root.querySelectorAll(".level"));
 function setLevel(v){level=v;panels.forEach(function(p){p.hidden=p.getAttribute("data-level")!==v});req()}
 if(fs){fs.hidden=false;fs.addEventListener("change",function(e){if(e.target.name==="level")setLevel(e.target.value)})}
-setLevel("topic");
-layout();req();
-if("ResizeObserver" in window)new ResizeObserver(function(){layout();req()}).observe(cv);
+function start(){started=true;setLevel("topic");layout();req()}
+M.whenNear(root,start);
+if("ResizeObserver" in window)new ResizeObserver(function(){if(started){layout();req()}}).observe(cv);
 M.onTheme(req);
 })();
