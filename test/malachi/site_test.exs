@@ -1501,6 +1501,51 @@ defmodule Malachi.SiteTest do
       assert "doc/tokens/marketing.css references ../nope/x.woff2, which is not staged" in Site.verify(root, @config)
     end
 
+    test "a url() with a query or a fragment is checked against the file it names", %{root: root} do
+      stage!(root)
+      font = "bricolage-grotesque-latin-wght-normal.woff2"
+
+      for ref <- ["../fonts/#{font}?v=2", "../fonts/#{font}#frag"] do
+        File.write!(Path.join(root, "doc/tokens/marketing.css"), ~s[@font-face{src:url("#{ref}")}])
+        refute css_errors(root) |> Enum.any?(&(&1 =~ "references #{ref}")), "#{ref} names a staged file"
+      end
+
+      File.write!(Path.join(root, "doc/tokens/marketing.css"), ~s[@font-face{src:url("../fonts/missing.woff2?v=2")}])
+
+      assert "doc/tokens/marketing.css references ../fonts/missing.woff2?v=2, which is not staged" in css_errors(root)
+    end
+
+    test "a root-relative url() under the site path resolves against doc/, and one outside it is reported", %{
+      root: root
+    } do
+      stage!(root)
+      font = "/malachi/fonts/bricolage-grotesque-latin-wght-normal.woff2"
+
+      File.write!(Path.join(root, "doc/tokens/marketing.css"), ~s[@font-face{src:url("#{font}")}])
+      assert css_errors(root) == []
+
+      File.write!(Path.join(root, "doc/tokens/marketing.css"), ~s[@font-face{src:url("/malachi/fonts/missing.woff2")}])
+      assert "doc/tokens/marketing.css references /malachi/fonts/missing.woff2, which is not staged" in css_errors(root)
+
+      File.write!(Path.join(root, "doc/tokens/marketing.css"), ~s[@font-face{src:url("/other/x.woff2")}])
+      assert "doc/tokens/marketing.css references /other/x.woff2, which is outside the site" in css_errors(root)
+    end
+
+    test "an external or protocol-relative url() is not a local file, so it is not checked", %{root: root} do
+      stage!(root)
+
+      File.write!(
+        Path.join(root, "doc/tokens/marketing.css"),
+        ~s[@font-face{src:url("//cdn.example.test/x.woff2"),url("https://cdn.example.test/y.woff2"),url("data:font/woff2;base64,AAAA")}]
+      )
+
+      assert css_errors(root) == []
+    end
+
+    defp css_errors(root) do
+      root |> then(&Site.verify(&1, @config)) |> Enum.filter(&String.contains?(&1, "marketing.css references"))
+    end
+
     test "the quickstart reads the admin password from the reader's shell, never a shared default", %{root: root} do
       stage!(root)
       html = read(root, "doc/index.html")

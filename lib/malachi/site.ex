@@ -219,7 +219,7 @@ defmodule Malachi.Site do
 
     index_errors(doc, meta) ++
       page_errors(doc) ++
-      css_url_errors(doc) ++
+      css_url_errors(doc, site_path(meta)) ++
       ensure_file(doc, "robots.txt") ++
       staged_font_errors(root, doc) ++
       sitemap_errors(doc, meta) ++
@@ -228,9 +228,10 @@ defmodule Malachi.Site do
 
   @css_url ~r/url\(\s*["']?([^"')\s]+)["']?\s*\)/
 
-  # A url() in a staged stylesheet resolves from that stylesheet's own folder. One that names a local file which is
-  # not staged leaves the page with a fallback font or a missing image, and nothing else reports it.
-  defp css_url_errors(doc) do
+  # A url() in a staged stylesheet names a file the page must load. A relative one resolves from the stylesheet's own
+  # folder; a root-relative one names a path under the site's own path, which is doc/ once staged. External URLs
+  # (a scheme, or a protocol-relative //host) are not local, and a fragment-only url() names nothing to load.
+  defp css_url_errors(doc, site_path) do
     @page_sources
     |> Enum.map(&dest_of/1)
     |> Enum.filter(&String.ends_with?(&1, ".css"))
@@ -241,8 +242,8 @@ defmodule Malachi.Site do
         {:ok, text} ->
           for [_, ref] <- Regex.scan(@css_url, text),
               local_url?(ref),
-              not File.regular?(Path.expand(ref, Path.dirname(path))),
-              do: "doc/#{css} references #{ref}, which is not staged"
+              error <- url_error(ref, Path.dirname(path), doc, site_path),
+              do: "doc/#{css} #{error}"
 
         {:error, _} ->
           []
@@ -250,7 +251,42 @@ defmodule Malachi.Site do
     end)
   end
 
-  defp local_url?(ref), do: not (String.contains?(ref, ":") or String.starts_with?(ref, ["/", "#"]))
+  # The error for one local url(), or nothing when the file it names is staged. The query and fragment are not part of
+  # the file name, so `font.woff2?v=2` names font.woff2.
+  defp url_error(ref, stylesheet_dir, doc, site_path) do
+    name = ref_path(ref)
+
+    case local_target(name, stylesheet_dir, doc, site_path) do
+      :outside -> ["references #{ref}, which is outside the site"]
+      target -> if File.regular?(target), do: [], else: ["references #{ref}, which is not staged"]
+    end
+  end
+
+  defp local_target("/" <> _ = name, _dir, doc, site_path) do
+    rel = if site_path == "", do: name, else: String.replace_prefix(name, site_path, "")
+
+    cond do
+      site_path == "" -> Path.join(doc, rel)
+      rel != name and String.starts_with?(rel, "/") -> Path.join(doc, rel)
+      true -> :outside
+    end
+  end
+
+  defp local_target(name, dir, _doc, _site_path), do: Path.expand(name, dir)
+
+  defp ref_path(ref), do: ref |> String.split(["?", "#"], parts: 2) |> hd()
+
+  defp local_url?(ref) do
+    not (String.contains?(ref, ":") or String.starts_with?(ref, ["#", "//"]))
+  end
+
+  # The path the site is published under, without a trailing slash: "" for a site at the root of its host.
+  defp site_path(meta) do
+    case URI.parse(meta["base_url"]).path do
+      nil -> ""
+      path -> String.trim_trailing(path, "/")
+    end
+  end
 
   # The files the staged page loads by path. A page without them renders unstyled, so each one must be staged.
   defp page_errors(doc) do
