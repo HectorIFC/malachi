@@ -12,10 +12,10 @@ defmodule LoadtestJsTest do
   alias Malachi.BrokerServer
   alias Malachi.DataPlaneRouter
   alias Malachi.Loadtest.Payload
-  alias Malachi.LogApi
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Test.PollingHelper
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.StreamsOn
 
   @moduletag :tmp_dir
@@ -630,10 +630,7 @@ defmodule LoadtestJsTest do
   end
 
   # The values of the first `n` records of `topic`, read back through the broker.
-  defp first_values(topic, n) do
-    {:ok, records, _cursor} = LogApi.fetch(DataPlaneRouter.shard_for(topic), topic, :start, n)
-    Enum.map(records, & &1.value)
-  end
+  defp first_values(topic, n), do: topic |> DataPlaneRouter.shard_for() |> ReadBack.values(topic) |> Enum.take(n)
 
   describe "the JSON report" do
     test "is the whole of stdout, a prepopulated backlog included", ctx do

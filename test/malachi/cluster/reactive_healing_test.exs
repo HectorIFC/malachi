@@ -14,6 +14,7 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.TmpDir
 
   # :temporary so GenServer.stop/1 permanently removes a broker (simulating a node death).
@@ -236,15 +237,10 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
     [rolled] = Enum.filter(segments, &(&1.state == :active))
     assert rolled.start_offset == 1
 
-    # Nothing was lost across the roll. Asserted through consume, which chains a range's segments (and
-    # is what the chaos drill's verify uses); `read/4` answers from one segment at a time, so it stops
-    # at the sealed segment's end by design rather than because a record went missing.
-    assert eventually(fn ->
-             case BrokerServer.consume(control, "events", %{}, 100, 0) do
-               {records, _next, _skips} when is_list(records) -> Enum.map(records, & &1.value) == ["a", "b"]
-               _ -> false
-             end
-           end)
+    # Nothing was lost across the roll. Asserted through a fetch_range read, which chains a range's
+    # segments (and is what the chaos drill's verify uses); `read/4` answers from one segment at a time, so
+    # it stops at the sealed segment's end by design rather than because a record went missing.
+    assert eventually(fn -> ReadBack.values(control, "events") == ["a", "b"] end)
 
     # And each record sits in its own segment, at an offset assigned exactly once.
     assert {:ok, [%{value: "a", offset: 0}]} = BrokerServer.read(control, root, 0, 100)
@@ -367,15 +363,7 @@ defmodule Malachi.Cluster.ReactiveHealingTest do
                end
              end)
 
-    assert eventually(fn ->
-             case BrokerServer.consume(control, "events", %{}, 100, 0) do
-               {records, _next, _skips} when is_list(records) ->
-                 Enum.map(records, & &1.value) == ["first", "acked", "after"]
-
-               _ ->
-                 false
-             end
-           end)
+    assert eventually(fn -> ReadBack.values(control, "events") == ["first", "acked", "after"] end)
 
     # The acknowledged record kept its offset, and the post-failover write did not reuse it.
     assert {:ok, [%{value: "acked", offset: 1}]} = BrokerServer.read(control, root, 1, 1)

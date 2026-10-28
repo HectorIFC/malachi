@@ -16,9 +16,13 @@ defmodule Malachi.SingleNodeRestartTest do
   import ExUnit.CaptureLog
 
   alias Malachi.BrokerServer
+  alias Malachi.ConsumeStreams
+  alias Malachi.Log.Record
   alias Malachi.LogApi
   alias Malachi.Retention.OrphanSweeper
   alias Malachi.Storage.Layout
+  alias Malachi.Test.ReadBack
+  alias Malachi.Wire.Batch
 
   @broker Malachi.LogBroker
 
@@ -31,11 +35,13 @@ defmodule Malachi.SingleNodeRestartTest do
     values = for i <- 1..200, do: "v#{i}"
 
     :ok = LogApi.create_topic(@broker, topic)
-    {:ok, 200} = LogApi.produce(@broker, topic, Enum.map(values, &%{"key" => &1, "value" => &1}))
-    {:ok, first_page, cursor} = LogApi.fetch(@broker, topic, :start, 50)
+    {:ok, _} = BrokerServer.produce(@broker, topic, Enum.map(values, &Record.new(&1, key: &1)))
+    [root] = BrokerServer.active_range_ids(@broker, topic)
+    {first_page, next} = first_page(root, 50)
     assert length(first_page) == 50
-    :ok = LogApi.commit(@broker, topic, group, cursor)
-    committed = BrokerServer.committed_offsets(@broker, group, topic)
+    :ok = BrokerServer.commit_offset(@broker, group, topic, %{root => next}, 1)
+    committed = committed_offsets(group, topic)
+    assert committed == %{root => next}
     directories = segment_directories(topic)
     assert directories != []
 
@@ -43,11 +49,10 @@ defmodule Malachi.SingleNodeRestartTest do
 
     # The records, all of them and nothing else. A refusal while the broker still learns where a range
     # ends is retried; an empty or short successful page is not, since that is the failure.
-    assert {:ok, records, _next} = fetch_once_recovered(topic)
-    assert records |> Enum.map(& &1.value) |> Enum.sort() == Enum.sort(values)
+    assert topic |> fetch_once_recovered() |> Enum.sort() == Enum.sort(values)
 
     # The group resumes where it committed.
-    assert BrokerServer.committed_offsets(@broker, group, topic) == committed
+    assert committed_offsets(group, topic) == committed
 
     # The sweep, as eager as it can be made and only reporting, would take none of them.
     result = sweep_reporting_everything()
@@ -88,8 +93,21 @@ defmodule Malachi.SingleNodeRestartTest do
     :ok = BrokerServer.reconcile_now(@broker, 120_000)
   end
 
+  # The first `max` records of range `root` and where its next page starts, as a member reading from the
+  # start gets them.
+  defp first_page(root, max) do
+    {:ok, position, view, reporter} = BrokerServer.fetch_range(@broker, root, :earliest, 0)
+    {:ok, page, _count} = ConsumeStreams.read_page(view, root, position, max, 1_048_576, reporter)
+    {:ok, entries} = Batch.decode(page.batch, max_inflated_bytes: 1_048_576, layout: :positioned)
+    {entries, page.next}
+  end
+
+  # The checkpoints of `group` on `topic` in the broker's metadata.
+  defp committed_offsets(group, topic),
+    do: @broker |> BrokerServer.metadata() |> Map.fetch!(:committed_offsets) |> Map.get({group, topic}, %{})
+
   defp fetch_once_recovered(topic, attempts \\ 300) do
-    case LogApi.fetch(@broker, topic, :start, 1_000) do
+    case ReadBack.values(@broker, topic) do
       {:error, :metadata_unavailable} when attempts > 1 ->
         Process.sleep(100)
         fetch_once_recovered(topic, attempts - 1)

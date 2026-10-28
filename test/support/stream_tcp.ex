@@ -24,12 +24,10 @@ defmodule Malachi.Test.StreamTCP do
   end
 
   def open(socket, topic, opts \\ []) do
-    routes = routes(socket, topic)
-
     req = %{
       topic: topic,
       range: Keyword.get(opts, :range, 0),
-      routes_version: Keyword.get(opts, :routes_version, routes.version),
+      routes_version: Keyword.get_lazy(opts, :routes_version, fn -> routes(socket, topic).version end),
       codec: :none,
       window_appends: Keyword.get(opts, :window_appends, 16),
       window_bytes: Keyword.get(opts, :window_bytes, 1_048_576),
@@ -131,12 +129,23 @@ defmodule Malachi.Test.StreamTCP do
     if ack.acked_sequence > sequence, do: {ack, errors}, else: acked_through(socket, sequence, errors)
   end
 
+  # The values of `topic`, as a reader reads it: every active range by `fetch_range` from the start of its
+  # history to its end, range by range in the order of their key blocks.
   def values(socket, topic) do
-    {code, payload} =
-      TCPHelper.request(socket, Wire.fetch_key(), 4, Wire.encode_fetch_req(topic, nil, nil, nil, 1000, 0))
+    routes = routes(socket, topic)
 
-    assert code == Wire.ok_code()
-    {records, _cursor} = Wire.decode_fetch_resp(payload)
-    Enum.map(records, & &1.value)
+    routes.ranges
+    |> Enum.filter(&(&1.state == :active))
+    |> Enum.sort_by(& &1.key_start)
+    |> Enum.flat_map(&range_values(socket, topic, &1.range, routes.version, :earliest))
+  end
+
+  defp range_values(socket, topic, range, version, start) do
+    {:ok, page} = fetch_range(socket, topic, range: range, routes_version: version, start: start, max: 1_000)
+
+    case page_records(page) do
+      [] -> []
+      records -> Enum.map(records, &elem(&1, 1)) ++ range_values(socket, topic, range, version, {:position, page.next})
+    end
   end
 end

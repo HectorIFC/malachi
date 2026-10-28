@@ -8,6 +8,7 @@ defmodule Malachi.GroupCommitTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.TmpDir
 
   defp start_broker(opts \\ []), do: elem(start_broker_at(opts), 0)
@@ -48,16 +49,7 @@ defmodule Malachi.GroupCommitTest do
 
   defp batch(n, value \\ "v"), do: for(i <- 1..n, do: Record.new(value, key: "k#{i}"))
 
-  defp consume_all(broker, topic) do
-    consume_loop(broker, topic, %{}, [])
-  end
-
-  defp consume_loop(broker, topic, positions, acc) do
-    case BrokerServer.consume(broker, topic, positions, 1000, 0) do
-      {[], _next, _skips} -> Enum.reverse(acc)
-      {records, next, _skips} -> consume_loop(broker, topic, next, Enum.reverse(records, acc))
-    end
-  end
+  defp consume_all(broker, topic), do: ReadBack.records(broker, topic)
 
   describe "the gate is the configured replication factor (#273)" do
     import ExUnit.CaptureLog

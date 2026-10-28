@@ -14,6 +14,7 @@ defmodule Malachi.ApplicationRetentionTest do
 
   alias Malachi.BrokerServer
   alias Malachi.Cluster.RetentionCoordinator
+  alias Malachi.Log.Record
   alias Malachi.LogApi
   alias Malachi.Metadata
   alias Malachi.Retention.OrphanSweeper
@@ -41,7 +42,7 @@ defmodule Malachi.ApplicationRetentionTest do
     topic = "app_roll_#{System.unique_integer([:positive])}"
     broker = Malachi.LogBroker
     :ok = LogApi.create_topic(broker, topic)
-    {:ok, 1} = LogApi.produce(broker, topic, [%{"key" => "k", "value" => "v"}])
+    {:ok, _} = BrokerServer.produce(broker, topic, [Record.new("v", key: "k")])
 
     head = fn ->
       BrokerServer.metadata(Malachi.LogBroker)

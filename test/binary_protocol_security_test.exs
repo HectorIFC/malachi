@@ -5,6 +5,7 @@ defmodule Malachi.BinaryProtocolSecurityTest do
   # underlying infra (Auth/RateLimiter/LockoutManager) keeps its own unit tests.
   use ExUnit.Case, async: false
 
+  alias Malachi.Test.StreamsOn
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
@@ -40,9 +41,10 @@ defmodule Malachi.BinaryProtocolSecurityTest do
     end
 
     test "requires auth as the first frame: a non-auth frame is rejected" do
+      :ok = StreamsOn.setup(%{})
       socket = connect()
-      # a produce frame before authenticating
-      :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.produce_key(), 7, <<>>))
+      # a producer stream's open before authenticating
+      :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.open_stream_key(), 7, <<>>))
 
       assert {:ok, body} = TCPHelper.recv_frame(socket, timeout: 1_000)
       assert {7, code, payload} = Wire.decode_response(body)
@@ -101,12 +103,15 @@ defmodule Malachi.BinaryProtocolSecurityTest do
     end
 
     test "a truncated payload errors (malformed_request) with the correlation id preserved" do
+      :ok = StreamsOn.setup(%{})
       socket = connect_auth()
 
-      # a produce payload that claims 5 records but carries none: put_str("t") <> <<count::32>>
+      # an open_stream payload cut after its range: put_str("t") <> <<range::32>>, no routes version on
       truncated = <<1::8, 1::32, "t", 5::32>>
-      {code, payload} = TCPHelper.request(socket, Wire.produce_key(), 4242, truncated)
+      :ok = :gen_tcp.send(socket, Wire.encode_request(Wire.open_stream_key(), 4242, truncated))
 
+      assert {:ok, body} = TCPHelper.recv_frame(socket, timeout: 1_000)
+      assert {4242, code, payload} = Wire.decode_response(body)
       assert code == Wire.error_code()
       assert reason(payload) == "malformed_request"
       :gen_tcp.close(socket)

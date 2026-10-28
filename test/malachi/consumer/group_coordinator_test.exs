@@ -28,82 +28,82 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
 
   test "a lone member is assigned all ranges at generation 1" do
     %{coord: c} = start(ranges: [:r0, :r1])
-    assert {:ok, 1, ranges} = GroupCoordinator.join(c, "g", "t", :m1)
+    assert {:ok, %{generation: 1, ranges: ranges}} = GroupCoordinator.join_group(c, "g", "t", :m1)
     assert Enum.sort(ranges) == [:r0, :r1]
   end
 
   test "two members partition the ranges (disjoint, complete) and the generation advances" do
     %{coord: c} = start(ranges: [:r0, :r1, :r2, :r3])
-    {:ok, g1, _} = GroupCoordinator.join(c, "g", "t", :m1)
-    {:ok, g2, m2} = GroupCoordinator.join(c, "g", "t", :m2)
+    {:ok, %{generation: g1, ranges: _}} = GroupCoordinator.join_group(c, "g", "t", :m1)
+    {:ok, %{generation: g2, ranges: m2}} = GroupCoordinator.join_group(c, "g", "t", :m2)
     assert g2 > g1
 
-    {:ok, ^g2, m1} = GroupCoordinator.heartbeat(c, "g", "t", :m1)
+    {:ok, %{generation: ^g2, ranges: m1}} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
     assert Enum.sort(m1 ++ m2) == [:r0, :r1, :r2, :r3]
     assert m1 -- m2 == m1
   end
 
   test "leave gives the ranges back to the survivor and advances the generation" do
     %{coord: c} = start(ranges: [:r0, :r1])
-    {:ok, _, _} = GroupCoordinator.join(c, "g", "t", :m1)
-    {:ok, g2, _} = GroupCoordinator.join(c, "g", "t", :m2)
+    {:ok, %{generation: _, ranges: _}} = GroupCoordinator.join_group(c, "g", "t", :m1)
+    {:ok, %{generation: g2, ranges: _}} = GroupCoordinator.join_group(c, "g", "t", :m2)
 
     :ok = GroupCoordinator.leave(c, "g", "t", :m2)
 
-    {:ok, g3, ranges} = GroupCoordinator.heartbeat(c, "g", "t", :m1)
+    {:ok, %{generation: g3, ranges: ranges}} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
     assert g3 > g2
     assert Enum.sort(ranges) == [:r0, :r1]
   end
 
   test "a member silent past the session window is evicted on reconcile and must rejoin" do
     %{coord: c, clock: clock} = start(ranges: [:r0, :r1], session_ms: 100)
-    GroupCoordinator.join(c, "g", "t", :m1)
-    GroupCoordinator.join(c, "g", "t", :m2)
+    GroupCoordinator.join_group(c, "g", "t", :m1)
+    GroupCoordinator.join_group(c, "g", "t", :m2)
 
     set_clock(clock, 50)
-    GroupCoordinator.heartbeat(c, "g", "t", :m1)
+    GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
 
     # cutoff = 120 - 100 = 20: m2 (hb 0) is evicted, m1 (hb 50) survives
     set_clock(clock, 120)
     :ok = GroupCoordinator.reconcile_now(c)
 
-    assert {:error, :unknown_member} = GroupCoordinator.heartbeat(c, "g", "t", :m2)
-    {:ok, _, ranges} = GroupCoordinator.heartbeat(c, "g", "t", :m1)
+    assert {:error, :unknown_member} = GroupCoordinator.heartbeat_group(c, "g", "t", :m2)
+    {:ok, %{generation: _, ranges: ranges}} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
     assert Enum.sort(ranges) == [:r0, :r1]
   end
 
   test "a group with no members is dropped" do
     %{coord: c} = start(ranges: [:r0])
-    GroupCoordinator.join(c, "g", "t", :m1)
+    GroupCoordinator.join_group(c, "g", "t", :m1)
     :ok = GroupCoordinator.leave(c, "g", "t", :m1)
-    assert {:error, :unknown_member} = GroupCoordinator.assignment(c, "g", "t", :m1)
+    assert {:error, :unknown_member} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
   end
 
   test "a change in the topic's ranges rebalances on reconcile" do
     %{coord: c, ranges: ranges} = start(ranges: [:r0])
-    {:ok, g1, [:r0]} = GroupCoordinator.join(c, "g", "t", :m1)
+    {:ok, %{generation: g1, ranges: [:r0]}} = GroupCoordinator.join_group(c, "g", "t", :m1)
 
     set_ranges(ranges, [:r0, :r1, :r2])
     :ok = GroupCoordinator.reconcile_now(c)
 
-    {:ok, g2, rs} = GroupCoordinator.heartbeat(c, "g", "t", :m1)
+    {:ok, %{generation: g2, ranges: rs}} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
     assert g2 > g1
     assert Enum.sort(rs) == [:r0, :r1, :r2]
   end
 
   test "reconcile is idempotent: no membership or range change leaves the generation put" do
     %{coord: c} = start(ranges: [:r0])
-    {:ok, g1, _} = GroupCoordinator.join(c, "g", "t", :m1)
+    {:ok, %{generation: g1, ranges: _}} = GroupCoordinator.join_group(c, "g", "t", :m1)
 
     :ok = GroupCoordinator.reconcile_now(c)
 
-    {:ok, g2, _} = GroupCoordinator.heartbeat(c, "g", "t", :m1)
+    {:ok, %{generation: g2, ranges: _}} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
     assert g2 == g1
   end
 
   test "heartbeat for an unknown group or member is rejected" do
     %{coord: c} = start()
-    assert {:error, :unknown_member} = GroupCoordinator.heartbeat(c, "nope", "t", :m1)
+    assert {:error, :unknown_member} = GroupCoordinator.heartbeat_group(c, "nope", "t", :m1)
   end
 
   test "poll registers a new member (rebalance) and only heartbeats a known one (no rebalance)" do
@@ -125,7 +125,7 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
 
     set_clock(clock, 200)
     :ok = GroupCoordinator.reconcile_now(c)
-    assert {:error, :unknown_member} = GroupCoordinator.heartbeat(c, "g", "t", :m1)
+    assert {:error, :unknown_member} = GroupCoordinator.heartbeat_group(c, "g", "t", :m1)
 
     {:ok, _, ranges} = GroupCoordinator.poll(c, "g", "t", :m1)
     assert Enum.sort(ranges) == [:r0]
@@ -135,7 +135,7 @@ defmodule Malachi.Consumer.GroupCoordinatorTest do
     test "poll and join are rejected with :not_owner when this node does not own the topic" do
       %{coord: c} = start(ranges: [:r0, :r1], owns_fun: fn _topic -> false end)
       assert {:error, :not_owner} = GroupCoordinator.poll(c, "g", "t", :m1)
-      assert {:error, :not_owner} = GroupCoordinator.join(c, "g", "t", :m1)
+      assert {:error, :not_owner} = GroupCoordinator.join_group(c, "g", "t", :m1)
     end
 
     test "a rejected poll registers no member (no phantom assignment)" do

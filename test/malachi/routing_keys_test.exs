@@ -8,7 +8,9 @@ defmodule Malachi.RoutingKeysTest do
   # started by another test can leave behind: it is cleared for each test and put back afterwards.
   use ExUnit.Case, async: false
 
+  alias Malachi.BrokerServer
   alias Malachi.Cluster.ClusterFlagsCache
+  alias Malachi.DataPlaneRouter
   alias Malachi.Log.Record
   alias Malachi.Routing
   alias Malachi.TCPAcceptorPool
@@ -174,8 +176,8 @@ defmodule Malachi.RoutingKeysTest do
       assert {:ok, %{topic: ^topic, keyspace_bits: bits, ranges: [range]} = before} = routes(topic)
       assert range == %{range: 0, key_start: 0, key_end: 2 ** bits, state: :active, segment: nil}
 
-      payload = topic |> Wire.encode_produce_req([Record.new("v", key: "k")]) |> IO.iodata_to_binary()
-      assert {:ok, _count} = process(Wire.produce_key(), payload)
+      assert {:ok, _placements} =
+               BrokerServer.produce(DataPlaneRouter.shard_for(topic), topic, [Record.new("v", key: "k")])
 
       assert {:ok, %{ranges: [%{segment: %{segment: _seq, primary: primary}}]} = after_produce} = routes(topic)
 

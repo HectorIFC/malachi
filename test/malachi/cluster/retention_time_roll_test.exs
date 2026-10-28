@@ -9,9 +9,11 @@ defmodule Malachi.Cluster.RetentionTimeRollTest do
 
   alias Malachi.BrokerServer
   alias Malachi.Cluster.RetentionCoordinator
+  alias Malachi.Log.Record
   alias Malachi.LogApi
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
+  alias Malachi.Test.ReadBack
 
   @minute 60_000
   @hour 3_600_000
@@ -49,9 +51,9 @@ defmodule Malachi.Cluster.RetentionTimeRollTest do
     %{name: name, clock: clock, coordinator: coordinator} = ctx
 
     :ok = LogApi.create_topic(name, "audit")
-    {:ok, 1} = LogApi.produce(name, "audit", [%{"key" => "k0", "value" => "v0"}])
+    {:ok, _} = BrokerServer.produce(name, "audit", [Record.new("v0", key: "k0")])
     [range_id] = BrokerServer.active_range_ids(name, "audit")
-    :ok = BrokerServer.commit_offset(name, "billing", "audit", %{range_id => {0, 0}})
+    :ok = BrokerServer.commit_offset(name, "billing", "audit", %{range_id => {0, 0}}, 1)
 
     [%{state: :active, opened_at: opened_at} = head] = segments(name, range_id)
 
@@ -78,9 +80,9 @@ defmodule Malachi.Cluster.RetentionTimeRollTest do
 
     # The topic goes on: the next produce opens a successor at the expired edge, and a group positioned
     # before it is moved past what was deleted.
-    {:ok, 1} = LogApi.produce(name, "audit", [%{"key" => "k1", "value" => "v1"}])
+    {:ok, _} = BrokerServer.produce(name, "audit", [Record.new("v1", key: "k1")])
     assert [%{state: :active, start_offset: 1}] = segments(name, range_id)
-    assert {:ok, [%{value: "v1"}], _cursor} = LogApi.fetch_group(name, "audit", "billing", 100)
+    assert [%{value: "v1"}] = ReadBack.range_records(name, range_id, {:committed, "billing"})
   end
 
   @tag :tmp_dir
@@ -89,7 +91,7 @@ defmodule Malachi.Cluster.RetentionTimeRollTest do
     %{name: name, clock: clock, coordinator: coordinator} = ctx
 
     :ok = LogApi.create_topic(name, "keep")
-    {:ok, 1} = LogApi.produce(name, "keep", [%{"key" => "k0", "value" => "v0"}])
+    {:ok, _} = BrokerServer.produce(name, "keep", [Record.new("v0", key: "k0")])
     [range_id] = BrokerServer.active_range_ids(name, "keep")
     :ok = BrokerServer.bind_topic_policy(name, "keep", "forever")
 

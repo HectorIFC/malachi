@@ -13,8 +13,10 @@ defmodule Malachi.ProducerStreamsTest do
 
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ClusterFlagsCache
+  alias Malachi.DataPlaneRouter
   alias Malachi.Routing
   alias Malachi.Test.ClusterFlagsPause
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
@@ -321,7 +323,8 @@ defmodule Malachi.ProducerStreamsTest do
       ClusterFlagsCache.put([])
       send_append(ctx.socket, id, 0, batch(["a"]))
       assert reply_to(ctx.socket) == {:error, "unsupported"}
-      assert values(ctx.socket, ctx.topic) == []
+      # read in process: with the flag off the stream keys, fetch_range among them, are not served
+      assert ReadBack.values(DataPlaneRouter.shard_for(ctx.topic), ctx.topic) == []
     end
 
     test "an append after the topic's grant is revoked is refused, under strict ACLs", ctx do
@@ -374,6 +377,25 @@ defmodule Malachi.ProducerStreamsTest do
 
       send_append(ctx.socket, id, 0, batch(["ok"]))
       assert {_ack, []} = acked_through(ctx.socket, 0)
+    end
+
+    test "a frame too short to hold a request header is answered, and the connection goes on", ctx do
+      {:ok, %{stream_id: id}} = open(ctx.socket, ctx.topic)
+      # two bytes: an api key and no correlation id, so the error cannot name the request it answers
+      :ok = :gen_tcp.send(ctx.socket, Wire.encode_frame(<<0, 27>>))
+      {:ok, body} = TCPHelper.recv_frame(ctx.socket)
+      assert {0, code, payload} = Wire.decode_response(body)
+      assert code == Wire.error_code()
+      assert Wire.decode_error_reason(payload) == "malformed_request"
+
+      send_append(ctx.socket, id, 0, batch(["ok"]))
+      assert {_ack, []} = acked_through(ctx.socket, 0)
+    end
+
+    test "a stream on a topic that was never created is no_such_topic, of either kind", ctx do
+      topic = "never_created_#{System.unique_integer([:positive])}"
+      assert open(ctx.socket, topic, routes_version: 0) == {:error, "no_such_topic"}
+      assert open_consume(ctx.socket, topic, routes_version: 0) == {:error, "no_such_topic"}
     end
 
     test "several streams share a connection, each with its own sequence and acks", ctx do

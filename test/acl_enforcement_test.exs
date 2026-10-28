@@ -3,6 +3,8 @@ defmodule Malachi.AclEnforcementTest do
   use ExUnit.Case, async: false
 
   alias Malachi.Auth
+  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.StreamTCP
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
@@ -34,10 +36,22 @@ defmodule Malachi.AclEnforcementTest do
     reply(TCPHelper.request(socket, Wire.create_topic_key(), 1, Wire.encode_create_topic_req(topic, 8)))
   end
 
-  # fetch is gated by :consume on the topic; returns :ok or {:error, reason_string}.
-  defp fetch(socket, topic) do
-    payload = Wire.encode_fetch_req(topic, nil, nil, nil, 100, 0)
-    reply(TCPHelper.request(socket, Wire.fetch_key(), 1, payload))
+  # Reading is gated by :consume on the topic, on both reading keys: what an open_consume and a
+  # fetch_range at the routes' `version` answer, each `:ok` or `{:error, reason_string}`.
+  defp consume(socket, topic, version) do
+    opened =
+      case StreamTCP.open_consume(socket, topic, routes_version: version) do
+        {:ok, _stream} -> :ok
+        refused -> refused
+      end
+
+    fetched =
+      case StreamTCP.fetch_range(socket, topic, routes_version: version) do
+        {:ok, _page} -> :ok
+        refused -> refused
+      end
+
+    {opened, fetched}
   end
 
   defp reply({code, payload}) do
@@ -79,15 +93,19 @@ defmodule Malachi.AclEnforcementTest do
       assert :ok = create_topic(socket, prefix <> "b")
     end
 
-    test "a consume ACL gates fetch independently of produce" do
+    test "a consume ACL gates both reading keys independently of produce" do
+      :ok = StreamsOn.setup(%{})
       Application.put_env(:malachi, :acl_strict, true)
-      {username, socket} = connect_as([:produce, :consume])
       topic = "feed_#{System.unique_integer([:positive])}"
+      {_admin, admin} = connect_as([:admin])
+      assert :ok = create_topic(admin, topic)
+      %{version: version} = StreamTCP.routes(admin, topic)
+      {username, socket} = connect_as([:produce, :consume])
 
-      # no consume grant yet
-      assert {:error, "permission_denied"} = fetch(socket, topic)
+      # no consume grant yet: a global :consume does not reach the topic under strict ACLs
+      assert consume(socket, topic, version) == {{:error, "permission_denied"}, {:error, "permission_denied"}}
       assert :ok = Auth.grant_acl(username, :consume, topic)
-      assert :ok = fetch(socket, topic)
+      assert consume(socket, topic, version) == {:ok, :ok}
     end
 
     test "admin bypasses ACLs entirely" do

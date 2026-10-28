@@ -13,9 +13,11 @@ defmodule Malachi.BrokerServerTest do
   alias Malachi.Cluster.ReplicatedDSRSM
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RingTopology
+  alias Malachi.ConsumeStreams
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Retention.SkipReporter
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.StreamPush
   alias Malachi.Test.TmpDir
   alias Malachi.Test.UnfenceablePrimary
@@ -1174,32 +1176,36 @@ defmodule Malachi.BrokerServerTest do
 
       {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
       {:ok, _placements} = BrokerServer.produce(server, "events", [record("v1", "k1"), record("v2", "k2")])
-      assert {[_, _], _positions, []} = BrokerServer.consume(server, "events", %{}, 100, 0)
+      assert [_, _] = ReadBack.values(server, "events")
 
       # The segment's only replica goes away, so the records are real and durable but this broker
-      # cannot reach them. Answering `{[], positions}` here is what a consumer reads as "caught up",
-      # and it would commit past records it never saw.
+      # cannot reach them. Answering an empty page here is what a consumer reads as "caught up", and it
+      # would commit past records it never saw.
       :ok = stop_supervised!(ReplicationServer)
 
-      assert {:error, :unreachable} = BrokerServer.consume(server, "events", %{}, 100, 0)
+      assert {:error, :unreachable} = ReadBack.values(server, "events")
     end
 
     test "is reported rather than parked until the long poll expires", %{tmp_dir: tmp_dir} do
       replica = start_supervised!({ReplicationServer, directory: Path.join(tmp_dir, "replica")})
       server = start(Path.join(tmp_dir, "broker"), brokers: [replica])
 
-      {:ok, _root} = BrokerServer.create_topic(server, "events", 4)
+      {:ok, root} = BrokerServer.create_topic(server, "events", 4)
       {:ok, _placements} = BrokerServer.produce(server, "events", [record("v1", "k1")])
       :ok = stop_supervised!(ReplicationServer)
 
-      # With wait_ms set, an empty page parks the caller. A failure must not: parking would hide the
-      # error behind a timeout and then hand back the same empty page.
+      # With wait_ms set, a fetch that finds nothing parks the caller. A failure must not: parking would
+      # hide the error behind a timeout and then hand back an empty page.
       #
       # The wait is long and the assertion is on the clock, so the test states what it means. The
-      # shape alone would catch a regression to parking, because a long-poll timeout replies
-      # `{[], positions, []}` and not an error, but it would catch it five seconds late and say only that
-      # the answer was wrong, not that the caller had been held.
-      task = Task.async(fn -> BrokerServer.consume(server, "events", %{}, 100, 5_000) end)
+      # shape alone would catch a regression to parking, because a long-poll timeout answers an empty
+      # page and not an error, but it would catch it five seconds late and say only that the answer was
+      # wrong, not that the caller had been held.
+      task =
+        Task.async(fn ->
+          {:ok, position, view, reporter} = BrokerServer.fetch_range(server, root, :earliest, 5_000)
+          ConsumeStreams.read_page(view, root, position, 100, 1_048_576, reporter)
+        end)
 
       assert {:error, :unreachable} = Task.await(task, 1_000)
     end

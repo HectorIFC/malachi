@@ -19,6 +19,7 @@ defmodule Malachi.ProducerStreamsMultinodeTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
   alias Malachi.Test.RaPeers
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.StreamCluster
 
   @broker :stream_mn_broker
@@ -160,9 +161,13 @@ defmodule Malachi.ProducerStreamsMultinodeTest do
       else: Process.sleep(200) && read_until(node, acked, remaining_ms - 200)
   end
 
+  # What `node` reads back now: nothing yet while the failover leaves the range unreadable, which the
+  # loop above waits out.
   defp read_all(node) do
-    {records, _cursor, _skips} = BrokerServer.consume({@broker, node}, "events", %{}, 10_000, 0)
-    Enum.map(records, & &1.value)
+    case ReadBack.values({@broker, node}, "events") do
+      {:error, _reason} -> []
+      values -> values
+    end
   end
 
   test "every acknowledged record survives the rolls and a failover exactly once, in order", ctx do

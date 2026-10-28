@@ -113,17 +113,17 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     start_coordinator_on(leader, coord_name)
 
     ref = {coord_name, leader}
-    {:ok, _, _} = GroupCoordinator.poll(ref, "g", "t", :m1)
-    {:ok, _, _} = GroupCoordinator.poll(ref, "g", "t", :m2)
-    {:ok, _, r1} = GroupCoordinator.poll(ref, "g", "t", :m1)
-    {:ok, _, r2} = GroupCoordinator.poll(ref, "g", "t", :m2)
+    {:ok, _} = GroupCoordinator.join_group(ref, "g", "t", :m1)
+    {:ok, _} = GroupCoordinator.join_group(ref, "g", "t", :m2)
+    {:ok, %{ranges: r1}} = GroupCoordinator.heartbeat_group(ref, "g", "t", :m1)
+    {:ok, %{ranges: r2}} = GroupCoordinator.heartbeat_group(ref, "g", "t", :m2)
     assert Enum.sort(r1 ++ r2) == [:r0, :r1]
     assert r1 -- r2 == r1
 
     # a follower must not accept coordination for "t" (defense against stale routing): the guard rejects
     guard_follower = hd(followers)
     start_coordinator_on(guard_follower, coord_name)
-    assert GroupCoordinator.poll({coord_name, guard_follower}, "g", "t", :mx) == {:error, :not_owner}
+    assert GroupCoordinator.join_group({coord_name, guard_follower}, "g", "t", :mx) == {:error, :not_owner}
 
     # failover: the leader dies; the remaining two elect a new leader, and routing reconverges on it
     :ok = :erpc.call(leader, :ra, :stop_server, [:default, {vnode, leader}])
@@ -179,14 +179,14 @@ defmodule Malachi.Consumer.CoordinatorRouterMultinodeTest do
     [via_a, via_b] = Enum.take(nodes, 2)
     ref_a = :erpc.call(via_a, CoordinatorRouter, :resolve, [@coord, "t"])
     ref_b = :erpc.call(via_b, CoordinatorRouter, :resolve, [@coord, "t"])
-    {:ok, _, _} = :erpc.call(via_a, GroupCoordinator, :join, [ref_a, "g", "t", :m1])
-    {:ok, _, _} = :erpc.call(via_b, GroupCoordinator, :join, [ref_b, "g", "t", :m2])
-    {:ok, _, r1} = :erpc.call(via_a, GroupCoordinator, :assignment, [ref_a, "g", "t", :m1])
-    {:ok, _, r2} = :erpc.call(via_b, GroupCoordinator, :assignment, [ref_b, "g", "t", :m2])
+    {:ok, _} = :erpc.call(via_a, GroupCoordinator, :join_group, [ref_a, "g", "t", :m1])
+    {:ok, _} = :erpc.call(via_b, GroupCoordinator, :join_group, [ref_b, "g", "t", :m2])
+    {:ok, %{ranges: r1}} = :erpc.call(via_a, GroupCoordinator, :heartbeat_group, [ref_a, "g", "t", :m1])
+    {:ok, %{ranges: r2}} = :erpc.call(via_b, GroupCoordinator, :heartbeat_group, [ref_b, "g", "t", :m2])
     assert Enum.sort(r1 ++ r2) == [:r0, :r1]
 
     # a follower's own coordinator refuses, rather than coordinate the group a second time
     follower = hd(nodes -- [leader])
-    assert GroupCoordinator.join({@coord, follower}, "g", "t", :mx) == {:error, :not_owner}
+    assert GroupCoordinator.join_group({@coord, follower}, "g", "t", :mx) == {:error, :not_owner}
   end
 end

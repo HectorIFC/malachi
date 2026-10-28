@@ -14,8 +14,10 @@ defmodule Malachi.ConsumeStreamsTest do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ClusterFlagsCache
   alias Malachi.DataPlaneRouter
+  alias Malachi.Log.Record
   alias Malachi.Routing
   alias Malachi.Test.ClusterFlagsPause
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
@@ -124,7 +126,8 @@ defmodule Malachi.ConsumeStreamsTest do
     test "a compressed batch appended on the stream keys reads back on legacy fetch with the flag off", ctx do
       produce(ctx.producer, ctx.topic, ["z1", "z2"])
       ClusterFlagsCache.put([])
-      assert values(ctx.consumer, ctx.topic) == ["z1", "z2"]
+      # read in process: with the flag off the stream keys, fetch_range among them, are not served
+      assert ReadBack.values(DataPlaneRouter.shard_for(ctx.topic), ctx.topic) == ["z1", "z2"]
     end
 
     test "a child range reads its share of its parent first, then its own records", ctx do
@@ -177,13 +180,36 @@ defmodule Malachi.ConsumeStreamsTest do
 
     test "a group's checkpoint starts where it committed, and a group with none at the start", ctx do
       broker = DataPlaneRouter.shard_for(ctx.topic)
-      :ok = BrokerServer.commit_offset(broker, "g1", ctx.topic, %{{ctx.topic, 0} => {0, 2}})
+      :ok = BrokerServer.commit_offset(broker, "g1", ctx.topic, %{{ctx.topic, 0} => {0, 2}}, 1)
 
       {:ok, %{position: {0, 2}}} = open_consume(ctx.consumer, ctx.topic, start: {:committed, "g1"})
       assert [{{0, 2}, "r2"}] = page_records(records_push(ctx.consumer))
 
       other = connect()
       {:ok, %{position: {0, 0}}} = open_consume(other, ctx.topic, start: {:committed, "never"})
+    end
+
+    test "after a split a group's children start from the start of their history, so between them they read every record once",
+         ctx do
+      # a checkpoint is kept per range, and a child has none of its own yet: it reads its slice of its
+      # parent again from the start (redelivered, at least once), and nothing the parent held is lost
+      broker = DataPlaneRouter.shard_for(ctx.topic)
+      values = for i <- 1..40, do: "s#{i}"
+      {:ok, _placements} = BrokerServer.produce(broker, ctx.topic, Enum.map(values, &Record.new(&1, key: &1)))
+      :ok = BrokerServer.commit_offset(broker, "gs", ctx.topic, %{{ctx.topic, 0} => {0, 10}}, 1)
+      {:ok, {_topic, left}, {_topic, right}} = BrokerServer.split_range(broker, {ctx.topic, 0})
+
+      read =
+        for child <- [left, right] do
+          socket = connect()
+          {:ok, %{position: start}} = open_consume(socket, ctx.topic, range: child, start: {:committed, "gs"})
+          assert start == {0, 0}
+          socket |> records_push() |> page_records() |> Enum.map(&elem(&1, 1))
+        end
+
+      assert Enum.all?(read, &(&1 != [])), "each child reads its share"
+      # the describe's setup wrote r0..r2 before
+      assert read |> List.flatten() |> Enum.sort() == Enum.sort(["r0", "r1", "r2"] ++ values)
     end
   end
 

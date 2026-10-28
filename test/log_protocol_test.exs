@@ -9,6 +9,8 @@ defmodule Malachi.LogProtocolTest do
   alias Malachi.Cluster.RetentionCoordinator
   alias Malachi.Log.Record
   alias Malachi.Metadata
+  alias Malachi.Test.StreamsOn
+  alias Malachi.Test.StreamTCP
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
@@ -234,7 +236,9 @@ defmodule Malachi.LogProtocolTest do
     end)
   end
 
-  test "produces and fetches arbitrary binary payloads (non-UTF-8 bytes survive the round trip)" do
+  test "appends and reads back arbitrary binary payloads (non-UTF-8 bytes survive the round trip)" do
+    :ok = StreamsOn.setup(%{})
+
     with_session("app", "app123", fn socket ->
       topic = "logproto_bin_#{System.unique_integer([:positive])}"
       assert {code, _} = create_topic(socket, topic)
@@ -243,13 +247,10 @@ defmodule Malachi.LogProtocolTest do
       payload = <<0, 159, 146, 150, 255, 0, 1>>
       refute String.valid?(payload)
 
-      assert {code, <<1::32>>} = produce(socket, topic, [payload])
-      assert ok?(code)
-
-      assert {code, resp} = fetch(socket, topic)
-      assert ok?(code)
-      {[record], _cursor} = Wire.decode_fetch_resp(resp)
-      assert record.value == payload
+      {:ok, %{stream_id: id}} = StreamTCP.open(socket, topic)
+      StreamTCP.send_append(socket, id, 0, StreamTCP.batch([payload]))
+      assert {_ack, []} = StreamTCP.acked_through(socket, 0)
+      assert StreamTCP.values(socket, topic) == [payload]
     end)
   end
 
@@ -379,10 +380,11 @@ defmodule Malachi.LogProtocolTest do
 
       with_session("admin", "admin123", fn socket -> assert {0, _} = create_topic(socket, topic) end)
 
+      :ok = StreamsOn.setup(%{})
+      version = with_session("admin", "admin123", fn socket -> StreamTCP.routes(socket, topic).version end)
+
       with_session(username, "Role-Pass-123", fn socket ->
-        assert {code, payload} = produce(socket, topic, [{"k", "v"}])
-        refute ok?(code)
-        assert reason(payload) == "permission_denied"
+        assert StreamTCP.open(socket, topic, routes_version: version) == {:error, "permission_denied"}
       end)
     end
   end

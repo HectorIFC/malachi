@@ -7,6 +7,7 @@ defmodule Malachi.BrokerServerRaTest do
   import Malachi.Test.TeardownHelper
 
   alias Malachi.Broker
+  alias Malachi.Broker.ReadView
   alias Malachi.BrokerServer
   alias Malachi.Cluster.DSRSM
   alias Malachi.Cluster.HashRing
@@ -15,11 +16,13 @@ defmodule Malachi.BrokerServerRaTest do
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Cluster.RingTopology
   alias Malachi.Consumer.CoordinatorRouter
+  alias Malachi.ConsumeStreams
   alias Malachi.Log.Record
   alias Malachi.Metadata
   alias Malachi.Storage.Layout
   alias Malachi.Test.AliveMembersStub
   alias Malachi.Test.FaultySegmentStore
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.SilentRaMember
   alias Malachi.Test.StreamPush
   alias Malachi.Test.TmpDir
@@ -95,9 +98,8 @@ defmodule Malachi.BrokerServerRaTest do
     {:ok, records} = BrokerServer.read(second, root, 0, 100)
     assert Enum.map(records, & &1.value) == for(i <- 1..5, do: "v#{i}")
 
-    # The consume/fetch path (what the chaos verify uses) works too.
-    {consumed, _next, _skips} = BrokerServer.consume(second, "events", %{}, 100, 0)
-    assert length(consumed) == 5
+    # The fetch_range path (what the chaos verify uses) works too.
+    assert length(ReadBack.values(second, "events")) == 5
 
     # And producing continues cleanly after the restart (recovered offsets + segment seq floor).
     {:ok, _} = BrokerServer.produce(second, "events", [Record.new("v6", key: "k6")])
@@ -140,18 +142,20 @@ defmodule Malachi.BrokerServerRaTest do
       %{broker: broker, start_repl: start_repl}
     end
 
-    test "refuses the consume instead of answering an empty page", %{broker: broker} do
-      assert BrokerServer.consume(broker, "events", %{}, 100, 0) == {:error, :metadata_unavailable}
-      # A long poll is refused too, rather than parked on a horizon it can never pass.
-      assert BrokerServer.consume(broker, "events", %{}, 100, 200) == {:error, :metadata_unavailable}
+    test "refuses the fetch instead of answering an empty page", %{broker: broker} do
+      assert ReadBack.values(broker, "events") == {:error, :metadata_unavailable}
+      # A long poll is refused too, rather than answered empty once its wait ends.
+      {:ok, position, view, reporter} = BrokerServer.fetch_range(broker, {"events", 0}, :earliest, 200)
+
+      assert ConsumeStreams.read_page(view, {"events", 0}, position, 100, 1_048_576, reporter) ==
+               {:error, :metadata_unavailable}
     end
 
     test "serves every durable record once a reconcile learns the end", %{broker: broker, start_repl: start_repl} do
       start_repl.()
       :ok = BrokerServer.reconcile_now(broker)
 
-      {consumed, _next, _skips} = BrokerServer.consume(broker, "events", %{}, 100, 0)
-      assert Enum.map(consumed, & &1.value) |> Enum.sort() == Enum.sort(for(i <- 1..5, do: "v#{i}"))
+      assert broker |> ReadBack.values("events") |> Enum.sort() == Enum.sort(for(i <- 1..5, do: "v#{i}"))
     end
 
     # The answer ends the wait even when it is exactly what the frontend planned: a range whose counter
@@ -182,8 +186,7 @@ defmodule Malachi.BrokerServerRaTest do
       # Before any reconcile: the produce lands, and the end its primary assigns is the range's end.
       assert {:ok, _} = BrokerServer.produce(broker, "events", [Record.new("v6", key: "k6")])
 
-      {consumed, _next, _skips} = BrokerServer.consume(broker, "events", %{}, 100, 0)
-      assert Enum.map(consumed, & &1.value) |> Enum.sort() == Enum.sort(for(i <- 1..6, do: "v#{i}"))
+      assert broker |> ReadBack.values("events") |> Enum.sort() == Enum.sort(for(i <- 1..6, do: "v#{i}"))
     end
   end
 
@@ -217,8 +220,8 @@ defmodule Malachi.BrokerServerRaTest do
     assert {:ok, records} = BrokerServer.read(second, root, 0, 100)
     assert Enum.map(records, & &1.value) == for(i <- 1..5, do: "v#{i}")
 
-    {consumed, _next, _skips} = BrokerServer.consume(second, "events", %{}, 100, 0)
-    assert length(consumed) == 5, "a cold replication server must not report durable records as drained"
+    assert length(ReadBack.values(second, "events")) == 5,
+           "a cold replication server must not report durable records as drained"
 
     :ok = BrokerServer.stop(second)
     :ok = GenServer.stop(cold_repl)
@@ -557,6 +560,39 @@ defmodule Malachi.BrokerServerRaTest do
     :ok = BrokerServer.stop(streamer)
   end
 
+  test "a consume stream is woken by records produced through a different frontend" do
+    # The stream keys' form of the subscriber case above: a consume stream armed on one frontend must be
+    # woken when its range grows through another, or a topic written on one node and streamed from another
+    # delivers nothing, with no error anywhere and both nodes healthy.
+    cluster = :"bs_consume_#{System.unique_integer([:positive])}"
+    on_exit(fn -> MetadataServer.delete(cluster) end)
+
+    name = :"consume_repl_#{System.unique_integer([:positive])}"
+    directory = TmpDir.path("malachi_consume")
+    on_exit(fn -> File.rm_rf!(directory) end)
+    {:ok, repl} = ReplicationServer.start_link(directory: directory, name: name)
+    on_exit(fn -> stop_quietly(repl) end)
+
+    opts = [brokers: [{name, node()}], metadata_cluster: cluster, brokers_refresh_interval: 100]
+    {:ok, writer} = BrokerServer.start_link("unused", opts)
+    {:ok, streamer} = BrokerServer.start_link("unused", opts)
+    on_exit(fn -> stop_quietly(writer) end)
+    on_exit(fn -> stop_quietly(streamer) end)
+
+    {:ok, root} = BrokerServer.create_topic(writer, "events", 4)
+    # the streamer learns of the topic on its next refresh
+    {:ok, token, _position, _server} = open_consume_once_known(streamer, root)
+
+    assert_receive {:consume_wake, ^token, _view, _reporter}, 3_000
+    :ok = BrokerServer.arm_consume(streamer, token, 0)
+
+    # produced through the OTHER broker, so nothing on the streamer's own path wakes the stream
+    {:ok, _} = BrokerServer.produce(writer, "events", [Record.new("v1", key: "k1")])
+
+    assert_receive {:consume_wake, ^token, view, _reporter}, 3_000
+    assert ReadView.fetch_end(view, root) == {:ok, 1}
+  end
+
   test "a broker that loses the control plane stays ready, and keeps serving what it already knew" do
     # Readiness answers whether this node can serve, not whether the control plane is answering. A
     # refresh that fails leaves the last view in place and reads keep working from it, so reporting
@@ -582,7 +618,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert BrokerServer.metadata_ready?(server), "a node serving from its retained view is ready"
     assert {:ok, [record]} = BrokerServer.read(server, root, 0, 100)
     assert record.value == "v1"
-    assert {[_], _positions, []} = BrokerServer.consume(server, "events", %{}, 100, 0)
+    assert [_] = ReadBack.values(server, "events")
 
     :ok = BrokerServer.stop(server)
   end
@@ -641,10 +677,10 @@ defmodule Malachi.BrokerServerRaTest do
 
     # Names divide between the two vnodes by hash. A name on the reachable vnode reads normally; a name
     # on the ghost must NOT read as an empty topic, because this broker cannot know whether it is empty.
-    results = for i <- 0..19, do: BrokerServer.consume(control, "gate_t#{i}", %{}, 100, 0)
+    results = for i <- 0..19, do: ReadBack.values(control, "gate_t#{i}")
 
     refused = Enum.filter(results, &match?({:error, :metadata_unavailable}, &1))
-    answered = Enum.filter(results, &match?({[], _positions, []}, &1))
+    answered = Enum.filter(results, &match?([], &1))
 
     assert refused != [], "expected topics routed to the unreachable vnode to be refused"
     assert answered != [], "expected topics routed to the reachable vnode to still be served"
@@ -845,7 +881,7 @@ defmodule Malachi.BrokerServerRaTest do
     # the first one started.
     Process.sleep(200)
 
-    task = Task.async(fn -> for i <- 0..19, do: BrokerServer.consume(control, "stall_t#{i}", %{}, 100, 0) end)
+    task = Task.async(fn -> for i <- 0..19, do: ReadBack.values(control, "stall_t#{i}") end)
     results = Task.await(task, 1_000)
 
     # Half the names route to the silent vnode and must still be refused rather than reported drained:
@@ -853,7 +889,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert Enum.any?(results, &match?({:error, :metadata_unavailable}, &1)),
            "topics on the silent vnode must still be refused"
 
-    assert Enum.any?(results, &match?({[], _positions, []}, &1)),
+    assert Enum.any?(results, &match?([], &1)),
            "topics on the live vnode must still be served"
   end
 
@@ -891,8 +927,8 @@ defmodule Malachi.BrokerServerRaTest do
            "boot took #{div(elapsed_us, 1000)}ms; the two boot reads are waiting out the control plane"
 
     # And the live vnode was read, so its topics are servable at once rather than after the first tick.
-    served = for i <- 0..19, do: BrokerServer.consume(control, "boot_t#{i}", %{}, 100, 0)
-    assert Enum.any?(served, &match?({[], _positions, []}, &1))
+    served = for i <- 0..19, do: ReadBack.values(control, "boot_t#{i}")
+    assert Enum.any?(served, &match?([], &1))
   end
 
   test "a reconcile that overruns its deadline is killed, counted and logged" do
@@ -1027,10 +1063,10 @@ defmodule Malachi.BrokerServerRaTest do
   end
 
   test "a committed group position is not rolled back by the reconcile result" do
-    # The same replacement, on the metadata a consumer group depends on. `committed_offsets/3` reads
-    # the cache, and a position that goes backwards is redelivery: at ten million messages a day a
-    # window as long as one read is thousands of messages consumed twice, and a position that comes
-    # back empty is the whole range consumed again.
+    # The same replacement, on the metadata a consumer group depends on. The checkpoint a member starts
+    # from (`fetch_range` from `{:committed, group}`) is read from the cache, and a position that goes
+    # backwards is redelivery: at ten million messages a day a window as long as one read is thousands of
+    # messages consumed twice, and a position that comes back empty is the whole range consumed again.
     {live, silent, opts} = live_and_silent_vnodes(2_000, silent_at_boot: false, brokers_refresh_interval: 50)
 
     {:ok, control} = BrokerServer.start_link("unused", opts)
@@ -1041,18 +1077,18 @@ defmodule Malachi.BrokerServerRaTest do
     {:ok, root} = BrokerServer.create_topic(control, topic, 4)
     group = "billing"
 
-    :ok = BrokerServer.commit_offset(control, group, topic, %{root => 100})
+    :ok = BrokerServer.commit_offset(control, group, topic, %{root => {0, 100}}, 1)
     start_silent(silent)
 
     # Commit inside the window of one identified task, then read the position back once that task's
     # result has landed. Without the replay this reads 100, the position the task saw before the commit.
     ref = task_ref!(control)
-    :ok = BrokerServer.commit_offset(control, group, topic, %{root => 900})
-    assert Map.get(BrokerServer.committed_offsets(control, group, topic), root) == 900
+    :ok = BrokerServer.commit_offset(control, group, topic, %{root => {0, 900}}, 1)
+    assert committed_start(control, group, root) == {0, 900}
 
     await_task_result!(control, ref)
 
-    assert Map.get(BrokerServer.committed_offsets(control, group, topic), root) == 900,
+    assert committed_start(control, group, root) == {0, 900},
            "the reconcile result rolled a committed group position backwards"
   end
 
@@ -1202,7 +1238,7 @@ defmodule Malachi.BrokerServerRaTest do
 
         # And it is still serving: this is the node keeping its retained view while the control plane
         # work fails beside it, which is the whole point of taking that work off this loop.
-        assert {[], _positions, []} = BrokerServer.consume(control, "crash_t", %{}, 100, 0)
+        assert [] = ReadBack.values(control, "crash_t")
       end)
 
     assert log =~ "control plane reconcile crashed"
@@ -1360,8 +1396,7 @@ defmodule Malachi.BrokerServerRaTest do
     assert length(segment.replica_set) == 3
 
     # committed (quorum-durable) records read back through the broker's primary
-    {read, _cursor, _skips} = BrokerServer.consume(control, "events", %{}, 100, 0)
-    assert read |> Enum.map(& &1.value) |> Enum.sort() == Enum.map(records, & &1.value) |> Enum.sort()
+    assert control |> ReadBack.values("events") |> Enum.sort() == Enum.map(records, & &1.value) |> Enum.sort()
 
     :ok = BrokerServer.stop(control)
   end
@@ -1574,4 +1609,30 @@ defmodule Malachi.BrokerServerRaTest do
       metadata
       | segments: Map.new(metadata.segments, fn {id, segment} -> {id, Map.delete(segment, :opened_at)} end)
     }
+
+  # The checkpoint of `group` on `range_id` in the broker's cache of the metadata: what a member opening
+  # from `{:committed, group}` starts at.
+  defp committed_start(broker, group, {topic, _seq} = range_id) do
+    broker
+    |> BrokerServer.metadata()
+    |> Map.fetch!(:committed_offsets)
+    |> Map.get({group, topic}, %{})
+    |> Map.get(range_id)
+  end
+
+  # A consume stream on `range_id` from the start, opened once `broker` knows the range: a frontend learns
+  # of a topic another one created on its next refresh.
+  defp open_consume_once_known(broker, range_id, attempts \\ 50) do
+    case BrokerServer.open_consume(broker, range_id, :earliest) do
+      {:ok, _token, _position, _server} = opened ->
+        opened
+
+      _not_yet when attempts > 1 ->
+        Process.sleep(100)
+        open_consume_once_known(broker, range_id, attempts - 1)
+
+      other ->
+        flunk("the stream never opened: #{inspect(other)}")
+    end
+  end
 end

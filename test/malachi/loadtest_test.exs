@@ -17,6 +17,7 @@ defmodule Malachi.LoadtestTest do
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.LoadtestProbes
   alias Malachi.Test.PollingHelper
+  alias Malachi.Test.ReadBack
   alias Malachi.Test.StreamsOn
   alias Malachi.Test.StreamStub
   alias Malachi.Test.StreamTCP
@@ -107,8 +108,7 @@ defmodule Malachi.LoadtestTest do
       t = topic("pool_walk")
       run(scenario: :produce, connections: 2, batch: 2, payload: :json, payload_seed: 5, topic: t)
 
-      {records, _next, _skips} = Malachi.BrokerServer.consume(Malachi.LogBroker, t, %{}, 10_000, 0)
-      values = Enum.map(records, & &1.value)
+      values = ReadBack.values(Malachi.LogBroker, t)
       pool = Payload.values(:json, 5, 256, Payload.pool_size(256, 2, 2, 1))
       start = Payload.start_batch(1, div(length(pool), 2), 2) * 2
 
@@ -123,8 +123,7 @@ defmodule Malachi.LoadtestTest do
       t = topic("pool_prepop")
       run(scenario: :fetch, connections: 1, batch: 5, prepopulate: 10, payload: :random, topic: t)
 
-      {records, _next, _skips} = Malachi.BrokerServer.consume(Malachi.LogBroker, t, %{}, 100, 0)
-      assert Enum.map(records, & &1.value) == Payload.values(:random, 1, 256, 10)
+      assert ReadBack.values(Malachi.LogBroker, t) == Payload.values(:random, 1, 256, 10)
     end
 
     test "a run that never produces does not generate a pool, and one that prepopulates does" do
@@ -268,8 +267,7 @@ defmodule Malachi.LoadtestTest do
 
       # every fanned-out topic was created and got records (each is independently consumable)
       for i <- 0..2 do
-        {records, _next, _skips} = Malachi.BrokerServer.consume(Malachi.LogBroker, "#{t}_#{i}", %{}, 1000, 0)
-        assert records != [], "topic #{t}_#{i} should have received records"
+        assert ReadBack.values(Malachi.LogBroker, "#{t}_#{i}") != [], "topic #{t}_#{i} should have received records"
       end
     end
   end

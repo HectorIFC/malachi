@@ -324,7 +324,9 @@ defmodule Malachi.GroupKeysTest do
     # the commit is held at the control plane, and the member is still in the group behind it
     assert wait_until(fn -> commit_calls(broker) == 1 end)
     Process.sleep(100)
-    assert {:ok, _, _} = GroupCoordinator.assignment(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "m1")
+
+    assert {:ok, _assignment} =
+             GroupCoordinator.heartbeat_group(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "m1")
 
     :ok = :sys.resume(broker)
 
@@ -337,7 +339,7 @@ defmodule Malachi.GroupKeysTest do
 
     assert answers == [{61, 0}, {62, 0}]
 
-    assert GroupCoordinator.assignment(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "m1") ==
+    assert GroupCoordinator.heartbeat_group(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "m1") ==
              {:error, :unknown_member}
   end
 
@@ -414,7 +416,9 @@ defmodule Malachi.GroupKeysTest do
 
     # the leave went first and the join after it, so the member is in the group at the end
     assert answers == [{71, 0}, {72, 0}, {73, 0}]
-    assert {:ok, _, _} = GroupCoordinator.assignment(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "m1")
+
+    assert {:ok, _assignment} =
+             GroupCoordinator.heartbeat_group(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "m1")
   end
 
   test "a leave still waiting when the client closes the connection is carried out all the same", ctx do
@@ -449,7 +453,7 @@ defmodule Malachi.GroupKeysTest do
     :ok = :sys.resume(broker)
 
     assert wait_until(fn ->
-             GroupCoordinator.assignment(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "m1") ==
+             GroupCoordinator.heartbeat_group(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "m1") ==
                {:error, :unknown_member}
            end)
 
@@ -485,7 +489,7 @@ defmodule Malachi.GroupKeysTest do
     :ok = :sys.resume(broker)
 
     assert wait_until(fn ->
-             GroupCoordinator.assignment(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "m1") ==
+             GroupCoordinator.heartbeat_group(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "m1") ==
                {:error, :unknown_member}
            end)
   end
@@ -528,7 +532,7 @@ defmodule Malachi.GroupKeysTest do
     assert wait_until(fn -> committed_start(ctx, range) == {0, 1} end)
     Process.sleep(200)
 
-    assert GroupCoordinator.assignment(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "late") ==
+    assert GroupCoordinator.heartbeat_group(Malachi.LogGroupCoordinator, ctx.group, ctx.topic, "late") ==
              {:error, :unknown_member}
   end
 
