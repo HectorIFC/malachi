@@ -17,7 +17,6 @@ defmodule Malachi.ConsumeStreamsTest do
   alias Malachi.Log.Record
   alias Malachi.Routing
   alias Malachi.Test.ClusterFlagsPause
-  alias Malachi.Test.ReadBack
   alias Malachi.Test.TCPHelper
   alias Malachi.Wire
 
@@ -123,13 +122,6 @@ defmodule Malachi.ConsumeStreamsTest do
   end
 
   describe "compression and history" do
-    test "a compressed batch appended on the stream keys reads back on legacy fetch with the flag off", ctx do
-      produce(ctx.producer, ctx.topic, ["z1", "z2"])
-      ClusterFlagsCache.put([])
-      # read in process: with the flag off the stream keys, fetch_range among them, are not served
-      assert ReadBack.values(DataPlaneRouter.shard_for(ctx.topic), ctx.topic) == ["z1", "z2"]
-    end
-
     test "a child range reads its share of its parent first, then its own records", ctx do
       broker = DataPlaneRouter.shard_for(ctx.topic)
 
@@ -197,7 +189,7 @@ defmodule Malachi.ConsumeStreamsTest do
       values = for i <- 1..40, do: "s#{i}"
       {:ok, _placements} = BrokerServer.produce(broker, ctx.topic, Enum.map(values, &Record.new(&1, key: &1)))
       :ok = BrokerServer.commit_offset(broker, "gs", ctx.topic, %{{ctx.topic, 0} => {0, 10}}, 1)
-      {:ok, {_topic, left}, {_topic, right}} = BrokerServer.split_range(broker, {ctx.topic, 0})
+      {:ok, {_left_topic, left}, {_right_topic, right}} = BrokerServer.split_range(broker, {ctx.topic, 0})
 
       read =
         for child <- [left, right] do

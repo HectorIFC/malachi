@@ -77,13 +77,36 @@ defmodule Malachi.StreamSkipTest do
     assert_receive {:skip_event, %{offsets: 2}, %{group: nil}}
   end
 
-  test "a broker with no registered name reads normally and reports nowhere", %{tmp_dir: directory} do
+  test "a broker with no registered name reads past what retention removed, and reports nowhere", %{tmp_dir: directory} do
     {:ok, anonymous} = BrokerServer.start_link(Path.join(directory, "anonymous"), segment_max_bytes: 1)
     on_exit(fn -> stop_quietly(anonymous) end)
-    {:ok, _root} = BrokerServer.create_topic(anonymous, "orders", 4)
-    {:ok, _} = BrokerServer.produce(anonymous, "orders", [Record.new("a", key: "a")])
+    {:ok, root_id} = BrokerServer.create_topic(anonymous, "orders", 4)
 
-    assert ReadBack.values(anonymous, "orders") == ["a"]
-    refute_receive {:skip_event, _measurements, _metadata}, 100
+    for value <- ["a", "b", "c"],
+        do: {:ok, _} = BrokerServer.produce(anonymous, "orders", [Record.new(value, key: value)])
+
+    wait_until!(fn -> Enum.all?(segments(anonymous, root_id), &(&1.state == :sealed)) end)
+
+    for segment <- segments(anonymous, root_id),
+        segment.start_offset < 2,
+        do: :ok = BrokerServer.delete_segment(anonymous, segment.id)
+
+    parent = self()
+    handler_id = "stream-skip-anonymous-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:malachi, :retention, :skip],
+      fn _event, measurements, metadata, _config ->
+        if metadata.topic == "orders", do: send(parent, {:anonymous_skip, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    # the read moves past the two removed records; with no reporter beside the broker, nobody is told
+    assert ReadBack.values(anonymous, "orders") == ["c"]
+    refute_receive {:anonymous_skip, _measurements, _metadata}, 200
   end
 end

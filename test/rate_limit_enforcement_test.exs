@@ -122,6 +122,20 @@ defmodule Malachi.RateLimitEnforcementTest do
     if code == Wire.ok_code(), do: :ok, else: {:error, Wire.decode_error_reason(payload)}
   end
 
+  defp strict_acls do
+    prior = Application.get_env(:malachi, :acl_strict)
+    Application.put_env(:malachi, :acl_strict, true)
+    on_exit(fn -> restore(:acl_strict, prior) end)
+  end
+
+  # The reason of the error frame an append on a stream is refused with (correlation id 11).
+  defp error_frame(socket) do
+    {:ok, body} = TCPHelper.recv_frame(socket)
+    {11, code, payload} = Wire.decode_response(body)
+    assert code == Wire.error_code()
+    Wire.decode_error_reason(payload)
+  end
+
   defp blocked_count(action) do
     Metrics.get_system_metrics().rate_limiting[action]
   end
@@ -220,18 +234,27 @@ defmodule Malachi.RateLimitEnforcementTest do
 
     test "a request the user was never allowed to make spends no token" do
       limit_publish(1)
-      topic = new_topic()
 
-      {_owner, owner_socket} = connect_as_new_user()
-      assert :ok = create_topic(owner_socket, topic)
+      within_one_window(@window_ms, fn ->
+        {user, socket} = connect_as_new_user()
+        topic = new_topic()
+        assert :ok = create_topic(socket, topic)
+        :ok = Auth.grant_acl(user, :produce, topic)
+        strict_acls()
 
-      # consumer holds :consume only, so its stream is refused before the quota is consulted
-      consumer = connect_as("consumer", "consumer123")
-      before = blocked_count(:publish_blocked)
+        # the stream opens while the user may produce; the grant is then revoked, so the append is one
+        # the user was not allowed to make, refused before the quota is consulted
+        {:ok, %{stream_id: id}} = StreamTCP.open(socket, topic)
+        :ok = Auth.revoke_acl(user, :produce, topic)
+        before = blocked_count(:publish_blocked)
+        StreamTCP.send_append(socket, id, 0, StreamTCP.batch(["v"]))
+        assert error_frame(socket) == "permission_denied"
+        assert blocked_count(:publish_blocked) == before
 
-      for _ <- 1..5, do: assert({:error, "permission_denied"} = produce(consumer, topic))
-
-      assert blocked_count(:publish_blocked) == before
+        # the only token of the window is still there: granted again, the next append takes it
+        :ok = Auth.grant_acl(user, :produce, topic)
+        assert :ok = produce(connect_as(user, @password), topic)
+      end)
     end
 
     test "the limit is not applied when rate limiting is switched off entirely" do

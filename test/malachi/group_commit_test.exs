@@ -49,8 +49,6 @@ defmodule Malachi.GroupCommitTest do
 
   defp batch(n, value \\ "v"), do: for(i <- 1..n, do: Record.new(value, key: "k#{i}"))
 
-  defp consume_all(broker, topic), do: ReadBack.records(broker, topic)
-
   describe "the gate is the configured replication factor (#273)" do
     import ExUnit.CaptureLog
 
@@ -127,7 +125,7 @@ defmodule Malachi.GroupCommitTest do
       replica_sets = BrokerServer.metadata(broker).segments |> Map.values() |> Enum.map(& &1.replica_set)
       assert Enum.any?(replica_sets, &(&1 == [two])), "the broker that joined was never used"
       assert Enum.all?(replica_sets, &(length(&1) == 1))
-      assert length(consume_all(broker, "t")) == 40
+      assert length(ReadBack.records(broker, "t")) == 40
     end
 
     test "asked for with a factor above 1, the node says so at boot" do
@@ -146,7 +144,7 @@ defmodule Malachi.GroupCommitTest do
     # hang and the test would fail on the GenServer.call timeout, so completing at all proves it works.
     for _ <- 1..5, do: {:ok, _} = BrokerServer.produce(broker, "t", batch(10))
 
-    assert length(consume_all(broker, "t")) == 50
+    assert length(ReadBack.records(broker, "t")) == 50
   end
 
   test "records are contiguous and ordered under group commit" do
@@ -155,7 +153,7 @@ defmodule Malachi.GroupCommitTest do
 
     for i <- 1..20, do: {:ok, _} = BrokerServer.produce(broker, "t", [Record.new("v#{i}", key: "k")])
 
-    values = broker |> consume_all("t") |> Enum.map(& &1.value)
+    values = broker |> ReadBack.records("t") |> Enum.map(& &1.value)
     assert values == Enum.map(1..20, &"v#{&1}")
   end
 
@@ -175,7 +173,7 @@ defmodule Malachi.GroupCommitTest do
       |> Enum.map(fn {:ok, r} -> r end)
 
     assert Enum.all?(results, &match?({:ok, _}, &1))
-    assert length(consume_all(broker, "t")) == producers * 10
+    assert length(ReadBack.records(broker, "t")) == producers * 10
 
     # The point of group commit: 50 concurrent produces do NOT cost 50 fsyncs. A single-range topic is
     # one segment, so a flush of the whole burst is one fsync; allow a little slack for burst timing.
@@ -261,7 +259,7 @@ defmodule Malachi.GroupCommitTest do
     broker = start_broker(group_commit: false)
     {:ok, _} = BrokerServer.create_topic(broker, "t", 8)
     {:ok, _} = BrokerServer.produce(broker, "t", batch(7))
-    assert length(consume_all(broker, "t")) == 7
+    assert length(ReadBack.records(broker, "t")) == 7
   end
 
   test "past the inflight cap, produces are shed with :overloaded and the broker survives" do
@@ -289,7 +287,7 @@ defmodule Malachi.GroupCommitTest do
     assert committed > 0, "expected the parked produces to still commit"
     assert shed + committed == producers, "every produce is either shed or committed, never dropped"
     assert Process.alive?(broker), "the broker must survive backpressure, not crash"
-    assert length(consume_all(broker, "t")) == committed * 10
+    assert length(ReadBack.records(broker, "t")) == committed * 10
   end
 
   test "normal load is never shed as :overloaded (no false positives)" do
@@ -306,7 +304,7 @@ defmodule Malachi.GroupCommitTest do
       |> Enum.map(fn {:ok, r} -> r end)
 
     assert Enum.all?(results, &match?({:ok, _}, &1)), "no produce should be shed under normal load"
-    assert length(consume_all(broker, "t")) == 500
+    assert length(ReadBack.records(broker, "t")) == 500
   end
 
   test "eager flush returns a large produce without waiting for the interval timer" do
@@ -319,6 +317,6 @@ defmodule Malachi.GroupCommitTest do
     {elapsed_us, {:ok, _}} = :timer.tc(fn -> BrokerServer.produce(broker, "t", batch(20)) end)
 
     assert elapsed_us < 1_000_000, "eager flush should return in well under the 5s interval, took #{elapsed_us}us"
-    assert length(consume_all(broker, "t")) == 20
+    assert length(ReadBack.records(broker, "t")) == 20
   end
 end

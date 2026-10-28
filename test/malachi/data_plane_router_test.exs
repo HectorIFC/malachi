@@ -139,8 +139,8 @@ defmodule Malachi.DataPlaneRouterTest do
       {:ok, _} = BrokerServer.create_topic(b, "shared", 8)
       {:ok, _} = BrokerServer.produce(a, "shared", [Record.new("only-a", key: "k")])
 
-      assert consume_values(a, "shared") == ["only-a"]
-      assert consume_values(b, "shared") == [], "broker b must not see broker a's records"
+      assert ReadBack.values(a, "shared") == ["only-a"]
+      assert ReadBack.values(b, "shared") == [], "broker b must not see broker a's records"
     end
   end
 
@@ -157,6 +157,4 @@ defmodule Malachi.DataPlaneRouterTest do
 
     broker
   end
-
-  defp consume_values(broker, topic), do: ReadBack.values(broker, topic)
 end
