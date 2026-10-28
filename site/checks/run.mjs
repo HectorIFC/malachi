@@ -31,6 +31,21 @@ async function lighthouseScores() {
       const score = Math.round(category.score * 100);
       report(`lighthouse ${id} >= ${MIN_SCORE}`, score >= MIN_SCORE, `${score}`);
     }
+    // Below the bar, print what pulled the performance score down, so the next change can be aimed at it.
+    if (Math.round(result.lhr.categories.performance.score * 100) < MIN_SCORE) {
+      for (const id of ["first-contentful-paint", "largest-contentful-paint", "total-blocking-time", "cumulative-layout-shift", "speed-index"]) {
+        const audit = result.lhr.audits[id];
+        console.log(`  metric ${id}: ${audit.displayValue ?? audit.numericValue}`);
+      }
+      const worst = result.lhr.categories.performance.auditRefs
+        .filter((ref) => ref.weight > 0 && (result.lhr.audits[ref.id].score ?? 1) < 0.9)
+        .sort((a, b) => (1 - (result.lhr.audits[b.id].score ?? 1)) * b.weight - (1 - (result.lhr.audits[a.id].score ?? 1)) * a.weight)
+        .slice(0, 8);
+      for (const ref of worst) {
+        const audit = result.lhr.audits[ref.id];
+        console.log(`  audit ${ref.id}: score ${audit.score}, ${audit.displayValue ?? ""}`);
+      }
+    }
   } finally {
     await chrome.kill();
   }

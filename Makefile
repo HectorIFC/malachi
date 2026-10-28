@@ -124,5 +124,5 @@ site-motion:
 	@echo "  1. Open http://127.0.0.1:8080/ in Chrome, with DevTools open (Cmd+Option+I)"
 	@echo "  2. Cmd+Shift+P, type 'Emulate CSS prefers-reduced-motion', choose reduce"
 	@echo "  3. Reload: every scene shows a still frame and does not move"
-	@echo "  4. Turn the emulation off, click a scene, press Space: it pauses, and resumes on a second press"
+	@echo "  4. Turn the emulation off. Press Tab until a scene has focus, then Space: it pauses. Space again: it resumes"
 	@echo "  5. Scroll a scene out of view and back: it stops while hidden and resumes"
