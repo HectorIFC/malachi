@@ -714,7 +714,7 @@ defmodule Malachi.Site do
 
           String.contains?(existing, @summary_begin) ->
             Mix.raise(
-              "doc/llms.txt holds a landing summary from an earlier build. Run mix docs first, so ExDoc rewrites the file."
+              "doc/llms.txt holds a landing summary from an earlier build. ExDoc does not rewrite it here (formatters: html), so remove doc/llms.txt and stage again."
             )
 
           true ->

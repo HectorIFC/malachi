@@ -214,12 +214,12 @@ defmodule Malachi.SiteTest do
       assert read(root, "doc/llms.txt") =~ "> Summary for version 1.2.3."
     end
 
-    test "refuses to merge over a summary from another version, and asks for mix docs", %{root: root} do
+    test "refuses to merge over a summary from another version, and asks for doc/llms.txt to be removed", %{root: root} do
       stage!(root)
       before = snapshot(root)
 
       error = assert_raise Mix.Error, fn -> Site.stage(root, %{@config | version: "1.2.4"}) end
-      assert error.message =~ "Run mix docs first"
+      assert error.message =~ "remove doc/llms.txt"
       # The refusal comes before any write, so the landing page from the first run is untouched.
       assert snapshot(root) == before
     end
@@ -242,7 +242,7 @@ defmodule Malachi.SiteTest do
       File.write!(Path.join(root, "doc/llms.txt"), "<!-- malachi:summary begin -->\n# partial\n")
 
       error = assert_raise Mix.Error, fn -> stage!(root) end
-      assert error.message =~ "Run mix docs first"
+      assert error.message =~ "remove doc/llms.txt"
     end
 
     test "staging twice leaves every file as the first run wrote it", %{root: root} do
