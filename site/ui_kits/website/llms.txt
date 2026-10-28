@@ -1,0 +1,28 @@
+# Malachi
+
+> Open source reimplementation of LinkedIn's NorthGuard, written in Elixir on Erlang/OTP 28, MIT licensed. Clients speak topics, keys and opaque cursors; ranges split and merge underneath; a write is acknowledged once a majority of copies have fsynced it.
+
+Malachi is in active development and not production-ready. The quickstart below runs plaintext on localhost only; configure TLS before serving real traffic.
+
+```
+docker run \
+  -p 127.0.0.1:4040:4040 \
+  -p 127.0.0.1:4041:4041 \
+  -e MALACHI_ADMIN_PASS=change_me \
+  -e MALACHI_REQUIRE_TLS=false \
+  hectorcardoso/malachi:latest
+```
+
+Malachi listens on 4040 and the dashboard on 4041.
+
+## Docs
+
+- [Repository](https://github.com/HectorIFC/malachi): source, README, MIT license
+- [Docs](https://github.com/HectorIFC/malachi/tree/main/docs)
+- [Architecture](https://github.com/HectorIFC/malachi/blob/main/docs/ARCHITECTURE.md): ranges, segments, replication, Raft control plane
+- [Benchmarks](https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md): how they are measured
+
+## Optional
+
+- [Releases](https://github.com/HectorIFC/malachi/releases)
+- [Docker Hub](https://hub.docker.com/r/hectorcardoso/malachi)
