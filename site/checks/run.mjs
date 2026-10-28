@@ -38,7 +38,7 @@ async function lighthouseScores() {
         console.log(`  metric ${id}: ${audit.displayValue ?? audit.numericValue}`);
       }
       // Which elements moved, when the layout shift is what lowered the score.
-      const shifts = result.lhr.audits["layout-shift-elements"]?.details?.items ?? [];
+      const shifts = result.lhr.audits["layout-shifts"]?.details?.items ?? [];
       for (const item of shifts.slice(0, 8)) {
         console.log(`  layout shift ${Number(item.score).toFixed(3)}: ${item.node?.selector ?? "unknown element"}`);
       }
