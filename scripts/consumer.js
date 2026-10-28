@@ -2,29 +2,43 @@
 'use strict';
 
 /**
- * Malachi Consumer: pulls records from a topic over the binary log protocol.
+ * Malachi Consumer: pulls records from a topic with fetch_range (./lib/fetcher.js), one range at a time on
+ * the broker that leads it. For server-push use subscriber.js.
  *
- * The client drives its own position with an opaque cursor: each fetch returns a batch plus the next
- * cursor to pass back. With --group, position is committed server-side so a restart resumes where it left
- * off (the old queue ack/nack is gone: commit is by cursor, per consumer group). This replaces the old
- * queue "subscribe": here the client polls; for server-push use subscriber.js.
+ * Without --group it reads every range from the start, its position held only in this process. With
+ * --group it is a member of that consumer group (./lib/group_member.js): the group hands it a share of the
+ * topic's ranges, it starts each from the group's checkpoint and commits its position after every page,
+ * and it follows every rebalance, so several members with the same --group split the topic between them
+ * and a member that restarts resumes where the group left off.
  *
  * Usage:
- *   node consumer.js [topic]                # drain the topic once from the start
- *   node consumer.js orders --group workers # resume the "workers" group, committing after each batch
- *   node consumer.js orders --follow        # keep long-polling for new records until Ctrl-C
+ *   node consumer.js [topic]                # read the topic once from the start
+ *   node consumer.js orders --group workers # as a member of "workers", committing after each page
+ *   node consumer.js orders --follow        # keep reading new records until Ctrl-C (the broker long-polls)
  *   node consumer.js orders --max 50        # up to 50 records per fetch
  *
  * Environment: MALACHI_HOST, MALACHI_PORT, MALACHI_TOPIC, MALACHI_USER, MALACHI_PASS.
  * Default credentials: consumer / consumer123 (consume permission).
  */
 
-const { MalachiClient, isNotOwner, isMigrating } = require('./lib/client');
-const { colors, config, parseArgs, fail, sleep, withRetry } = require('./lib/cli');
+const { Router } = require('./lib/router');
+const { Fetcher } = require('./lib/fetcher');
+const { colors, config, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs } = require('./lib/cli');
 
 const cfg = config({ username: 'consumer', password: 'consumer123' });
-const FOLLOW_WAIT_MS = 5000; // server-side long-poll window while following
-const NOT_OWNER_RETRY_MS = 200; // back-off before retrying a member fetch during a coordinator failover
+// How long one pass over the ranges may be held while following: split across them by the Fetcher, at
+// least 200 ms a range, so past 25 ranges a pass is held 200 ms a range.
+const FOLLOW_WAIT_MS = 5000;
+// How long to wait before the next fetch after one that served no page: routes held back, a dropped
+// connection, no broker that took one, or (following) no range the group handed this member.
+const RETRY_MS = 200;
+// Answers that mean no broker took the fetch (the range's broker, or every one the routes are read from):
+// waited out, as a broker that restarts comes back, and so is a group join no broker answers. A follower
+// waits as long as it takes; a run that reads once gives up once UNREACHABLE_WAIT_MS passed since the first
+// of those was asked, waiting then for the attempt still on its way (./client.js bounds each connect, and
+// then its authentication, at 15 s; a request at its timeout).
+const UNREACHABLE = new Set(['connect_failed', 'metadata_unavailable']);
+const UNREACHABLE_WAIT_MS = 10000;
 
 function printRecord(rec, n) {
   const value = rec.value.toString('utf8');
@@ -37,75 +51,71 @@ async function run(topic, { group, member, max, follow }) {
   console.log(colors.gray(`   host:  ${cfg.host}:${cfg.port}`));
   console.log(colors.gray(`   topic: ${topic}   group: ${group || '(none)'}   member: ${member || '(none)'}   follow: ${!!follow}\n`));
 
-  const client = new MalachiClient({ host: cfg.host, port: cfg.port });
-  await client.connect(cfg.username, cfg.password);
+  const router = new Router({ host: cfg.host, port: cfg.port });
+  const fetcher = new Fetcher(router, connOptions(cfg, FOLLOW_WAIT_MS + 30000), {
+    max,
+    atTail: 'wait',
+    waitMs: follow ? FOLLOW_WAIT_MS : 0,
+    startFrom: group ? { committed: group } : 'earliest',
+  });
+  // the join waits for the cluster as the reading does
+  const unreachableWaitMs = follow ? Infinity : UNREACHABLE_WAIT_MS;
+  const groupMember = group ? await joinGroupAs({ cfg, router, topic, group, member, reader: fetcher, waitMs: unreachableWaitMs }) : null;
   console.log(colors.green(`Connected (authenticated as ${cfg.username})\n`));
 
-  // In member mode the server scopes each fetch to this member's assigned ranges and drives the position
-  // (we always pass {group, member} and commit). Otherwise an explicit cursor takes precedence over a
-  // group resume, so we pass the group only on the first fetch and drive by cursor after.
-  let cursor = null;
   let total = 0;
   let stop = false;
-
-  const leave = async () => {
-    if (member) {
-      try {
-        await client.leaveGroup(topic, group, member);
-      } catch (_e) {
-        // best-effort: the coordinator evicts on session timeout anyway
-      }
-    }
+  const finish = async () => {
+    if (groupMember) await groupMember.leave();
+    await fetcher.close();
   };
 
   process.on('SIGINT', async () => {
     stop = true;
-    await leave();
-    client.close();
+    await finish();
     console.log(colors.cyan(`\nStopped. consumed=${total}\n`));
     process.exit(0);
   });
 
+  // Once every range read in a row brought nothing, the topic is read through (unless following).
+  let emptyInARow = 0;
+  let unreachableSince = null; // when the first of the fetches in a row that no broker took was asked
   while (!stop) {
-    const waitMs = follow ? FOLLOW_WAIT_MS : 0;
-
-    const opts = member
-      ? { group, member, max, waitMs }
-      : cursor === null
-        ? { group, max, waitMs }
-        : { cursor, max, waitMs };
-
-    let records, next;
-
-    try {
-      ({ records, cursor: next } = await client.fetch(topic, opts));
-    } catch (err) {
-      // a member fetch routed to a coordinator mid-failover: back off and retry (the server re-resolves)
-      if (isNotOwner(err)) {
-        process.stdout.write(colors.gray('~'));
-        await sleep(NOT_OWNER_RETRY_MS);
-        continue;
-      }
-
-      throw err;
+    const asked = Date.now();
+    const answer = await fetcher.fetchPage(topic);
+    if (answer.kind === 'error' && UNREACHABLE.has(answer.reason)) {
+      unreachableSince ??= asked;
+      if (Date.now() - unreachableSince >= unreachableWaitMs) throw new Error(answer.reason);
+      await sleep(RETRY_MS);
+      continue;
     }
-
-    for (const rec of records) printRecord(rec, ++total);
-    cursor = next;
-
-    // retry the commit if the topic is mid-migration (a vnode split); it must land before advancing
-    if (group && records.length > 0) {
-      await withRetry(() => client.commit(topic, group, cursor), isMigrating, NOT_OWNER_RETRY_MS, () =>
-        process.stdout.write(colors.gray('~')),
-      );
+    if (answer.kind === 'error') throw new Error(answer.reason);
+    unreachableSince = null;
+    // reading once, a member the group handed nothing has nothing to read
+    if (answer.kind === 'unassigned' && !follow) {
+      console.log(colors.gray('   the group handed this member no range'));
+      break;
     }
-
-    if (records.length === 0 && !follow) break;
-    if (records.length === 0 && follow) process.stdout.write(colors.gray('.'));
+    // a page of a range that left the assignment while it was fetched: dropped, the next one asked at once
+    if (answer.kind === 'revoked') continue;
+    if (answer.kind !== 'page') {
+      await sleep(answer.kind === 'held' ? answer.ms : RETRY_MS);
+      continue;
+    }
+    const { page } = answer;
+    for (const rec of page.records) printRecord(rec, ++total);
+    if (page.records.length > 0) {
+      emptyInARow = 0;
+      if (groupMember) await groupMember.commit([{ range: page.range, position: page.to }]);
+    } else {
+      emptyInARow += 1;
+      const ranges = groupMember ? groupMember.assignment.ranges.length : page.active.length;
+      if (!follow && emptyInARow >= ranges) break;
+      if (follow && emptyInARow >= ranges) process.stdout.write(colors.gray('.'));
+    }
   }
 
-  await leave();
-  client.close();
+  await finish();
   console.log(colors.cyan(`\nDone. consumed=${total}\n`));
 }
 
@@ -117,10 +127,10 @@ ${colors.yellow('Usage')}
   node consumer.js [topic] [options]
 
 ${colors.yellow('Options')}
-  --group <g>     Consumer group: resume and commit position server-side
-  --member <m>    Group member id: the server assigns this member a share of the topic's ranges
-                  (run several with the same --group and distinct --member for parallel consumption)
-  --follow        Long-poll for new records until Ctrl-C
+  --group <g>     Consumer group: read this member's share of the ranges, from the group's checkpoint,
+                  committing after each page (run several with the same --group to split the topic)
+  --member <m>    The member id in the group (default: <host>-<pid>)
+  --follow        Keep reading new records until Ctrl-C
   --max <n>       Records per fetch (default 100)
   -h, --help      Show this help
 
@@ -135,13 +145,7 @@ async function main() {
 
   const topic = positional[0] || cfg.topic;
   const max = parseInt(flags.max, 10) || 100;
-  const group = flags.group || null;
-  const member = flags.member || null;
-
-  if (member && !group) {
-    console.error(colors.red('--member requires --group (a member belongs to a consumer group)'));
-    process.exit(1);
-  }
+  const { group, member } = groupMemberOf(flags);
 
   try {
     await run(topic, { group, member, max, follow: !!flags.follow });
@@ -151,5 +155,3 @@ async function main() {
 }
 
 if (require.main === module) main();
-
-module.exports = { MalachiClient };

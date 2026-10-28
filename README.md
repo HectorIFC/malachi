@@ -860,25 +860,28 @@ re-resolves the new leader).
 `scripts/` ships a dependency-free Node.js reference client that speaks the protocol above:
 
 - `scripts/lib/wire.js`: the binary codec, a direct port of `Malachi.Wire` (framing, envelope, records).
-- `scripts/lib/client.js`: a connection that multiplexes requests by `correlation_id` and routes push
-  frames to a subscription callback.
+- `scripts/lib/client.js`: a connection that multiplexes requests by `correlation_id` and routes the
+  frames of an open stream (producer or consume) to its handlers.
+- `scripts/lib/router.js`, `producer.js`, `fetcher.js`, `consumer.js`, `group_member.js`: the routing
+  client, which reads the cluster state and the topic's routes and talks to the broker that leads each
+  range, and a consumer group member over the group keys.
 - `scripts/producer.js` / `consumer.js` / `subscriber.js`, CLIs for append, pull, and server-push.
 
 ```bash
 # append 100 records to a topic (creating it first)
 node scripts/producer.js orders 100 --create
 
-# pull with a resumable consumer group, long-polling for new records
+# pull as a member of a consumer group, from its checkpoint, long-polling for new records
 node scripts/consumer.js orders --group workers --follow
 
-# parallel consumption: several members of one group each get a share of the ranges (opaque, disjoint)
+# parallel consumption: several members of one group each get a disjoint share of the ranges
 node scripts/consumer.js orders --group workers --member c1 &
 node scripts/consumer.js orders --group workers --member c2 &
 
-# server-push streaming (subscribe + credit-windowed acks)
+# server-push streaming (one consume stream per range, credit-windowed acks)
 node scripts/subscriber.js orders --group live
 
-# parallel server-push: several members of one group, each streamed a disjoint share (opaque)
+# parallel server-push: several members of one group, each streaming a disjoint share
 node scripts/subscriber.js orders --group live --member s1 &
 node scripts/subscriber.js orders --group live --member s2 &
 

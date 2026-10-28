@@ -2,110 +2,79 @@
 'use strict';
 
 /**
- * Malachi Subscriber: server-push streaming over the binary log protocol.
+ * Malachi Subscriber: server-push streaming on consume streams (./lib/consumer.js): one stream per range,
+ * opened on the broker that leads it, which pushes pages within a credit window of --window records; each
+ * page read is acked, which returns its credit.
  *
- * subscribe opens a push stream for a consumer group, flow-controlled by a credit window: the server
- * pushes up to `window` in-flight records, and each streamAck durably commits the group's position and
- * returns that many records of credit. This replaces the old channel pub/sub, channels are gone; a
- * topic + consumer group with server-push is the real-time equivalent.
+ * Without --group it reads every range from the start, its position held only in this process. With
+ * --group it is a member of that consumer group (./lib/group_member.js): the group hands it a share of the
+ * topic's ranges, it opens each from the group's checkpoint and commits its position after every page, and
+ * it follows every rebalance, so several subscribers with the same --group split the topic between them.
  *
  * Usage:
- *   node subscriber.js [topic]                    # stream <topic> as group "stream"
- *   node subscriber.js orders --group live        # named consumer group (shared, resumable)
- *   node subscriber.js orders --window 500        # allow up to 500 in-flight records
- *   node subscriber.js orders --group live --member m1   # server-scoped stream (a share of the ranges)
- *
- * With --member the server scopes the push stream to this member's assigned ranges (run several with the
- * same --group and distinct --member for parallel streaming). A member stream_ack also heartbeats the
- * coordinator; while idle (no records to ack) a periodic empty ack keeps the membership alive.
+ *   node subscriber.js [topic]                    # stream every range of <topic>
+ *   node subscriber.js orders --group live        # as a member of "live" (shared, resumable)
+ *   node subscriber.js orders --window 500        # up to 500 records pushed and unread
  *
  * Environment: MALACHI_HOST, MALACHI_PORT, MALACHI_TOPIC, MALACHI_USER, MALACHI_PASS.
  * Default credentials: consumer / consumer123 (consume permission).
  */
 
-const { MalachiClient, isNotOwner } = require('./lib/client');
-const { colors, config, parseArgs, fail } = require('./lib/cli');
+const { Router } = require('./lib/router');
+const { Consumer } = require('./lib/consumer');
+const { colors, config, connOptions, parseArgs, fail, groupMemberOf, joinGroupAs } = require('./lib/cli');
+const readLanes = require('./lib/read_lanes');
 
 const cfg = config({ username: 'consumer', password: 'consumer123' });
-const DEFAULT_HEARTBEAT_MS = 10_000; // < the coordinator's 30s session timeout (safe margin)
-const NOT_OWNER_RETRY_MS = 200; // back-off before re-subscribing during a coordinator failover
 
-async function run(topic, { group, member, window, max, heartbeatMs }) {
+async function run(topic, { group, member, window, max }) {
   console.log(colors.cyan('\nMalachi Subscriber (streaming)'));
   console.log(colors.gray(`   host:  ${cfg.host}:${cfg.port}`));
-  console.log(colors.gray(`   topic: ${topic}   group: ${group}   member: ${member || '(none)'}   window: ${window}`));
+  console.log(colors.gray(`   topic: ${topic}   group: ${group || '(none)'}   member: ${member || '(none)'}   window: ${window}`));
   console.log(colors.yellow('   Press Ctrl-C to stop\n'));
 
-  const client = new MalachiClient({ host: cfg.host, port: cfg.port });
-  await client.connect(cfg.username, cfg.password);
-  console.log(colors.green(`Connected (authenticated as ${cfg.username}), streaming...\n`));
-
   let total = 0;
-  let lastAck = Date.now();
-
-  // A member ack doubles as a coordinator heartbeat + range refresh. Acking real records resets the
-  // timer; while idle, a periodic empty ack (null cursor, 0 credit) keeps the membership from being
-  // evicted on session timeout, closing the idle-member liveness gap.
-  const ack = (cursor, count) => {
-    client.streamAck(topic, group, member, cursor, count);
-    lastAck = Date.now();
-  };
-
-  let heartbeat = null;
-  if (member) {
-    heartbeat = setInterval(() => {
-      if (Date.now() - lastAck >= heartbeatMs) ack(null, 0);
-    }, heartbeatMs);
-    if (heartbeat.unref) heartbeat.unref();
-  }
-
-  const fatal = (err) => {
-    console.error(colors.red(`\nStream error: ${err.message}`));
-    if (heartbeat) clearInterval(heartbeat);
-    client.close();
+  let groupMember = null;
+  const fatal = (reason) => {
+    console.error(colors.red(`\nStream error: ${reason}`));
     process.exit(1);
   };
 
-  const startStream = () =>
-    client.subscribe(topic, {
-      group,
-      member,
+  const router = new Router({ host: cfg.host, port: cfg.port });
+  const consumer = new Consumer(
+    router,
+    connOptions(cfg, 30000),
+    {
       window,
       max,
-      onRecords: ({ records, cursor }) => {
-        for (const rec of records) {
+      decode: true,
+      onRefusal: 'stop',
+      startFrom: group ? { committed: group } : 'earliest',
+      onEvent: (event) => {
+        if (event.kind === 'failed') return fatal(event.reason);
+        for (const rec of event.records) {
           const key = rec.key === null ? colors.gray('(no key)') : rec.key;
           console.log(colors.green(`[${++total}]`) + ` key=${key}  ${rec.value.toString('utf8')}`);
         }
-        // Release the credit we just consumed and durably commit the group's position.
-        if (records.length > 0) ack(cursor, records.length);
-      },
-      onError: (err) => {
-        // a member subscription that landed on a coordinator mid-failover was dropped: re-subscribe
-        // against the new owner (the server re-resolves) rather than giving up
-        if (member && isNotOwner(err)) {
-          process.stdout.write(colors.gray('~'));
-          setTimeout(() => startStream().catch(fatal), NOT_OWNER_RETRY_MS);
-          return;
+        if (groupMember && event.records.length > 0) {
+          const [, range] = readLanes.splitKey(event.key);
+          groupMember.commit([{ range, position: event.next }]).catch(() => {});
         }
-
-        fatal(err);
       },
-    });
+    },
+  );
 
-  await startStream();
+  // a subscriber streams until it is stopped: its join waits for the cluster as long as it takes
+  if (group) groupMember = await joinGroupAs({ cfg, router, topic, group, member, reader: consumer, waitMs: Infinity });
+
+  const subscribed = await consumer.subscribe(topic, 30000);
+  if (subscribed.error) throw new Error(subscribed.error);
+  console.log(colors.green(`Connected (authenticated as ${cfg.username}), streaming...\n`));
 
   process.on('SIGINT', async () => {
-    if (heartbeat) clearInterval(heartbeat);
-    // A member leaves the group for a fast rebalance (else the coordinator evicts it on session timeout).
-    if (member) {
-      try {
-        await client.leaveGroup(topic, group, member);
-      } catch (_e) {
-        // best-effort
-      }
-    }
-    client.close();
+    // a member leaves at once, so its ranges go to the others without waiting out its session
+    if (groupMember) await groupMember.leave();
+    await consumer.close();
     console.log(colors.cyan(`\nStopped. received=${total}\n`));
     process.exit(0);
   });
@@ -119,12 +88,11 @@ ${colors.yellow('Usage')}
   node subscriber.js [topic] [options]
 
 ${colors.yellow('Options')}
-  --group <g>       Consumer group (default: stream)
-  --member <m>      Group member id: scope the stream to this member's share of the ranges
-                    (run several with the same --group and distinct --member for parallel streaming)
-  --window <n>      Max in-flight (uncommitted) records (default 100)
+  --group <g>       Consumer group: stream this member's share of the ranges, from the group's
+                    checkpoint, committing after each page (run several with the same --group)
+  --member <m>      The member id in the group (default: <host>-<pid>)
+  --window <n>      Max records pushed and unread (default 100)
   --max <n>         Max records per push (default 100)
-  --heartbeat <ms>  Idle member-ack interval, member mode only (default 10000)
   -h, --help        Show this help
 
 ${colors.yellow('Environment')}
@@ -133,23 +101,19 @@ ${colors.yellow('Environment')}
 }
 
 async function main() {
-  const { positional, flags } = parseArgs(process.argv.slice(2), ['group', 'member', 'window', 'max', 'heartbeat']);
+  const { positional, flags } = parseArgs(process.argv.slice(2), ['group', 'member', 'window', 'max']);
   if (flags.help) return help();
 
   const topic = positional[0] || cfg.topic;
-  const group = flags.group || 'stream';
-  const member = flags.member || null;
+  const { group, member } = groupMemberOf(flags);
   const window = parseInt(flags.window, 10) || 100;
   const max = parseInt(flags.max, 10) || 100;
-  const heartbeatMs = parseInt(flags.heartbeat, 10) || DEFAULT_HEARTBEAT_MS;
 
   try {
-    await run(topic, { group, member, window, max, heartbeatMs });
+    await run(topic, { group, member, window, max });
   } catch (err) {
     fail(err, cfg);
   }
 }
 
 if (require.main === module) main();
-
-module.exports = { MalachiClient };

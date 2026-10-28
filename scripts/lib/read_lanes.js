@@ -60,4 +60,20 @@ function startFor(retired, topic, [keyStart, keyEnd]) {
   return nearest === null ? 'earliest' : nearest.start;
 }
 
-module.exports = { reconcile, laneKey, splitKey };
+// A group member's assignment as the readers hold it: the ranges it was handed, or null (no group) to read
+// every range.
+function assignmentOf(ranges) {
+  return ranges === null ? null : new Set(ranges);
+}
+
+// Whether a reader holding `assignment` reads the lane `key`.
+function assigned(assignment, key) {
+  return assignment === null || assignment.has(splitKey(key)[1]);
+}
+
+// The routes' `ranges` a reader holding `assignment` reads, the same array when it reads every one.
+function assignedRanges(assignment, ranges) {
+  return assignment === null ? ranges : ranges.filter((r) => assignment.has(r.range));
+}
+
+module.exports = { reconcile, laneKey, splitKey, assignmentOf, assigned, assignedRanges };

@@ -9,8 +9,9 @@
  *
  * Its events are queued (`takeEvents`) and, with an `onEvent` option, handed to it as they come:
  *
- *   - `{ kind: 'records', key, count }`: a page of `count` records new to this consumer (a page's leading
- *     records it already had, `skip`, are not counted);
+ *   - `{ kind: 'records', key, count, next }`: a page of `count` records new to this consumer (a page's
+ *     leading records it already had, `skip`, are not counted), `next` where the range's next page starts,
+ *     and with the `decode` option `records`, those records whole (a load generator counts, a CLI prints);
  *   - `{ kind: 'failed', key, reason }`: an open, or a stream, the broker refused for a reason that is not a
  *     redirect; the range opens again after a backoff, or, with `onRefusal: 'stop'`, is not read again, nor
  *     is a range a split makes of it, or a merge back into exactly its block.
@@ -37,7 +38,9 @@ class Consumer {
   // A consumer routing by `router` (./router.js) and connecting with `connOpts` ({ user, pass, timeout }).
   // Options: `window`, the records a stream keeps pushed and unread at most (100); `max`, the records per
   // page at most (100); `onRefusal`, what a failed range does next: 'retry' (the default) opens it again
-  // after a backoff, 'stop' leaves it unread from then on; `onEvent`, called with every event.
+  // after a backoff, 'stop' leaves it unread from then on; `onEvent`, called with every event; `decode`,
+  // whether a page's records come whole in its event; `startFrom`, where a range with no ancestor read
+  // starts ('earliest', or a group member's `{ committed: group }`).
   constructor(router, connOpts, opts = {}) {
     const onRefusal = opts.onRefusal ?? 'retry';
     if (onRefusal !== 'retry' && onRefusal !== 'stop') throw new Error(`onRefusal must be 'retry' or 'stop', got ${onRefusal}`);
@@ -51,6 +54,9 @@ class Consumer {
     this.max = opts.max ?? 100;
     this.onRefusal = onRefusal;
     this.onEvent = opts.onEvent || null;
+    this.decode = opts.decode === true;
+    this.startFrom = opts.startFrom ?? 'earliest';
+    this.assigned = null; // the ranges a group member was handed, or null to read every one
     this.topics = [];
     this.lanes = new Map();
     this.retired = new Map(); // the lanes of ranges the routes retired, kept for where the ranges made of them open
@@ -109,7 +115,9 @@ class Consumer {
 
   _allOpen(topic) {
     const routes = this.router.routes(topic);
-    return routes !== null && routes.ranges.every((r) => this.lanes.get(readLanes.laneKey(topic, r.range))?.stream?.open);
+    // the ranges it reads: a group member's assignment, or every one
+    const read = routes === null ? [] : readLanes.assignedRanges(this.assigned, routes.ranges);
+    return routes !== null && read.every((r) => this.lanes.get(readLanes.laneKey(topic, r.range))?.stream?.open);
   }
 
   // The events so far, emptied.
@@ -133,6 +141,30 @@ class Consumer {
           this.waiters.push(waiter);
         }),
     );
+  }
+
+  // Reads only `ranges` from now on (a group member's assignment), or every range with null. At once, not
+  // behind the frames already queued: a page of a range that left is dropped unread, so no record of a range
+  // the group handed on is reported after the member heard of it. A range that leaves has its stream closed,
+  // or closed when its open is answered, and forgets where it was read: handed back later, it starts from the
+  // group's checkpoint again. Ranges handed over open on the flush this queues.
+  setAssignment(ranges) {
+    this.assigned = readLanes.assignmentOf(ranges);
+    for (const [key, lane] of [...this.lanes]) {
+      if (readLanes.assigned(this.assigned, key)) continue;
+      if (lane.stream && typeof lane.stream === 'object' && lane.stream.open) this._closeStream(lane.stream.open);
+      // a stream still opening sees its lane gone when it is answered, and closes then
+      lane.stream = 'left';
+      this.lanes.delete(key);
+    }
+    return this._run(() => this._flush(monoMs()));
+  }
+
+  // Closes `stream` at its broker and forgets it: nothing it pushes later is read.
+  _closeStream(stream) {
+    this.streams.delete(stream);
+    stream.client.forgetStream(stream.correlationId);
+    stream.client.closeStream(stream.id).catch(() => {});
   }
 
   // What routing did so far.
@@ -213,13 +245,15 @@ class Consumer {
         for (const [key, lane] of this.lanes) if (key.startsWith(`${topic}\u0000`) && lane.stream === null) lane.retryAt = until;
         continue;
       }
-      const { ranges } = this.router.routes(topic);
+      const ranges = readLanes.assignedRanges(this.assigned, this.router.routes(topic).ranges);
+      const fresh = (block, start) => newLane(block, start === 'earliest' ? this.startFrom : start);
       // a lane whose stream is still open keeps reading its range until it is told it moved
-      readLanes.reconcile(this.lanes, this.retired, topic, ranges, (lane) => lane.stream === null || lane.stream === 'stopped', newLane);
+      readLanes.reconcile(this.lanes, this.retired, topic, ranges, (lane) => lane.stream === null || lane.stream === 'stopped', fresh);
       for (const r of ranges) {
         const key = readLanes.laneKey(topic, r.range);
         const lane = this.lanes.get(key);
-        if (lane.stream !== null) continue;
+        // gone from the assignment while an earlier range opened
+        if (!lane || lane.stream !== null) continue;
         if (typeof lane.retryAt === 'number' && lane.retryAt > now) continue;
         lane.retryAt = null;
         await this._open(topic, r.range, key, lane, now);
@@ -238,6 +272,8 @@ class Consumer {
     // null too once closed (./links.js connects to nothing after closeAll), so a flush still on its way
     // when the consumer closed opens nothing
     const client = await this.links.connection(where.address);
+    // gone from the assignment while its broker was connected to
+    if (lane.stream !== null) return;
     if (!client) {
       lane.retryAt = backoffUntil(now);
       this.router.forget(topic);
@@ -280,7 +316,8 @@ class Consumer {
     this._settleOpening(opening);
     stream.correlationId = correlationId;
     stream.id = wire.decodeOpenConsumeResp(payload).stream_id;
-    if (lane.stream !== opening) return;
+    // a range that left the assignment while it opened: its stream is not read
+    if (lane.stream !== opening) return this._closeStream(stream);
     lane.stream = { open: stream };
     lane.redirects = 0;
     this.streams.add(stream);
@@ -341,7 +378,12 @@ class Consumer {
         // the connection is gone: its close reaches `_dropped`
       }
       lane.start = { position: push.next };
-      this._emit([{ kind: 'records', key: stream.key, count }]);
+      const event = { kind: 'records', key: stream.key, count, next: push.next };
+      if (this.decode) {
+        const entries = wire.decodeBatch(push.batch, { maxInflatedBytes: 16777216, layout: 'positioned' });
+        event.records = entries.slice(push.skip).map((e) => e.record);
+      }
+      this._emit([event]);
       return;
     }
     if (kind === 'moved') {

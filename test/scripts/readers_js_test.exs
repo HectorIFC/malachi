@@ -21,7 +21,7 @@ defmodule ReadersJsTest do
 
   test "the reader cases against a broker of their own", ctx do
     assert {output, 0} = System.cmd(ctx.node, [@selftest], stderr_to_stdout: true)
-    assert output =~ "passed 26 reader cases"
+    assert output =~ "passed 33 reader cases"
   end
 
   test "against the server, across a split: both readers read every record", ctx do

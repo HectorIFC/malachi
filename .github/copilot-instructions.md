@@ -149,8 +149,9 @@ do not loop.
 
 `scripts/` holds a Node CLI used by the guides and docker-compose: `producer.js`, `consumer.js`,
 `subscriber.js`, `acl.js`, `user.js`, `loadtest.js`. It reads `MALACHI_HOST`, `MALACHI_PORT`,
-`MALACHI_USER`, `MALACHI_PASS`, `MALACHI_TOPIC`, `MALACHI_LOCALE` (no `MQ` in the names). `scripts/lib/cli.js`
-has the `withRetry` helper that handles `:migrating`/`:not_owner`.
+`MALACHI_USER`, `MALACHI_PASS`, `MALACHI_TOPIC`, `MALACHI_LOCALE` (no `MQ` in the names). The CLIs route
+like the load generator (`scripts/lib/router.js`, `producer.js`, `fetcher.js`, `consumer.js`), and a
+`--group` makes them members of that consumer group (`scripts/lib/group_member.js`).
 
 ## Configuration
 

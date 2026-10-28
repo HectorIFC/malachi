@@ -99,9 +99,8 @@ group**: the server commits the group's position, so a restart resumes where the
 node consumer.js orders --group workers    # position committed server-side
 ```
 
-For parallel consumption, run several members of the same group with distinct member ids, the server
-assigns each member a share of the topic's ranges and scopes its reads to them. The client still never sees
-a range id.
+For parallel consumption, run several members of the same group with distinct member ids: the group
+assigns each member a share of the topic's ranges, and each reads only those, from the group's checkpoint.
 
 > **Analogy.** A consumer group is a team sharing one bookmark that the server holds. Add members and the
 > team also splits the reading, each taking a section, like several people working through one filing

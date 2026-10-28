@@ -171,6 +171,20 @@ class Links {
     }
   }
 
+  // The metadata connection, as `refresh` reads by: the client, or null when no address answers. The unary
+  // keys a routing client sends beside the routes (a group member's) go over it too, so they reach the
+  // cluster through any broker the cluster state lists, not only the bootstrap one.
+  controlConnection() {
+    return this._control();
+  }
+
+  // Closes the metadata connection, so the next call opens another: one a call timed out on may never
+  // answer again.
+  dropControl() {
+    if (this.control) this.control.destroy();
+    this.control = null;
+  }
+
   // The metadata connection, opened when there is none (or the one held was closed). Reads that ask at once
   // share one connect, so no connection is opened that `closeAll` would not close.
   async _control() {

@@ -122,8 +122,9 @@ node consumer.js orders --group workers --member m1 &
 node consumer.js orders --group workers --member m2 &
 ```
 
-Each member reads only its assigned ranges, and the assignment rebalances when members join or leave. The
-client still never sees a range id.
+Each member reads only its assigned ranges, and the assignment rebalances when members join or leave: a
+member hears of it on its next heartbeat, drops the ranges that left it and opens the new ones from the
+group's checkpoint. Each prints the ranges it holds after every change.
 
 ```mermaid
 flowchart TD
@@ -140,7 +141,7 @@ flowchart TD
 
 `fetch/5` and `fetch_group/5` take a final `wait_ms`. With `0` the call returns immediately, empty if
 there is nothing new. With a timeout the server holds the request open until a record arrives or the wait
-expires, which is how `--follow` avoids a busy loop:
+expires. `--follow` does the same on the stream keys (`fetch_range` with a wait), so it avoids a busy loop:
 
 ```bash
 node consumer.js orders --follow
@@ -179,11 +180,16 @@ All three are transient and mean retry, not fail:
 > **Analogy.** They mean "the shop is briefly rearranging, come back in a moment", not "gone for good".
 > Treating them as fatal is like seeing a "back in 5 minutes" sign and concluding the store closed forever.
 
-The bundled scripts handle the first two: `:migrating` through the `withRetry` helper in
-[`scripts/lib/cli.js`](https://github.com/HectorIFC/malachi/blob/main/scripts/lib/cli.js), and
-`:not_owner` with a back-off around the fetch. Each prints a grey `~` per attempt, so you can watch a
-split or a failover happen live. `:metadata_unavailable` needs the same back-off. A client that treats any
-of them as fatal will appear to fail at random under an otherwise healthy resharding or restart.
+The bundled scripts handle all three. A read or an open refused with `:migrating` or `:not_owner` reads the
+topic's routes again and goes to the broker they name
+([`scripts/lib/links.js`](https://github.com/HectorIFC/malachi/blob/main/scripts/lib/links.js)); a group
+member asks a moving coordinator again after a back-off
+([`scripts/lib/group_member.js`](https://github.com/HectorIFC/malachi/blob/main/scripts/lib/group_member.js));
+and `consumer.js` waits out `:metadata_unavailable`, or a broker that takes no connection, on its group join
+as on its reads: for as long as it takes with `--follow`; without it, until ten seconds have passed since it
+first found no broker, waiting then for the attempt still on its way (which may try several brokers in turn,
+each connect bounded at 15 s and each request at its timeout). A client that treats any of them as fatal will
+appear to fail at random under an otherwise healthy resharding or restart.
 
 ## Next
 

@@ -9,18 +9,14 @@
  *   Request:   <api_key:u16> <correlation_id:u32> <payload>
  *   Response:  <correlation_id:u32> <error_code:u16> <payload>   // 0 = ok, 1 = error (reason string)
  *
- * A string is length-prefixed with a presence flag (0 => null, 1 => <len:u32><bytes>), so a record on
- * the wire carries no offset: position travels only in the opaque cursor.
+ * A string is length-prefixed with a presence flag (0 => null, 1 => <len:u32><bytes>). Records travel in
+ * batches (`encodeBatch`), on producer and consume streams and in `fetch_range` pages, where a record read
+ * carries its position in its range.
  */
 
 const API = {
   auth: 0,
   createTopic: 1,
-  produce: 2,
-  fetch: 3,
-  commit: 4,
-  subscribe: 5,
-  streamAck: 6,
   leaveGroup: 7,
   // admin user management (require the admin permission)
   createUser: 8,
@@ -202,11 +198,6 @@ function encodeRecord(record) {
   ]);
 }
 
-function encodeProduceReq(topic, records) {
-  const body = Buffer.concat(records.map(encodeRecord));
-  return Buffer.concat([putStr(topic), u32(records.length), body]);
-}
-
 function decodeRecord(r) {
   const key = r.str();
   const valueLen = r.u32();
@@ -221,38 +212,8 @@ function decodeRecord(r) {
   return { key, value, timestamp, headers };
 }
 
-function decodeFetchResp(payload) {
-  const r = new Reader(payload);
-  const count = r.u32();
-  const records = [];
-  for (let i = 0; i < count; i++) records.push(decodeRecord(r));
-  const cursor = r.str();
-  return { records, cursor };
-}
-
-// member is an optional consumer-group member id (null = whole-group / single consumer); with it set the
-// server scopes the fetch to the member's ranges and returns records + an opaque cursor (no range ids).
-function encodeFetchReq(topic, cursor, group, member, max, waitMs) {
-  return Buffer.concat([putStr(topic), putStr(cursor), putStr(group), putStr(member), u32(max), u32(waitMs)]);
-}
-
 function encodeLeaveGroupReq(topic, group, member) {
   return Buffer.concat([putStr(topic), putStr(group), putStr(member)]);
-}
-
-function encodeCommitReq(topic, group, cursor) {
-  return Buffer.concat([putStr(topic), putStr(group), putStr(cursor)]);
-}
-
-// member is an optional consumer-group member id (null = whole-group subscription); with it set the
-// server scopes the push stream to the member's ranges (opaque: the push is still records + cursor).
-function encodeSubscribeReq(topic, group, member, window, max) {
-  return Buffer.concat([putStr(topic), putStr(group), putStr(member), u32(window), u32(max)]);
-}
-
-// A member stream_ack doubles as a coordinator heartbeat + range refresh (an empty ack = a heartbeat).
-function encodeStreamAckReq(topic, group, member, cursor, count) {
-  return Buffer.concat([putStr(topic), putStr(group), putStr(member), putStr(cursor), u32(count)]);
 }
 
 // ---- admin user management (permissions are byte strings: "admin"/"produce"/"consume") ----
@@ -795,13 +756,7 @@ module.exports = {
   encodeAuthReq,
   decodeString,
   encodeCreateTopicReq,
-  encodeProduceReq,
-  decodeFetchResp,
-  encodeFetchReq,
   encodeLeaveGroupReq,
-  encodeCommitReq,
-  encodeSubscribeReq,
-  encodeStreamAckReq,
   encodeCreateUserReq,
   encodeDeleteUserReq,
   encodeChangePasswordReq,

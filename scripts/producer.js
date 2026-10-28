@@ -2,10 +2,10 @@
 'use strict';
 
 /**
- * Malachi Producer: appends records to a topic over the binary log protocol.
+ * Malachi Producer: appends records to a topic on producer streams (./lib/producer.js).
  *
- * Records are addressed by an optional key (the server routes the key to a range); position is never
- * chosen by the client. This replaces the old queue "publish": there is no queue, only an append log.
+ * Each record goes to the range its key hashes into, on a stream opened at the broker that leads that
+ * range; position is never chosen by the client. A record without --key gets key-<n>.
  *
  * Usage:
  *   node producer.js [topic] [count]        # append <count> records (default 10) to <topic>
@@ -17,10 +17,14 @@
  * Default credentials: producer / producer123 (produce permission; also allows create-topic).
  */
 
-const { MalachiClient, isMigrating } = require('./lib/client');
-const { colors, config, parseArgs, fail, withRetry } = require('./lib/cli');
+const { MalachiClient } = require('./lib/client');
+const { Router } = require('./lib/router');
+const { Producer } = require('./lib/producer');
+const { colors, config, parseArgs, fail } = require('./lib/cli');
 
 const cfg = config({ username: 'producer', password: 'producer123' });
+// How long the appends handed over may take to be answered before the run gives up on them.
+const ANSWER_TIMEOUT_MS = 30000;
 
 function record(i, key) {
   return {
@@ -30,10 +34,29 @@ function record(i, key) {
   };
 }
 
-async function connect() {
+async function createTopic(topic) {
   const client = new MalachiClient({ host: cfg.host, port: cfg.port });
   await client.connect(cfg.username, cfg.password);
-  return client;
+  try {
+    await client.createTopic(topic);
+  } finally {
+    client.close();
+  }
+}
+
+function newProducer() {
+  return new Producer(
+    new Router({ host: cfg.host, port: cfg.port }),
+    { user: cfg.username, pass: cfg.password, timeout: ANSWER_TIMEOUT_MS },
+    { maxInflight: 16, label: 'malachi-producer-cli' },
+  );
+}
+
+// Every failed append, its reason with how many records it carried.
+function failures(events) {
+  const reasons = {};
+  for (const e of events) if (e.kind === 'failed') reasons[e.reason] = (reasons[e.reason] || 0) + e.entries.length;
+  return reasons;
 }
 
 async function produceBatch(topic, count, key, create) {
@@ -43,25 +66,32 @@ async function produceBatch(topic, count, key, create) {
   console.log(colors.gray(`   topic: ${topic}`));
   console.log(colors.gray(`   count: ${count}${key ? `   key: ${key}` : ''}\n`));
 
-  const client = await connect();
-  console.log(colors.green(`Connected (authenticated as ${cfg.username})\n`));
-
   if (create) {
-    await client.createTopic(topic);
+    await createTopic(topic);
     console.log(colors.green(`Topic "${topic}" created\n`));
   }
 
+  const producer = newProducer();
   const start = Date.now();
-  const records = Array.from({ length: count }, (_, i) => record(i + 1, key));
-  // retry if the topic is mid-migration (a vnode split): back off and produce to the new location
-  const appended = await withRetry(() => client.produce(topic, records), isMigrating, 200, () =>
-    process.stdout.write(colors.gray('~')),
-  );
-  const duration = Date.now() - start;
-
-  client.close();
-  console.log(colors.green(`Appended ${appended} record(s)`));
-  console.log(colors.gray(`   time: ${duration}ms   rate: ${Math.round((appended / duration) * 1000)} rec/s\n`));
+  try {
+    await producer.produce(
+      topic,
+      Array.from({ length: count }, (_, i) => ({ tag: i + 1, record: record(i + 1, key) })),
+    );
+    const outcome = await producer.wait(ANSWER_TIMEOUT_MS);
+    const events = producer.takeEvents();
+    const appended = events.filter((e) => e.kind === 'acked').reduce((acc, e) => acc + e.entries.length, 0);
+    const duration = Math.max(1, Date.now() - start);
+    console.log(colors.green(`Appended ${appended} record(s)`));
+    console.log(colors.gray(`   time: ${duration}ms   rate: ${Math.round((appended / duration) * 1000)} rec/s\n`));
+    const refused = failures(events);
+    if (Object.keys(refused).length > 0 || outcome === 'timeout') {
+      const why = outcome === 'timeout' ? { ...refused, unanswered: count - appended } : refused;
+      throw new Error(`not every record was appended: ${JSON.stringify(why)}`);
+    }
+  } finally {
+    await producer.close();
+  }
 }
 
 async function produceContinuous(topic, key, create) {
@@ -69,27 +99,39 @@ async function produceContinuous(topic, key, create) {
   console.log(colors.gray(`   topic: ${topic}   user: ${cfg.username}`));
   console.log(colors.yellow('   Press Ctrl-C to stop\n'));
 
-  const client = await connect();
-  if (create) await client.createTopic(topic);
-  console.log(colors.green(`Connected (authenticated as ${cfg.username})\n`));
+  if (create) await createTopic(topic);
+  let appended = 0;
+  let errors = 0;
+  const producer = new Producer(
+    new Router({ host: cfg.host, port: cfg.port }),
+    { user: cfg.username, pass: cfg.password, timeout: ANSWER_TIMEOUT_MS },
+    {
+      label: 'malachi-producer-cli',
+      onEvent: (e) => {
+        for (const { tag } of e.entries) {
+          if (e.kind === 'acked') {
+            appended += 1;
+            console.log(colors.green(`✓ [${tag}]`) + colors.gray(`  ${new Date().toISOString()}`));
+          } else {
+            errors += 1;
+            console.log(colors.red(`✗ [${tag}] ${e.reason}`));
+          }
+        }
+      },
+    },
+  );
 
   let i = 0;
-  let errors = 0;
-  const interval = setInterval(async () => {
+  const interval = setInterval(() => {
     i += 1;
-    try {
-      await client.produce(topic, [record(i, key)]);
-      console.log(colors.green(`✓ [${i}]`) + colors.gray(`  ${new Date().toISOString()}`));
-    } catch (err) {
-      errors += 1;
-      console.log(colors.red(`✗ [${i}] ${err.message}`));
-    }
+    producer.produce(topic, [{ tag: i, record: record(i, key) }]).catch((err) => console.log(colors.red(`✗ [${i}] ${err.message}`)));
   }, 1000);
 
-  process.on('SIGINT', () => {
+  process.on('SIGINT', async () => {
     clearInterval(interval);
-    client.close();
-    console.log(colors.cyan(`\nStopped. appended=${i - errors} errors=${errors}\n`));
+    await producer.wait(5000, (p) => !p.inFlight());
+    await producer.close();
+    console.log(colors.cyan(`\nStopped. appended=${appended} errors=${errors}\n`));
     process.exit(0);
   });
 }
@@ -131,5 +173,3 @@ async function main() {
 }
 
 if (require.main === module) main();
-
-module.exports = { MalachiClient };

@@ -1,6 +1,11 @@
 'use strict';
 
-/** Small shared bits for the reference CLIs: ANSI colors, env-backed config, and a tiny arg parser. */
+/**
+ * Small shared bits for the reference CLIs: ANSI colors, env-backed config, a tiny arg parser, and what the
+ * consumer group CLIs (consumer.js, subscriber.js) share: the member id and the assignment line.
+ */
+
+const os = require('os');
 
 const colors = {
   green: (s) => `\x1b[32m${s}\x1b[0m`,
@@ -20,6 +25,12 @@ function config(defaults = {}) {
     username: process.env.MALACHI_USER || defaults.username,
     password: process.env.MALACHI_PASS || defaults.password,
   };
+}
+
+// What a routing client connects with (./links.js): the config's credentials, and how long a request may
+// wait for its answer.
+function connOptions(cfg, timeout) {
+  return { user: cfg.username, pass: cfg.password, timeout };
 }
 
 // Splits argv into positional args and a flag map. `--group g`/`--max 10` take the next token as a value;
@@ -55,26 +66,56 @@ function fail(err, cfg) {
   process.exit(1);
 }
 
-// Resolves after `ms`. Used by the member CLIs to back off before retrying a transient :not_owner.
+// Resolves after `ms`: what consumer.js waits between fetches that served nothing, and ./group_member.js
+// before asking a moving coordinator again.
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Runs `fn`, retrying while it rejects with a **retryable** error (a transient cluster change, a topic
-// mid-migration answering :migrating, or a coordinator failover), backing off `ms` between attempts and
-// calling `onRetry` each time. Non-retryable errors propagate. The server clears the transient once the
-// change settles, so a bounded back-off (not a tight loop) is enough; NorthGuard likewise "moves the
-// producers over" to the new location rather than failing them.
-async function withRetry(fn, retryable, ms = 200, onRetry = () => {}) {
-  for (;;) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (!retryable(err)) throw err;
-      onRetry();
-      await sleep(ms);
-    }
+// The group a consumer group CLI reads as and the member id it joins with: `--group`, and `--member` or
+// `<host>-<pid>`, both null without `--group`. `--member` without `--group` exits non-zero: a member belongs
+// to a group.
+function groupMemberOf(flags) {
+  const group = flags.group || null;
+  if (flags.member && !group) {
+    console.error(colors.red('--member requires --group (a member belongs to a consumer group)'));
+    process.exit(1);
   }
+  return { group, member: group ? flags.member || `${os.hostname()}-${process.pid}` : null };
 }
 
-module.exports = { colors, config, parseArgs, fail, sleep, withRetry };
+// Joins `group` as `member` for a consumer group CLI reading `topic` with `reader` (./fetcher.js or
+// ./consumer.js, sharing its `router`): every assignment printed and handed to the reader, the join waiting
+// for the cluster `waitMs` at most (./group_member.js). Resolves with the joined GroupMember.
+async function joinGroupAs({ cfg, router, topic, group, member, reader, waitMs }) {
+  // required here, not at the top: ./group_member.js requires this module for `sleep`
+  const { GroupMember } = require('./group_member');
+  const groupMember = new GroupMember({
+    router,
+    connOpts: connOptions(cfg, 30000),
+    topic,
+    group,
+    member,
+    onAssignment: (assignment) => {
+      printAssignment(assignment);
+      reader.setAssignment(assignment.ranges);
+    },
+  });
+  try {
+    await groupMember.join({ waitMs });
+  } catch (err) {
+    // a join that went out and was given up on may still have been taken: undone, so the group does not
+    // keep a member nobody heartbeats until its session ends
+    await groupMember.leave();
+    throw err;
+  }
+  return groupMember;
+}
+
+// What a consumer group CLI prints on every assignment the group hands it: the generation's rebalance count
+// (its low 32 bits; the coordinator's epoch sits above them) and the ranges, in order.
+function printAssignment({ generation, ranges }) {
+  console.log(colors.gray(`   generation ${generation % 2 ** 32}: ranges ${JSON.stringify([...ranges].sort((a, b) => a - b))}`));
+}
+
+module.exports = { colors, config, connOptions, parseArgs, fail, sleep, groupMemberOf, joinGroupAs };

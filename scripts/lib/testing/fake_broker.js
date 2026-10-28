@@ -2,8 +2,9 @@
 
 /**
  * A broker for the Node client's tests, in their own process: it answers `create_topic`, `cluster_state`,
- * `topic_routes`, `open_stream`, `append`, `open_consume`, `consume_ack` and `fetch_range` as the server
- * does, by a policy the test sets, and lets the test push what a server would (an `append_ack`, a `moved`,
+ * `topic_routes`, `open_stream`, `append`, `open_consume`, `consume_ack`, `close_stream`, `fetch_range` and
+ * the group keys (`join_group`, `group_heartbeat`, `commit_offsets`, `leave_group`) as the server does, by a
+ * policy the test sets, and lets the test push what a server would (an `append_ack`, a `moved`,
  * an error frame under a stream's correlation id). What is appended is kept per range, in one source, and
  * read back by `fetch_range` and the consume streams. The Node twin of test/support/stream_stub.ex. Never
  * used outside tests.
@@ -54,6 +55,11 @@ class Reader {
     this.pos += 4;
     return v;
   }
+  u16() {
+    const v = this.buf.readUInt16BE(this.pos);
+    this.pos += 2;
+    return v;
+  }
   u64() {
     const v = Number(this.buf.readBigUInt64BE(this.pos));
     this.pos += 8;
@@ -87,8 +93,9 @@ class FakeBroker {
     this.log = new Map(); // `${topic}/${range}` -> the values appended there, in order
     this.consumes = []; // every consume opened: { id, topic, range, start }
     this.acks = []; // every consume_ack: { stream, position, window }
-    // what an open_consume is answered: 'ok', { refuse: reason }, or { dropAfterMs } (answered, its first
-    // page pushed, and the connection closed that many ms later, once)
+    // what an open_consume is answered: 'ok', { refuse: reason }, 'silent', { delayMs } (answered that many
+    // ms later), or { dropAfterMs } (answered, its first page pushed, and the connection closed that many ms
+    // later, once)
     this.consumePolicy = () => 'ok';
     // what an open is answered: 'ok', { refuse: reason }, 'silent', or 'moved' (answered, and told it moved
     // in the same write, as a seal right behind the open would)
@@ -99,11 +106,20 @@ class FakeBroker {
     this.extraBrokers = []; // further brokers the cluster state lists
     this.clusterStateAnswer = null; // a [code, payload] to answer cluster_state with instead
     this.authDelayMs = 0; // how long an authentication waits for its answer
+    this.closes = []; // every close_stream: the stream id
+    // the group every join and heartbeat is answered with the assignment of, and every group call asked:
+    // { call: 'join' | 'heartbeat' | 'commit' | 'leave', member, generation, positions }
+    this.group = { generation: 1, session_ms: 300, ranges: [0] };
+    this.groupCalls = [];
+    // what a group call is answered, by the call and the connection it came on: 'ok', { refuse: reason },
+    // 'silent', 'drop' (its connection closed), or with { delayMs } either answer that many ms later
+    this.groupPolicy = () => 'ok';
   }
 
-  async start() {
+  // Listens on `port`, or on any free one: a test that stops a broker starts it again on its port.
+  async start(port = 0) {
     this.server = net.createServer((socket) => this._accept(socket));
-    await new Promise((resolve) => this.server.listen(0, '127.0.0.1', resolve));
+    await new Promise((resolve) => this.server.listen(port, '127.0.0.1', resolve));
     this.port = this.server.address().port;
     this.address = { host: '127.0.0.1', port: this.port };
     this.id = `fake${this.port}@127.0.0.1`;
@@ -242,6 +258,12 @@ class FakeBroker {
       return;
     }
     if (apiKey === wire.API.append) return this._append(corr, payload, reply);
+    if (apiKey === wire.API.closeStream) {
+      this.closes.push(new Reader(payload).u32());
+      return reply(wire.OK, Buffer.alloc(0));
+    }
+    const groupCall = GROUP_CALLS[apiKey];
+    if (groupCall) return this._group(groupCall, payload, reply);
     return reply(wire.ERROR, str('unsupported'));
   }
 
@@ -295,11 +317,43 @@ class FakeBroker {
   }
 }
 
-// A start as Malachi.Wire encodes it: 0 earliest, 1 latest, 2 a position (source u16, offset u64).
+const GROUP_CALLS = {
+  [wire.API.joinGroup]: 'join',
+  [wire.API.groupHeartbeat]: 'heartbeat',
+  [wire.API.commitOffsets]: 'commit',
+  [wire.API.leaveGroup]: 'leave',
+};
+
+// A group call, recorded, and answered by `groupPolicy`: a join or a heartbeat with `group`'s assignment.
+FakeBroker.prototype._group = function (call, payload, reply) {
+  const r = new Reader(payload);
+  const req = { call, topic: r.str(), group: r.str(), member: r.str() };
+  if (call === 'heartbeat' || call === 'commit') req.generation = r.u64();
+  if (call === 'commit') {
+    const count = r.u16();
+    req.positions = Array.from({ length: count }, () => ({ range: r.u32(), position: [r.u16(), r.u64()] }));
+  }
+  this.groupCalls.push(req);
+  const policy = this.groupPolicy(req, reply.socket);
+  if (policy === 'silent') return;
+  if (policy === 'drop') return reply.socket.destroy();
+  const answer = () => {
+    if (policy.refuse) return reply(wire.ERROR, str(policy.refuse));
+    if (call === 'commit' || call === 'leave') return reply(wire.OK, Buffer.alloc(0));
+    const { generation, session_ms, ranges } = this.group;
+    reply(wire.OK, Buffer.concat([u64(generation), u32(session_ms), list(ranges, (range) => u32(range))]));
+  };
+  if (policy.delayMs) return setTimeout(answer, policy.delayMs);
+  answer();
+};
+
+// A start as Malachi.Wire encodes it: 0 earliest, 1 latest, 2 a position (source u16, offset u64), 3 a
+// group's checkpoint (read here as earliest: this broker keeps no checkpoints).
 function readStart(r) {
   const kind = r.u8();
   if (kind === 0) return 'earliest';
   if (kind === 1) return 'latest';
+  if (kind === 3) return { committed: r.str() };
   const position = [r.buf.readUInt16BE(r.pos), Number(r.buf.readBigUInt64BE(r.pos + 2))];
   r.pos += 10;
   return { position };
@@ -313,7 +367,7 @@ function page(values, offset, max) {
   return Buffer.concat([next, u32(0), u64(values.length - offset - taken.length), u64(0), u8(0), wire.encodeBatch(entries, 'none', 'positioned')]);
 }
 
-const offsetOf = (start, values) => (start === 'earliest' ? 0 : start === 'latest' ? values.length : start.position[1]);
+const offsetOf = (start, values) => (start === 'latest' ? values.length : start.position ? start.position[1] : 0);
 
 FakeBroker.prototype._openConsume = function (socket, corr, payload, reply) {
   const r = new Reader(payload);
@@ -328,6 +382,13 @@ FakeBroker.prototype._openConsume = function (socket, corr, payload, reply) {
   const policy = this.consumePolicy({ topic, range, start });
   if (policy === 'silent') return;
   if (policy.refuse) return reply(wire.ERROR, str(policy.refuse));
+  const open = () => this._consumeOpened(socket, corr, { id, topic, range, start, max }, policy);
+  // answered later, as a broker slow to open one is
+  if (policy.delayMs !== undefined) return setTimeout(open, policy.delayMs);
+  open();
+};
+
+FakeBroker.prototype._consumeOpened = function (socket, corr, { id, topic, range, start, max }, policy) {
   // kept as a stream, so `moved` and `refuse` reach it
   this.streams.set(id, { id, corr, socket, topic, range, expected: 0, moved: false, consume: true });
   const values = this.log.get(`${topic}/${range}`) || [];
@@ -366,8 +427,10 @@ FakeBroker.prototype._fetchRange = function (payload, reply) {
   r.u64();
   const start = readStart(r);
   const max = r.u32();
+  r.u32();
+  const waitMs = r.u32();
   const values = this.log.get(`${topic}/${range}`) || [];
-  this.fetches = [...(this.fetches || []), { topic, range, start }];
+  this.fetches = [...(this.fetches || []), { topic, range, start, wait_ms: waitMs }];
   const policy = (this.fetchPolicy || (() => 'ok'))({ topic, range, start });
   if (policy.refuse) return reply(wire.ERROR, str(policy.refuse));
   if (policy === 'drop') return reply.socket.destroy();
@@ -375,7 +438,14 @@ FakeBroker.prototype._fetchRange = function (payload, reply) {
   const body = page(values, Math.min(offsetOf(start, values), values.length), max);
   // a page whose first `skip` records the reader already had
   if (policy.skip) body.writeUInt32BE(policy.skip, 10);
+  // a page naming another position next, as one read from an ancestor's history names the range's own records
+  if (policy.next) {
+    body.writeUInt16BE(policy.next[0], 0);
+    body.writeBigUInt64BE(BigInt(policy.next[1]), 2);
+  }
   if (policy.delayMs) return setTimeout(() => reply(wire.OK, body), policy.delayMs);
+  // nothing to read: held for the wait asked (not woken by a write, which a test makes before it fetches)
+  if (offsetOf(start, values) >= values.length && waitMs > 0) return setTimeout(() => reply(wire.OK, body), waitMs);
   reply(wire.OK, body);
 };
 

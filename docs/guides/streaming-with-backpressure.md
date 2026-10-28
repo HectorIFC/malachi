@@ -138,8 +138,8 @@ node subscriber.js orders --group live --member m1 &
 node subscriber.js orders --group live --member m2 &
 ```
 
-The coordinator assigns each member a share of the topic's ranges and the broker scopes that member's push
-stream to them. Each member carries its **own** window, so total in-flight is the sum across members.
+The coordinator assigns each member a share of the topic's ranges, and the subscriber opens a consume
+stream only for those. Each stream carries its **own** window, so total in-flight is the sum across them.
 
 In Elixir, `subscribe_member/7` and `stream_ack_member/7` are the member-scoped equivalents.
 
@@ -152,11 +152,8 @@ A member ack is also a **heartbeat**: it re-polls the coordinator, which both re
 assignment (so a rebalance is picked up on the next ack) and proves the member is alive.
 
 A member that goes quiet, because it is idle rather than dead, would eventually be treated as gone and have
-its ranges reassigned. So an idle member sends a periodic empty ack:
-
-```bash
-node subscriber.js orders --group live --member m1 --heartbeat 10000
-```
+its ranges reassigned. `subscriber.js` and `consumer.js` with `--group` heartbeat on their own, every third
+of the group's session, apart from the data they read.
 
 If you implement your own client, this is the part most likely to bite: an idle stream that never acks
 looks exactly like a dead one.

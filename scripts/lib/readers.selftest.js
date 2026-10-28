@@ -143,8 +143,9 @@ check('fetchPage gives the values with the range, its block, the active ranges a
     const f = make((router) => new Fetcher(router, conn, { max: 1 }));
     const first = await f.fetchPage('t');
     assert.strictEqual(first.kind, 'page');
-    const { values, ...shape } = first.page;
+    const { values, records: read, ...shape } = first.page;
     assert.deepStrictEqual(values.map(String), ['x']);
+    assert.deepStrictEqual(read.map((r) => String(r.value)), ['x'], 'the records whole, for a reader that prints keys');
     assert.deepStrictEqual(shape, { range: 0, active: [0], block: [0, 16], size: 16, from: 'earliest', to: [0, 1] });
     const second = await f.fetchPage('t');
     assert.deepStrictEqual(second.page.from, { position: [0, 1] });
@@ -244,6 +245,106 @@ check('a closed fetcher answers what is still queued as closed, and opens no con
     await tick(50);
     assert.strictEqual(broker.sockets.length, sockets, 'no connection opened after close');
   }),
+);
+
+check('a member reads only its ranges, from the checkpoint; a range taken while its fetch is out is dropped unread', () =>
+  withBroker(
+    async (broker, make) => {
+      broker.write('t', 1, ['a']);
+      broker.write('t', 2, ['b']);
+      const f = make((router) => new Fetcher(router, conn, { atTail: 'wait', startFrom: { committed: 'g' } }));
+      f.setAssignment([1]);
+      const first = await f.fetchPage('t');
+      assert.strictEqual(first.page.range, 1);
+      assert.deepStrictEqual(broker.fetches[0].start, { committed: 'g' }, 'a range with no ancestor read starts at the checkpoint');
+
+      // range 1's next fetch is out when the group hands it on: the change takes at once, not behind the fetch
+      broker.write('t', 1, ['c']);
+      broker.fetchPolicy = () => ({ delayMs: 100 });
+      const out = f.fetchPage('t');
+      await untilTrue(() => broker.fetches.length === 2);
+      f.setAssignment([2]);
+      assert.deepStrictEqual(await out, { kind: 'revoked' });
+      broker.fetchPolicy = () => 'ok';
+      const next = await f.fetchPage('t');
+      assert.strictEqual(next.page.range, 2);
+      assert.deepStrictEqual(next.page.values.map(String), ['b']);
+
+      // handed back, range 1 forgot where it was read: from the checkpoint again
+      f.setAssignment([1]);
+      await f.fetchPage('t');
+      assert.deepStrictEqual(broker.fetches.at(-1), { topic: 't', range: 1, start: { committed: 'g' }, wait_ms: 0 });
+      f.setAssignment([]);
+      assert.deepStrictEqual(await f.fetchPage('t'), { kind: 'unassigned' });
+    },
+    [
+      [1, 0, 8, 'self'],
+      [2, 8, 16, 'self'],
+    ],
+  ),
+);
+
+check('a range taken while its broker is connected to is not fetched', () =>
+  withBroker(
+    async (broker, make) => {
+      broker.write('t', 1, ['a']);
+      broker.write('t', 2, ['b']);
+      broker.authDelayMs = 100;
+      const f = make((router) => new Fetcher(router, conn));
+      f.setAssignment([1, 2]);
+      const out = f.fetchPage('t');
+      // the metadata connection, then range 1's broker, still authenticating
+      await untilTrue(() => broker.sockets.length === 2);
+      f.setAssignment([2]);
+      assert.deepStrictEqual(await out, { kind: 'revoked' });
+      assert.deepStrictEqual(broker.fetches || [], [], 'nothing asked of range 1');
+    },
+    [
+      [1, 0, 8, 'self'],
+      [2, 8, 16, 'self'],
+    ],
+  ),
+);
+
+check('a follower moves on to where an empty page says the next one starts', () =>
+  withBroker(async (broker, make) => {
+    const f = make((router) => new Fetcher(router, conn, { atTail: 'wait' }));
+    // an empty page read from an ancestor's history names the range's own records next
+    broker.fetchPolicy = () => ({ next: [1, 0] });
+    await f.fetch('t');
+    broker.fetchPolicy = () => 'ok';
+    await f.fetch('t');
+    assert.deepStrictEqual(broker.fetches[1].start, { position: [1, 0] });
+  }),
+);
+
+check('a follower splits its wait across the ranges it reads, at least 200 ms each; the load generator waits none', () =>
+  withBroker(
+    async (broker, make) => {
+      for (const range of [1, 2, 3, 4]) broker.write('t', range, ['x']);
+      const waits = async (opts) => {
+        const f = make((router) => new Fetcher(router, conn, opts));
+        broker.fetches = [];
+        await f.fetch('t');
+        return broker.fetches[0].wait_ms;
+      };
+      assert.strictEqual(await waits({ waitMs: 5000 }), 1250);
+      assert.strictEqual(await waits({ waitMs: 500 }), 200, 'at least 200 ms');
+      assert.strictEqual(await waits({ waitMs: 100 }), 100, 'never more than asked');
+      assert.strictEqual(await waits({}), 0);
+      const member = make((router) => new Fetcher(router, conn, { waitMs: 5000 }));
+      member.setAssignment([3]);
+      broker.fetches = [];
+      await member.fetch('t');
+      assert.strictEqual(broker.fetches[0].wait_ms, 5000, 'split across the ranges it reads, not the topic');
+    },
+    [
+      [1, 0, 4, 'self'],
+      [2, 4, 8, 'self'],
+      [3, 8, 12, 'self'],
+      [4, 12, 16, 'self'],
+    ],
+  ),
 );
 
 check('fetcher options are checked', () => {
@@ -416,6 +517,88 @@ check('a closed consumer opens nothing more, even from a flush already on its wa
       await tick(300);
       assert.strictEqual(broker.consumes.length, 0, `opened ${broker.consumes.length} after close`);
       assert.ok(broker.sockets.every((s) => s.destroyed || s.readyState !== 'open'), 'no connection left open');
+    },
+    [
+      [1, 0, 8, 'self'],
+      [2, 8, 16, 'self'],
+    ],
+  ),
+);
+
+check('a range that leaves a member stops being read at once, its stream closed at the broker', () =>
+  withBroker(
+    async (broker, make) => {
+      broker.write('t', 1, ['a']);
+      broker.write('t', 2, ['b']);
+      const c = make((router) => new Consumer(router, conn, { decode: true, startFrom: { committed: 'g' } }));
+      c.setAssignment([1, 2]);
+      await c.start('t');
+      await untilTrue(() => records(c.events) === 2);
+      assert.ok(broker.consumes.every((x) => x.start.committed === 'g'), 'opened from the checkpoint');
+      const taken = broker.consumes.find((x) => x.range === 2).id;
+
+      c.setAssignment([1]);
+      // not behind the frames already queued: nothing of range 2 is read from here on
+      assert.deepStrictEqual([...c.streams].map((x) => readLanes.splitKey(x.key)[1]), [1]);
+      await untilTrue(() => broker.closes.includes(taken));
+      broker.write('t', 2, ['c']);
+      broker.pushRecords(taken, 1);
+      await tick(50);
+      assert.strictEqual(records(c.events), 2, 'a page of the range that left is not reported');
+      const read = c.events.filter((e) => e.kind === 'records').flatMap((e) => e.records.map((r) => String(r.value)));
+      assert.deepStrictEqual(read.sort(), ['a', 'b']);
+    },
+    [
+      [1, 0, 8, 'self'],
+      [2, 8, 16, 'self'],
+    ],
+  ),
+);
+
+check('a range taken while its broker is connected to is not opened, nor is a later one taken meanwhile', async () => {
+  for (const [keep, opened] of [
+    [[2], [2]],
+    [[1], [1]],
+  ]) {
+    await withBroker(
+      async (broker, make) => {
+        broker.authDelayMs = 100;
+        const c = make((router) => new Consumer(router, conn));
+        c.setAssignment([1, 2]);
+        const started = c.start('t');
+        // the metadata connection, then range 1's broker, still authenticating
+        await untilTrue(() => broker.sockets.length === 2);
+        c.setAssignment(keep);
+        await assert.doesNotReject(started);
+        await untilTrue(() => broker.consumes.length === 1);
+        await tick(50);
+        assert.deepStrictEqual(
+          broker.consumes.map((x) => x.range),
+          opened,
+        );
+      },
+      [
+        [1, 0, 8, 'self'],
+        [2, 8, 16, 'self'],
+      ],
+    );
+  }
+});
+
+check('a range that leaves while its stream opens has the stream closed once the open is answered', () =>
+  withBroker(
+    async (broker, make) => {
+      broker.write('t', 2, ['b']);
+      broker.consumePolicy = ({ range }) => (range === 2 ? { delayMs: 100 } : 'ok');
+      const c = make((router) => new Consumer(router, conn));
+      c.start('t');
+      await untilTrue(() => broker.consumes.some((x) => x.range === 2));
+      c.setAssignment([1]);
+      const opening = broker.consumes.find((x) => x.range === 2).id;
+      await untilTrue(() => broker.closes.includes(opening));
+      await tick(50);
+      assert.strictEqual(records(c.events), 0, 'its first page is not reported');
+      assert.ok(![...c.streams].some((x) => x.id === opening), 'nor kept as a stream');
     },
     [
       [1, 0, 8, 'self'],
