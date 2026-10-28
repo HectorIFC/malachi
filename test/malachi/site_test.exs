@@ -1565,6 +1565,14 @@ defmodule Malachi.SiteTest do
       assert html =~ ~s(class="tablist js-only")
     end
 
+    test "the hero's story is laid out as the script leaves it, and without JavaScript it stacks in full", %{root: root} do
+      stage!(root)
+      html = read(root, "doc/index.html")
+
+      assert html =~ ~s(class="hook is-live" data-scene="hook")
+      assert html =~ ".hook.is-live .story{grid-area:auto;visibility:visible}"
+    end
+
     test "the quickstart reads the admin password from the reader's shell, never a shared default", %{root: root} do
       stage!(root)
       html = read(root, "doc/index.html")

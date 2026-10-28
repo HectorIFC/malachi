@@ -18,7 +18,7 @@
 <link rel="stylesheet" href="../../styles.css">
 <link rel="stylesheet" href="../../tokens/marketing.css">
 <link rel="stylesheet" href="site.css">
-<noscript><style>.js-only{display:none!important}.tabs{display:grid;gap:16px}.panel[hidden],.vs-panel[hidden],.level[hidden]{display:grid!important}</style></noscript>
+<noscript><style>.js-only{display:none!important}.tabs{display:grid;gap:16px}.panel[hidden],.vs-panel[hidden],.level[hidden]{display:grid!important}.hook.is-live .story{grid-area:auto;visibility:visible}.hook.is-live .story span{opacity:1;transform:none}</style></noscript>
 <script src="site.js" defer></script>
 <script src="scenes.js" defer></script>
 <script src="model.js" defer></script>
@@ -35,9 +35,9 @@
 </header>
 <main id="main">
 <section class="hero wrap" aria-labelledby="hero-title">
-<div class="hook" data-scene="hook">
+<div class="hook is-live" data-scene="hook">
 <div class="hook-text">
-<p class="story"><span>A node just failed.</span> <span>How many orders were lost?</span> <span class="none">None.</span></p>
+<p class="story on"><span>A node just failed.</span> <span>How many orders were lost?</span> <span class="none">None.</span></p>
 <p class="story"><span>A topic split in two.</span> <span>How many records were copied?</span> <span class="none">None.</span></p>
 <p class="story"><span>A node restarted.</span> <span>How many cursors broke?</span> <span class="none">None.</span></p>
 </div>
