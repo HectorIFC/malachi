@@ -58,6 +58,7 @@ worktree.env
 node_modules/
 scripts/node_modules/
 package-lock.json
+!site/checks/package-lock.json
 scripts/package-lock.json
 
 # Release artifacts (keep rel/ for vm.args.eex template, built releases go in /_build/)
@@ -86,6 +87,7 @@ lefthook-local.yml
 
 # Plain-text files, documents and media (e.g. study notes, transcripts, source material)
 *.txt
+!site/ui_kits/website/llms.txt
 *.pdf
 *.mp4
 

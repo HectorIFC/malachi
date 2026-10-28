@@ -8,6 +8,24 @@
         "value": "roboto",
         "createdAt": "2026-08-27T02:29:14.441Z",
         "reason": "Roboto here is the Android/ChromeOS fallback inside the standard system stack (ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif) at benchmark/dashboard/index.html:39, not a chosen display face: no @font-face and no webfont link anywhere in the file, and git diff shows the line predates this change. Assistant decided; not confirmed by the user."
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "site/ui_kits/website/index.html"
+        ],
+        "createdAt": "2026-10-27T23:23:02.177Z",
+        "reason": "Rendered and measured in Chrome (2026-10-27): card header text has 12px inset, thesis caption 32px, facts rows 12px below their rule; the flagged edges are full-bleed canvases and structural rules, not text. Assistant decided after rendering the page; not confirmed by the user."
+      },
+      {
+        "rule": "all-caps-body",
+        "value": "*",
+        "files": [
+          "site/ui_kits/website/index.html"
+        ],
+        "createdAt": "2026-10-27T23:23:02.221Z",
+        "reason": "Uppercase is used only for short labels (.label, .facts dt, .vs-heads), which the rule allows. Assistant decided after rendering the page; not confirmed by the user."
       }
     ]
   }

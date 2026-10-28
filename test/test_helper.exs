@@ -51,4 +51,9 @@ end)
 # `:parallel_probe` tests exist only to be run by `Malachi.ParallelRunTest`, in a second VM started while
 # this suite runs; they are never part of a normal run.
 linux_only = if :os.type() == {:unix, :linux}, do: [], else: [:linux]
-ExUnit.start(exclude: [:multinode, :parallel_probe | linux_only])
+
+# The permission cases of the site staging tests only mean something to an ordinary user: root reads and searches
+# any file or folder whatever its mode. Under root they are excluded, and the run reports them as excluded, rather
+# than passing them with nothing asserted.
+root_only = if elem(System.cmd("id", ["-u"]), 0) |> String.trim() == "0", do: [:non_root], else: []
+ExUnit.start(exclude: [:multinode, :parallel_probe | linux_only] ++ root_only)

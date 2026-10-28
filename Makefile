@@ -1,4 +1,4 @@
-.PHONY: build run test docker-build docker-run docker-push clean release docker-buildx docker-buildx-push docker-buildx-setup docker-validate docker-regression-test
+.PHONY: build run test docker-build docker-run docker-push clean release docker-buildx docker-buildx-push docker-buildx-setup docker-validate docker-regression-test site-stage site-check site-serve site-jsonld site-motion
 
 APP_NAME = malachi
 DOCKER_USERNAME ?= hectorcardoso
@@ -99,3 +99,30 @@ clean:
 	docker rmi $(DOCKER_USERNAME)/$(APP_NAME):latest || true
 
 all: build test docker-build
+
+# Landing page. `mix docs` stages the page into doc/; these targets run the checks by hand. None of them measures
+# performance: the Lighthouse and browser checks run on Linux in CI, not on a laptop.
+# doc/llms.txt is this page's own summary here: ExDoc writes llms.txt only with the markdown formatter, which mix.exs
+# does not enable. Removing it first lets staging write it again, instead of refusing a summary from an older build.
+site-stage:
+	rm -f doc/llms.txt
+	mix docs --warnings-as-errors
+
+site-check:
+	mix malachi.docs.site --check
+
+site-serve:
+	@echo "serving doc/ at http://127.0.0.1:8080/ (Ctrl-C to stop)"
+	python3 -m http.server 8080 --bind 127.0.0.1 --directory doc
+
+site-jsonld:
+	@sed -n 's/.*<script type="application\/ld+json">\(.*\)<\/script>.*/\1/p' doc/index.html > doc/jsonld.json
+	@echo "wrote doc/jsonld.json: paste it at https://validator.schema.org"
+
+site-motion:
+	@echo "Reduced motion, by hand (run make site-serve first):"
+	@echo "  1. Open http://127.0.0.1:8080/ in Chrome, with DevTools open (Cmd+Option+I)"
+	@echo "  2. Cmd+Shift+P, type 'Emulate CSS prefers-reduced-motion', choose reduce"
+	@echo "  3. Reload: every scene shows a still frame and does not move"
+	@echo "  4. Turn the emulation off. Press Tab until a scene has focus, then Space: it pauses. Space again: it resumes"
+	@echo "  5. Scroll a scene out of view and back: it stops while hidden and resumes"

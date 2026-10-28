@@ -354,6 +354,20 @@ jobs:
         run: mix docs --warnings-as-errors
         env:
           MIX_ENV: dev
+
+      # The landing page is staged by the docs alias, and --check proves what it staged: the links, the sitemap,
+      # the fonts and the page files. The landing-page job below takes the same tree to the browser.
+      - name: 🏠 Check the landing page is staged
+        run: mix malachi.docs.site --check
+        env:
+          MIX_ENV: dev
+
+      - name: 📤 Upload the built documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: landing-page-doc
+          path: doc/
+          retention-days: 1
       
       - name: 🔍 Check for TODO/FIXME comments
         run: |
@@ -461,7 +475,7 @@ jobs:
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [test, docker, quality, multinode, dialyzer]
+    needs: [test, docker, quality, multinode, dialyzer, landing-page]
     if: always()
 
     steps:
@@ -472,6 +486,7 @@ jobs:
           echo "Quality Status: ${{ needs.quality.result }}"
           echo "Multinode Status: ${{ needs.multinode.result }}"
           echo "Dialyzer Status: ${{ needs.dialyzer.result }}"
+          echo "Landing Page Status: ${{ needs.landing-page.result }}"
 
           if [ "${{ needs.test.result }}" != "success" ]; then
             echo "❌ Tests failed!"
@@ -492,5 +507,60 @@ jobs:
             echo "❌ Docker build failed!"
             exit 1
           fi
+
+          if [ "${{ needs.landing-page.result }}" != "success" ]; then
+            echo "❌ Landing page checks failed!"
+            exit 1
+          fi
           
           echo "✅ All critical checks passed!"
+
+  # The landing page in a browser, on the built doc/ of this pull request. Lighthouse scores, a 360px layout with no
+  # sideways scroll, every heading and paragraph with JavaScript off, and no CSS animation under reduced motion.
+  # The checks live in site/checks and their versions are pinned by its lockfile. Runs on Linux only: the scores
+  # are measured here and nowhere else.
+  landing-page:
+    name: Landing page checks
+    runs-on: ubuntu-latest
+    # quality uploads the artifact this job downloads, so it must finish first. Without it the download can run
+    # before the upload, and a quality failure before the upload would hide its real cause behind a download error.
+    needs: [test, quality]
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 🟢 Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 📥 Download the built documentation
+        uses: actions/download-artifact@v4
+        with:
+          name: landing-page-doc
+          path: doc
+
+      - name: 📦 Install the checks
+        working-directory: site/checks
+        run: npm ci
+
+      - name: 🌐 Install Chromium for Playwright
+        working-directory: site/checks
+        run: npx playwright install --with-deps chromium
+
+      - name: 🚀 Serve the landing page
+        run: |
+          python3 -m http.server 8080 --bind 127.0.0.1 --directory doc > "$RUNNER_TEMP/serve.log" 2>&1 &
+          for _ in $(seq 1 20); do
+            curl -fsS http://127.0.0.1:8080/ > /dev/null && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/serve.log"
+          exit 1
+
+      - name: ✅ Run the landing page checks
+        working-directory: site/checks
+        run: node run.mjs http://127.0.0.1:8080/

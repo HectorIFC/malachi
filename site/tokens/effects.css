@@ -1,0 +1,20 @@
+:root{
+/* shadcn v4 radius ladder on --radius 0.625rem; matches benchmark page (card 10px, panel 12px, cmd 6px) */
+--radius:10px;
+--radius-sm:6px;
+--radius-md:8px;
+--radius-lg:10px;
+--radius-xl:14px;
+--radius-full:9999px;
+--border-width:1px;
+--shadow-xs:0px 1px 2px 0px var(--shadow-color-faint);
+--shadow-sm:0px 1px 3px 0px var(--shadow-color-strong),0px 1px 2px -1px var(--shadow-color-strong);
+--shadow-lg:0px 10px 15px -3px var(--shadow-color-strong),0px 4px 6px -4px var(--shadow-color-strong);
+--ring-width:3px;
+/* motion: nothing above 150ms, only on operator-caused state */
+--motion-instant:0ms; /* @kind other */
+--motion-fast:100ms; /* @kind other */
+--motion-base:150ms; /* @kind other */
+--ease-standard:cubic-bezier(0.2,0,0,1); /* @kind other */
+}
+@media (prefers-reduced-motion:reduce){:root{--motion-fast:0ms; /* @kind other */ --motion-base:0ms; /* @kind other */}}

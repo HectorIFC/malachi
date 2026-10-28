@@ -3,6 +3,9 @@ defmodule Malachi.MixProject do
 
   @version "0.22.4"
   @source_url "https://github.com/HectorIFC/malachi"
+  # Where the published site lives. Once the site's staging task is wired into the docs build (see Malachi.Site),
+  # its sitemap and robots.txt will be built from this value, so a custom domain will change this one line.
+  @site_url "https://hectorifc.github.io/malachi"
 
   def project do
     [
@@ -15,6 +18,7 @@ defmodule Malachi.MixProject do
       description: description(),
       package: package(),
       source_url: @source_url,
+      site_url: @site_url,
       docs: docs(),
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls, threshold: 85],
@@ -58,7 +62,7 @@ defmodule Malachi.MixProject do
       # neither has to pass the flag and local output matches CI. Overriding `docs` here does not recurse:
       # Mix runs the underlying docs task (forwarding any CLI args to it) and then the copy function (the
       # documented idiom, e.g. `test: ["test", &fun/1]`).
-      docs: ["malachi.docs.results", "docs --warnings-as-errors", &copy_benchmarks/1],
+      docs: ["malachi.docs.results", "docs --warnings-as-errors", &copy_benchmarks/1, "malachi.docs.site"],
       # The suite boots the application itself, after naming the node (test/test_helper.exs), the order a
       # release has: the control plane is an `ra` cluster whose members are named after the node, so a node
       # renamed after boot would be asking a member that no longer exists by that name (#273). Any CLI args

@@ -29,6 +29,7 @@ defmodule Mix.Tasks.Malachi.Tokens do
 
   use Mix.Task
 
+  alias Malachi.SourceFile
   alias Malachi.UI.TokenGen
 
   @switches [check: :boolean, root: :string]
@@ -65,10 +66,7 @@ defmodule Mix.Tasks.Malachi.Tokens do
   end
 
   defp read_source(root) do
-    case root |> Path.join(TokenGen.source()) |> File.read() do
-      {:ok, text} -> text
-      {:error, reason} -> Mix.raise("#{TokenGen.source()}: cannot be read (#{:file.format_error(reason)})")
-    end
+    SourceFile.read!(Path.join(root, TokenGen.source()), TokenGen.source())
   end
 
   defp write_output(root, path, content) do

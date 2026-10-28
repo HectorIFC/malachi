@@ -1,0 +1,30 @@
+/* operator-interfaces.md 4.4: system stack for interface text; monospace + tabular-nums for every
+   identifier, cursor, key, offset, byte size, hash and duration. No webfonts are shipped. */
+:root{
+--font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+--font-mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+--text-2xs:11px;
+--text-xs:12px;
+--text-sm:13px;
+--text-base:14px;
+--text-md:15px;
+--text-lg:18px;
+--text-xl:22px;
+--text-2xl:24px;
+--text-display:56px;
+--leading-tight:1.25;
+--leading-normal:1.5;
+--weight-regular:400;
+--weight-medium:500;
+--weight-semibold:600;
+--weight-bold:700;
+--weight-heavy:800;
+--tracking-display:-0.03em;
+--tracking-title:-0.01em;
+--tracking-figure:-0.02em;
+--tracking-label:0.04em;
+--tracking-section:0.06em;
+/* semantic */
+--type-body:var(--weight-regular) var(--text-base)/var(--leading-normal) var(--font-sans);
+--type-mono:var(--weight-regular) var(--text-sm)/var(--leading-normal) var(--font-mono);
+}
