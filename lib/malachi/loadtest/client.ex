@@ -1,8 +1,7 @@
 defmodule Malachi.Loadtest.Client do
   @moduledoc """
-  A client of the stream and group keys for short checks against a running node: the release checks the
-  Docker scripts run through `bin/malachi rpc` (`scripts/docker-regression-test.sh`,
-  `scripts/docker-single-node-restart.sh`, `scripts/validate-docker-build.sh`).
+  A client of the stream and group keys for short checks against a running node, small enough to drive
+  from `bin/malachi rpc` against a release.
 
   It works as any client does, over the wire. It reads the routes from `cluster_state` and `topic_routes`
   (`Malachi.Loadtest.Router`) and writes and reads each range at the broker that leads it
@@ -39,13 +38,20 @@ defmodule Malachi.Loadtest.Client do
   def connect(opts) do
     conn_opts = Keyword.take(opts, [:host, :port, :user, :pass])
 
-    with {:ok, conn} <- Conn.connect(conn_opts),
-         {:ok, conn} <- Conn.authenticate(conn, conn_opts) do
-      case Router.bootstrap(Router.new({Keyword.fetch!(opts, :host), Keyword.fetch!(opts, :port)}), conn) do
-        {:ok, router, conn} -> {:ok, %__MODULE__{router: router, conn: conn, conn_opts: conn_opts}}
-        {:legacy, reason, conn} -> close_with(conn, {:error, reason})
-        {:error, _reason} = error -> error
+    with {:ok, conn} <- Conn.connect(conn_opts) do
+      # a connection this call could not finish with is closed here, never left to its caller's exit
+      case Conn.authenticate(conn, conn_opts) do
+        {:ok, conn} -> bootstrap(conn, opts, conn_opts)
+        {:error, _reason} = error -> close_with(conn, error)
       end
+    end
+  end
+
+  defp bootstrap(conn, opts, conn_opts) do
+    case Router.bootstrap(Router.new({Keyword.fetch!(opts, :host), Keyword.fetch!(opts, :port)}), conn) do
+      {:ok, router, conn} -> {:ok, %__MODULE__{router: router, conn: conn, conn_opts: conn_opts}}
+      {:legacy, reason, conn} -> close_with(conn, {:error, reason})
+      {:error, _reason} = error -> close_with(conn, error)
     end
   end
 
@@ -83,13 +89,14 @@ defmodule Malachi.Loadtest.Client do
   end
 
   @doc """
-  Reads `topic` to its end within `timeout_ms`: every active range from `opts[:start_from]` (`:earliest`,
-  the default, or `{:committed, group}`, that group's checkpoint) until each one answered a page with
-  nothing new.
+  Reads `topic` to its end within `timeout_ms`: every active range, or only `opts[:ranges]` (a group
+  member's assignment, as `join/4` hands it), from `opts[:start_from]` (`:earliest`, the default, or
+  `{:committed, group}`, that group's checkpoint) until each one answered a page with nothing new.
 
   `{:ok, %{values: values, positions: positions}}`, where `values` are in the order each range holds them
-  and `positions` holds, by range, where its next page starts: what a member commits once it has read
-  them. Routing answers (routes moved or held back, a dropped connection, no broker that takes one, routes
+  and `positions` holds, by range read, where its next page starts: what a member commits once it has read
+  them. A member of a group of more than one reads with `ranges:`, since a commit naming a range the group
+  did not hand it is refused (`not_assigned`); one handed no range reads nothing. Routing answers (routes moved or held back, a dropped connection, no broker that takes one, routes
   not readable yet) are waited out until `opts[:timeout_ms]` (10 s unless given). `{:error, reason}` on any
   other refusal, or `{:error, :timeout}`.
   """
@@ -99,11 +106,13 @@ defmodule Malachi.Loadtest.Client do
       Fetcher.new(client.router, client.conn_opts,
         at_tail: :wait,
         max: 1_000,
-        start_from: Keyword.get(opts, :start_from, :earliest)
+        start_from: Keyword.get(opts, :start_from, :earliest),
+        ranges: Keyword.get(opts, :ranges)
       )
 
     deadline = mono_ms() + Keyword.get(opts, :timeout_ms, 10_000)
-    {fetcher, result} = drain(fetcher, topic, deadline, %{values: [], positions: %{}, quiet: %{}})
+    acc = %{values: [], positions: %{}, quiet: %{}, ranges: Keyword.get(opts, :ranges)}
+    {fetcher, result} = drain(fetcher, topic, deadline, acc)
     Fetcher.close(fetcher)
     result
   end
@@ -115,6 +124,7 @@ defmodule Malachi.Loadtest.Client do
     else
       case Fetcher.fetch_page(fetcher, topic, mono_ms()) do
         {fetcher, {:page, page}} -> drained(fetcher, topic, deadline, page_into(acc, page), page)
+        {fetcher, :unassigned} -> {fetcher, {:ok, %{values: [], positions: %{}}}}
         {fetcher, {:held, ms}} -> retry(fetcher, topic, deadline, acc, ms)
         {fetcher, routing} when routing in [:redirected, :dropped] -> retry(fetcher, topic, deadline, acc, @retry_ms)
         {fetcher, {:error, reason}} when reason in @routing_errors -> retry(fetcher, topic, deadline, acc, @retry_ms)
@@ -123,8 +133,12 @@ defmodule Malachi.Loadtest.Client do
     end
   end
 
+  # Read through once every range it reads (the active ones, or those of `ranges:` among them) answered a
+  # page with nothing new since its last one that brought some.
   defp drained(fetcher, topic, deadline, acc, page) do
-    if Enum.all?(page.active, &Map.has_key?(acc.quiet, &1)),
+    reading = if acc.ranges == nil, do: page.active, else: Enum.filter(page.active, &(&1 in acc.ranges))
+
+    if Enum.all?(reading, &Map.has_key?(acc.quiet, &1)),
       do: {fetcher, {:ok, %{values: acc.values, positions: acc.positions}}},
       else: drain(fetcher, topic, deadline, acc)
   end

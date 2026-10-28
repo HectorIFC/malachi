@@ -23,8 +23,13 @@ defmodule Malachi.Loadtest.ClientTest do
   defp opts(user, pass), do: [host: "127.0.0.1", port: TCPAcceptorPool.port(), user: user, pass: pass]
   defp records(values), do: Enum.map(values, &Record.new(&1, key: &1))
 
-  test "credentials the node refuses are the connect's error" do
+  # The ports (sockets) this process owns now.
+  defp own_ports, do: Enum.filter(Port.list(), &(Port.info(&1, :connected) == {:connected, self()}))
+
+  test "credentials the node refuses are the connect's error, and its connection is closed" do
+    before = own_ports()
     assert {:error, _reason} = Client.connect(opts("admin", "not-the-password"))
+    assert own_ports() == before
   end
 
   test "a topic is created once: a second create is the node's refusal", %{client: client, topic: topic} do
@@ -72,6 +77,39 @@ defmodule Malachi.Loadtest.ClientTest do
     assert Client.leave(client, topic, "rg", "m1") == :ok
   end
 
+  test "two members of a group each read their own share, commit it, and between them read every record once",
+       %{client: client, topic: topic} do
+    :ok = Client.create_topic(client, topic, 4)
+    values = for i <- 1..30, do: "m#{i}"
+    {:ok, 30} = Client.produce(client, topic, records(values), 5_000)
+    {:ok, _left, _right} = BrokerServer.split_range(DataPlaneRouter.shard_for(topic), {topic, 0})
+
+    # a second member whose name hashes one child to each, so the two split the topic
+    {:ok, %{ranges: [_, _]}} = Client.join(client, topic, "pair", "a")
+    second = Enum.find(for(i <- 1..100, do: "b#{i}"), &one_each?(client, topic, &1))
+    {:ok, %{generation: generation, ranges: [theirs]}} = Client.join(client, topic, "pair", second)
+    {:ok, %{generation: ^generation, ranges: [mine]}} = Client.join(client, topic, "pair", "a")
+
+    reads =
+      for {member, ranges} <- [{"a", [mine]}, {second, [theirs]}] do
+        {:ok, %{values: read, positions: positions}} =
+          Client.read(client, topic, start_from: {:committed, "pair"}, ranges: ranges)
+
+        assert Map.keys(positions) == ranges, "a member reads, and commits, its own share only"
+        assert Client.commit(client, topic, "pair", member, generation, positions) == :ok
+        read
+      end
+
+    assert Enum.all?(reads, &(&1 != []))
+    assert reads |> List.flatten() |> Enum.sort() == Enum.sort(values)
+  end
+
+  test "a member the group handed no range reads nothing", %{client: client, topic: topic} do
+    :ok = Client.create_topic(client, topic, 4)
+    {:ok, 1} = Client.produce(client, topic, records(["x"]), 5_000)
+    assert Client.read(client, topic, ranges: []) == {:ok, %{values: [], positions: %{}}}
+  end
+
   test "a commit the group refuses is the commit's error", %{client: client, topic: topic} do
     :ok = Client.create_topic(client, topic, 4)
     assert {:error, "unknown_member"} = Client.commit(client, topic, "rg", "ghost", 0, %{0 => {0, 0}})
@@ -92,6 +130,13 @@ defmodule Malachi.Loadtest.ClientTest do
     :ok = Client.create_topic(client, topic, 4)
     {:ok, 1} = Client.produce(client, topic, records(["t"]), 5_000)
     assert Client.read(client, topic, timeout_ms: 0) == {:error, :timeout}
+  end
+
+  # Whether `name`, joining the topic's group "probe" beside "a", is handed one of its two ranges.
+  defp one_each?(client, topic, name) do
+    {:ok, _} = Client.join(client, topic, "probe_#{name}", "a")
+    {:ok, %{ranges: ranges}} = Client.join(client, topic, "probe_#{name}", name)
+    length(ranges) == 1
   end
 
   describe "against a broker a test steers" do

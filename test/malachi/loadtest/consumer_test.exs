@@ -271,6 +271,20 @@ defmodule Malachi.Loadtest.ConsumerTest do
       assert_raise ArgumentError, ~r/at_tail must be :restart or :wait/, fn -> fetcher(ctx, at_tail: :never) end
     end
 
+    test "ranges reads only the ranges a member was handed, and none is unassigned", ctx do
+      produce!(ctx, for(i <- 1..10, do: "q#{i}"))
+      {:ok, {_left_topic, left}, {_right_topic, right}} = split!(ctx, 0)
+
+      f = fetcher(ctx, at_tail: :wait, ranges: [right])
+      {pages, f} = Enum.map_reduce(1..3, f, fn _, f -> f |> Fetcher.fetch_page(ctx.topic, now()) |> swap() end)
+      assert Enum.all?(pages, &match?({:page, %{range: ^right}}, &1)), "never #{left}"
+      Fetcher.close(f)
+
+      assert {_f, :unassigned} = Fetcher.fetch_page(fetcher(ctx, ranges: []), ctx.topic, now())
+
+      assert_raise ArgumentError, ~r/ranges must be nil or a list/, fn -> fetcher(ctx, ranges: :all) end
+    end
+
     test "start_from must be :earliest or a group's checkpoint", ctx do
       assert_raise ArgumentError, ~r/start_from must be :earliest or \{:committed, group\}/, fn ->
         fetcher(ctx, start_from: :latest)

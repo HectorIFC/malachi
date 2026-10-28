@@ -8,8 +8,9 @@ defmodule Malachi.Loadtest.Fetcher do
   starts, so a reader that wants every record once (the chaos checker) asks from the end it reached. An
   empty page can still move on: from a position in an ancestor's history that held nothing of the range's
   slice, it names the range's own records next. Where a range with no ancestor read starts is the
-  `:start_from` option: `:earliest` (the default), or a group's checkpoint, `{:committed, group}`. As the
-  Node fetcher (`scripts/lib/fetcher.js`) does both.
+  `:start_from` option: `:earliest` (the default), or a group's checkpoint, `{:committed, group}`. Which
+  ranges it reads is the `:ranges` option: every active one (`nil`, the default), or only those a group
+  member was handed (their sequence numbers). As the Node fetcher (`scripts/lib/fetcher.js`) does all three.
 
   The connections are passive (a request, then its answer); connections, routes and their backoffs go
   through `Malachi.Loadtest.Links`, and lanes and what a split hands its children through
@@ -27,7 +28,8 @@ defmodule Malachi.Loadtest.Fetcher do
     * `:redirected`: the routes it went by were behind the cluster's (`moved`, `stale_routes`, `not_owner`,
       `migrating`, or a primary they name with no address), read again for the next fetch, which is not an
       op (after a backoff, for a primary with no address);
-    * `:dropped`: the connection failed; the range's broker is connected to again on a later fetch.
+    * `:dropped`: the connection failed; the range's broker is connected to again on a later fetch;
+    * `:unassigned`: `:ranges` holds none of the topic's active ranges; nothing was asked of anyone.
   """
 
   import Malachi.Loadtest.Links, only: [bump: 2, ensure_routes: 3, forget: 2, is_redirect: 1, put_conn: 3]
@@ -43,7 +45,7 @@ defmodule Malachi.Loadtest.Fetcher do
   @typedoc """
   A page as `fetch_page/3` gives it: the range it came from (`range`, its number, and `block`, its keyspace
   block in a keyspace of `size` keys), the topic's active ranges by the routes it was fetched by (`active`),
-  where it was asked from (`from`: `:earliest` or `{:position, p}`) and where the range's next page starts
+  where it was asked from (`from`: `:earliest`, `{:committed, group}` or `{:position, p}`) and where the range's next page starts
   (`to`), and the values of the records new to this reader, in the order the range holds them.
   """
   @type fetched :: %{
@@ -63,6 +65,7 @@ defmodule Malachi.Loadtest.Fetcher do
           | {:held, pos_integer()}
           | :redirected
           | :dropped
+          | :unassigned
 
   @max_bytes 1_048_576
   # What a page's batch may inflate to: the broker sends at least one whole batch per page, so a page can
@@ -77,6 +80,7 @@ defmodule Malachi.Loadtest.Fetcher do
     max: 100,
     at_tail: :restart,
     start_from: :earliest,
+    ranges: nil,
     unroutable: %{},
     conns: %{},
     sockets: %{},
@@ -91,8 +95,9 @@ defmodule Malachi.Loadtest.Fetcher do
 
   @doc """
   A fetcher routing by `router` and connecting with `conn_opts`. Options: `:max`, records per page at most
-  (100); `:at_tail`, `:restart` (the default) or `:wait`; and `:start_from`, `:earliest` (the default) or
-  `{:committed, group}` (see the moduledoc).
+  (100); `:at_tail`, `:restart` (the default) or `:wait`; `:start_from`, `:earliest` (the default) or
+  `{:committed, group}`; and `:ranges`, `nil` (the default) or the sequence numbers of the ranges to read
+  (see the moduledoc).
   """
   @spec new(Router.t(), keyword(), keyword()) :: t()
   def new(%Router{} = router, conn_opts, opts \\ []) do
@@ -109,12 +114,20 @@ defmodule Malachi.Loadtest.Fetcher do
         value -> raise ArgumentError, "start_from must be :earliest or {:committed, group}, got: #{inspect(value)}"
       end
 
+    ranges =
+      case Keyword.get(opts, :ranges) do
+        nil -> nil
+        list when is_list(list) -> MapSet.new(list)
+        value -> raise ArgumentError, "ranges must be nil or a list of range numbers, got: #{inspect(value)}"
+      end
+
     %__MODULE__{
       router: router,
       conn_opts: conn_opts,
       max: Options.positive!(opts, :max, 100),
       at_tail: at_tail,
-      start_from: start_from
+      start_from: start_from,
+      ranges: ranges
     }
   end
 
@@ -181,12 +194,24 @@ defmodule Malachi.Loadtest.Fetcher do
 
       {:ok, f} ->
         f = reconcile(f, topic)
-        %{ranges: ranges} = Router.routes(f.router, topic)
-        %{range: range} = Enum.at(ranges, rem(f.turn, length(ranges)))
-        fetch_range(%{f | turn: f.turn + 1}, {topic, range}, now)
+
+        case readable(f, topic) do
+          [] ->
+            {f, :unassigned}
+
+          ranges ->
+            %{range: range} = Enum.at(ranges, rem(f.turn, length(ranges)))
+            fetch_range(%{f | turn: f.turn + 1}, {topic, range}, now)
+        end
     end
   end
 
+  # The active ranges of `topic` this fetcher reads: every one, or those `:ranges` holds.
+  defp readable(%__MODULE__{ranges: nil} = f, topic), do: Router.routes(f.router, topic).ranges
+  defp readable(f, topic), do: Enum.filter(Router.routes(f.router, topic).ranges, &MapSet.member?(f.ranges, &1.range))
+
+  # Over every active range, read or not: a range `:ranges` leaves out is still one the routes hold, not
+  # one gone that hands its position on.
   defp reconcile(f, topic) do
     %{ranges: ranges} = Router.routes(f.router, topic)
     # a range no ancestor of which was read starts where the fetcher was told to; one an ancestor was read
@@ -241,8 +266,9 @@ defmodule Malachi.Loadtest.Fetcher do
     end
   end
 
-  # Where a range's next fetch starts after a page: past it, or, when it brought nothing new, back at the
-  # start of its history (`at_tail: :restart`) or where it is (`:wait`).
+  # Where a range's next fetch starts after a page: past it; or, when it brought nothing new, back at the
+  # start of its history (`at_tail: :restart`) or where the page says the next one starts (`:wait`), which
+  # is past an ancestor's history the range's slice held nothing of.
   defp advance(f, key, lane, page, brought_any?) do
     start = if brought_any? or f.at_tail == :wait, do: {:position, page.next}, else: :earliest
 
