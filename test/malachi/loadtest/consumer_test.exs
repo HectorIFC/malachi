@@ -11,6 +11,7 @@ defmodule Malachi.Loadtest.ConsumerTest do
 
   alias Malachi.BrokerServer
   alias Malachi.DataPlaneRouter
+  alias Malachi.Keyspace
   alias Malachi.Loadtest.Conn
   alias Malachi.Loadtest.Consumer
   alias Malachi.Loadtest.Fetcher
@@ -19,6 +20,7 @@ defmodule Malachi.Loadtest.ConsumerTest do
   alias Malachi.Loadtest.ReadLanes
   alias Malachi.Loadtest.Router
   alias Malachi.Log.Record
+  alias Malachi.Metadata
   alias Malachi.TCPAcceptorPool
   alias Malachi.Test.StreamsOn
   alias Malachi.Test.StreamStub
@@ -237,6 +239,18 @@ defmodule Malachi.Loadtest.ConsumerTest do
       f
     end
 
+    # The first `n` pages of range `range`, fetching every range of `topic` in turn.
+    defp fetch_pages_of(f, topic, range, n, acc \\ []) do
+      if length(acc) == n do
+        {f, Enum.reverse(acc)}
+      else
+        case Fetcher.fetch_page(f, topic, now()) do
+          {f, {:page, %{range: ^range} = page}} -> fetch_pages_of(f, topic, range, n, [page | acc])
+          {f, _other} -> fetch_pages_of(f, topic, range, n, acc)
+        end
+      end
+    end
+
     defp fetch_n(f, topic, n), do: Enum.map_reduce(1..n, f, fn _, f -> f |> Fetcher.fetch(topic, now()) |> swap() end)
     defp swap({f, result}), do: {result, f}
 
@@ -255,6 +269,46 @@ defmodule Malachi.Loadtest.ConsumerTest do
 
     test "at_tail must be :restart or :wait", ctx do
       assert_raise ArgumentError, ~r/at_tail must be :restart or :wait/, fn -> fetcher(ctx, at_tail: :never) end
+    end
+
+    test "start_from must be :earliest or a group's checkpoint", ctx do
+      assert_raise ArgumentError, ~r/start_from must be :earliest or \{:committed, group\}/, fn ->
+        fetcher(ctx, start_from: :latest)
+      end
+    end
+
+    test "start_from a group's checkpoint reads a range from where the group committed", ctx do
+      produce!(ctx, for(i <- 1..5, do: "c#{i}"))
+      shard = DataPlaneRouter.shard_for(ctx.topic)
+      :ok = BrokerServer.commit_offset(shard, "g", ctx.topic, %{{ctx.topic, 0} => {0, 3}}, 1)
+
+      f = fetcher(ctx, at_tail: :wait, start_from: {:committed, "g"})
+      {_f, {:page, page}} = Fetcher.fetch_page(f, ctx.topic, now())
+      assert page.from == {:committed, "g"}
+      assert length(page.values) == 2
+    end
+
+    test "at_tail: :wait moves on to where an empty page says the next one starts", ctx do
+      # every record in the left half of the keyspace, then a split: the right child's history holds its
+      # parent's records, none of them in its slice, so its first page is empty and names its own records next
+      [%{keyspace_size: size}] =
+        ctx.topic
+        |> DataPlaneRouter.shard_for()
+        |> BrokerServer.metadata()
+        |> Metadata.active_ranges_of_topic(ctx.topic)
+
+      left =
+        Enum.filter(for(i <- 1..200, do: "w#{i}"), &(Keyspace.position_of(&1, size) < div(size, 2))) |> Enum.take(3)
+
+      produce!(ctx, left)
+      {:ok, _left_id, {_topic, right}} = split!(ctx, 0)
+
+      f = fetcher(ctx, at_tail: :wait)
+      {f, right_pages} = fetch_pages_of(f, ctx.topic, right, 2)
+      assert [%{values: [], from: :earliest, to: own}, %{from: second_from}] = right_pages
+      assert second_from == {:position, own}
+      assert elem(own, 0) == 1, "the right child's own records come after its one ancestor"
+      Fetcher.close(f)
     end
 
     test "pages every record of every range, then starts each range over at its end", ctx do

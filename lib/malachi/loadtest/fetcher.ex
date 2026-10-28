@@ -4,8 +4,12 @@ defmodule Malachi.Loadtest.Fetcher do
   range of a topic in turn, each request to the broker the routes say serves the range. Where a range's
   next fetch starts moves past each page it reads. What a page that brings nothing new does is the
   `:at_tail` option: `:restart` (the default, the load generator's) sends that range back to the start of
-  its history, so a reader keeps pulling a backlog; `:wait` keeps it where it is, so a reader that wants
-  every record once (the chaos checker) asks again from the end it reached.
+  its history, so a reader keeps pulling a backlog; `:wait` asks again from where the page says the next one
+  starts, so a reader that wants every record once (the chaos checker) asks from the end it reached. An
+  empty page can still move on: from a position in an ancestor's history that held nothing of the range's
+  slice, it names the range's own records next. Where a range with no ancestor read starts is the
+  `:start_from` option: `:earliest` (the default), or a group's checkpoint, `{:committed, group}`. As the
+  Node fetcher (`scripts/lib/fetcher.js`) does both.
 
   The connections are passive (a request, then its answer); connections, routes and their backoffs go
   through `Malachi.Loadtest.Links`, and lanes and what a split hands its children through
@@ -72,6 +76,7 @@ defmodule Malachi.Loadtest.Fetcher do
     control: nil,
     max: 100,
     at_tail: :restart,
+    start_from: :earliest,
     unroutable: %{},
     conns: %{},
     sockets: %{},
@@ -86,7 +91,8 @@ defmodule Malachi.Loadtest.Fetcher do
 
   @doc """
   A fetcher routing by `router` and connecting with `conn_opts`. Options: `:max`, records per page at most
-  (100), and `:at_tail`, `:restart` (the default) or `:wait` (see the moduledoc).
+  (100); `:at_tail`, `:restart` (the default) or `:wait`; and `:start_from`, `:earliest` (the default) or
+  `{:committed, group}` (see the moduledoc).
   """
   @spec new(Router.t(), keyword(), keyword()) :: t()
   def new(%Router{} = router, conn_opts, opts \\ []) do
@@ -96,7 +102,20 @@ defmodule Malachi.Loadtest.Fetcher do
         value -> raise ArgumentError, "at_tail must be :restart or :wait, got: #{inspect(value)}"
       end
 
-    %__MODULE__{router: router, conn_opts: conn_opts, max: Options.positive!(opts, :max, 100), at_tail: at_tail}
+    start_from =
+      case Keyword.get(opts, :start_from, :earliest) do
+        :earliest -> :earliest
+        {:committed, group} = value when is_binary(group) -> value
+        value -> raise ArgumentError, "start_from must be :earliest or {:committed, group}, got: #{inspect(value)}"
+      end
+
+    %__MODULE__{
+      router: router,
+      conn_opts: conn_opts,
+      max: Options.positive!(opts, :max, 100),
+      at_tail: at_tail,
+      start_from: start_from
+    }
   end
 
   @doc """
@@ -170,7 +189,9 @@ defmodule Malachi.Loadtest.Fetcher do
 
   defp reconcile(f, topic) do
     %{ranges: ranges} = Router.routes(f.router, topic)
-    new_lane = fn block, start -> %{block: block, start: start} end
+    # a range no ancestor of which was read starts where the fetcher was told to; one an ancestor was read
+    # of starts where that read reached
+    new_lane = fn block, start -> %{block: block, start: if(start == :earliest, do: f.start_from, else: start)} end
     {lanes, retired} = ReadLanes.reconcile(f.lanes, f.retired, topic, ranges, fn _lane -> true end, new_lane)
     %{f | lanes: lanes, retired: retired}
   end
@@ -223,12 +244,7 @@ defmodule Malachi.Loadtest.Fetcher do
   # Where a range's next fetch starts after a page: past it, or, when it brought nothing new, back at the
   # start of its history (`at_tail: :restart`) or where it is (`:wait`).
   defp advance(f, key, lane, page, brought_any?) do
-    start =
-      cond do
-        brought_any? -> {:position, page.next}
-        f.at_tail == :restart -> :earliest
-        true -> lane.start
-      end
+    start = if brought_any? or f.at_tail == :wait, do: {:position, page.next}, else: :earliest
 
     %{f | lanes: Map.put(f.lanes, key, %{lane | start: start})}
   end
