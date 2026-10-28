@@ -1,7 +1,7 @@
 defmodule Malachi.MixProject do
   use Mix.Project
 
-  @version "0.22.4"
+  @version "0.22.5"
   @source_url "https://github.com/HectorIFC/malachi"
   # Where the published site lives. Once the site's staging task is wired into the docs build (see Malachi.Site),
   # its sitemap and robots.txt will be built from this value, so a custom domain will change this one line.
