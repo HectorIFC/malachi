@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "version": "v1.1.0",
+  "entity": {
+    "type": "individual",
+    "role": "owner",
+    "name": "Hector Cardoso",
+    "email": "hectorwilliancardoso@gmail.com",
+    "description": "Sole maintainer of Malachi, an open source message broker written in Elixir.",
+    "webpageUrl": {
+      "url": "https://github.com/HectorIFC"
+    }
+  },
+  "projects": [
+    {
+      "guid": "malachi",
+      "name": "Malachi",
+      "description": "A message broker written in Elixir on the BEAM, with a Raft control plane (ra) and a web dashboard.",
+      "webpageUrl": {
+        "url": "https://hectorifc.github.io/malachi/"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/HectorIFC/malachi"
+      },
+      "licenses": ["MIT"],
+      "tags": ["message-broker", "elixir", "erlang", "beam", "raft"]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "github-sponsors",
+        "type": "payment-provider",
+        "address": "https://github.com/sponsors/HectorIFC",
+        "description": "GitHub Sponsors: monthly sponsorships of any amount."
+      }
+    ],
+    "plans": [
+      {
+        "guid": "github-sponsors-monthly",
+        "status": "active",
+        "name": "Monthly sponsorship",
+        "description": "A recurring monthly sponsorship of any amount through GitHub Sponsors.",
+        "amount": 0,
+        "currency": "USD",
+        "frequency": "monthly",
+        "channels": ["github-sponsors"]
+      }
+    ]
+  }
+}
