@@ -89,6 +89,10 @@ jobs:
       MIX_ENV: dev
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: Checkout code
         uses: actions/checkout@v4
         # No later step does authenticated git, and this job then runs repo code (deps + the benchmark),
@@ -218,6 +222,10 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: Checkout code
         uses: actions/checkout@v4
         # This job runs repository code (the images and the harness) and does no authenticated git.
@@ -292,6 +300,10 @@ jobs:
     outputs:
       runners: ${{ steps.plan.outputs.runners }}
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - id: plan
         env:
           JOBS: ${{ inputs.quota_flake_hunt_jobs }}
@@ -315,6 +327,10 @@ jobs:
       MIX_ENV: test
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: Checkout code
         uses: actions/checkout@v4
         # This job runs repository code (the suite) and does no authenticated git.
@@ -389,6 +405,10 @@ jobs:
       MIX_ENV: dev
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: Checkout code
         uses: actions/checkout@v4
         with:

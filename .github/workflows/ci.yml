@@ -31,6 +31,10 @@ jobs:
             coverage: true
     
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: 📥 Checkout code
         uses: actions/checkout@v4
         with:
@@ -119,6 +123,10 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: 📥 Checkout code
         uses: actions/checkout@v4
         with:
@@ -311,6 +319,10 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: 📥 Checkout code
         uses: actions/checkout@v4
         with:
@@ -384,6 +396,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: 📥 Checkout code
         uses: actions/checkout@v4
         with:
@@ -432,6 +448,10 @@ jobs:
       MIX_ENV: test
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: 📥 Checkout code
         uses: actions/checkout@v4
         with:
@@ -479,6 +499,10 @@ jobs:
     if: always()
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: 📊 Check results
         run: |
           echo "Test Status: ${{ needs.test.result }}"
@@ -527,6 +551,10 @@ jobs:
     needs: [test, quality]
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: 📥 Checkout code
         uses: actions/checkout@v4
         with:

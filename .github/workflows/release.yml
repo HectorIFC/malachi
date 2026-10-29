@@ -17,6 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: 🔍 Verify CI passed before release
         uses: actions/github-script@v7
         with:
@@ -61,6 +65,10 @@ jobs:
       new_version: ${{ steps.bump.outputs.NEW_VERSION }}
       
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -177,6 +185,10 @@ jobs:
       DOCKER_USERNAME: hectorcardoso
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: Checkout code
         uses: actions/checkout@v4
         with:
