@@ -15,12 +15,12 @@ self-healing, and rack-aware placement.
 > formats can change, it has not been battle-tested at scale, and there is no stability or durability
 > guarantee yet. Use it to learn and experiment, not to run production workloads.
 
-[![CI](https://github.com/HectorIFC/malachi/actions/workflows/ci.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/ci.yml)
-[![Release](https://github.com/HectorIFC/malachi/actions/workflows/release.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/release.yml)
+[![CI](https://github.com/malachi-hq/malachi/actions/workflows/ci.yml/badge.svg)](https://github.com/malachi-hq/malachi/actions/workflows/ci.yml)
+[![Release](https://github.com/malachi-hq/malachi/actions/workflows/release.yml/badge.svg)](https://github.com/malachi-hq/malachi/actions/workflows/release.yml)
 [![Docker Image](https://img.shields.io/docker/v/hectorcardoso/malachi?sort=semver&label=Docker%20Hub)](https://hub.docker.com/r/hectorcardoso/malachi)
 [![Docker Pulls](https://img.shields.io/docker/pulls/hectorcardoso/malachi.svg)](https://hub.docker.com/r/hectorcardoso/malachi)
-[![Security](https://github.com/HectorIFC/malachi/actions/workflows/security.yml/badge.svg)](https://github.com/HectorIFC/malachi/actions/workflows/security.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/HectorIFC/malachi/badge)](https://scorecard.dev/viewer/?uri=github.com/HectorIFC/malachi)
+[![Security](https://github.com/malachi-hq/malachi/actions/workflows/security.yml/badge.svg)](https://github.com/malachi-hq/malachi/actions/workflows/security.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/malachi-hq/malachi/badge)](https://scorecard.dev/viewer/?uri=github.com/malachi-hq/malachi)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Sponsor](https://img.shields.io/badge/sponsor-❤-ff69b4)](https://github.com/sponsors/HectorIFC)
 
@@ -68,7 +68,7 @@ each a series of **segments** replicated by quorum across nodes. See
 Requires Elixir `~> 1.19` / OTP 28+.
 
 ```bash
-git clone https://github.com/HectorIFC/malachi.git
+git clone https://github.com/malachi-hq/malachi.git
 cd malachi
 mix deps.get
 iex -S mix        # starts the broker: TCP on 4040, dashboard on 4041
@@ -152,7 +152,7 @@ on every interface. To serve real traffic, configure TLS instead of widening the
 ### Using Docker Compose
 
 ```bash
-git clone https://github.com/HectorIFC/malachi.git
+git clone https://github.com/malachi-hq/malachi.git
 cd malachi
 docker-compose up -d
 ```
@@ -1112,4 +1112,4 @@ This project uses [SEMVER](https://semver.org/) with automated releases.
 - **Minor**: New features → Add `minor` label or use `feat:` prefix
 - **Major**: Breaking changes → Add `major` label or use `[major]` in title
 
-See the [GitHub Releases](https://github.com/HectorIFC/malachi/releases) for the per-version change history.
+See the [GitHub Releases](https://github.com/malachi-hq/malachi/releases) for the per-version change history.

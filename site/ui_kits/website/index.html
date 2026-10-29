@@ -12,7 +12,7 @@
 <meta property="og:description" content="Ranges split and merge; writes are acknowledged by a majority of copies. In active development and not production-ready.">
 <meta property="og:url" content="{{base_url}}/">
 <link rel="alternate" type="text/plain" href="llms.txt" title="llms.txt">
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"Malachi","version":"{{version}}","description":"Open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28. In active development and not production-ready. The quickstart runs plaintext on localhost only; configure TLS before serving real traffic.","codeRepository":"https://github.com/HectorIFC/malachi","license":"https://spdx.org/licenses/{{license}}.html","programmingLanguage":"Elixir (Erlang/OTP 28)","runtimePlatform":"Erlang/OTP 28"}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"Malachi","version":"{{version}}","description":"Open source reimplementation of LinkedIn's NorthGuard, written in Elixir on OTP 28. In active development and not production-ready. The quickstart runs plaintext on localhost only; configure TLS before serving real traffic.","codeRepository":"https://github.com/malachi-hq/malachi","license":"https://spdx.org/licenses/{{license}}.html","programmingLanguage":"Elixir (Erlang/OTP 28)","runtimePlatform":"Erlang/OTP 28"}</script>
 <script>(function(){try{var v=localStorage.getItem("malachi-theme")||"system";var d=v==="dark"||(v==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("dark",d)}catch(e){}})()</script>
 <link rel="preload" href="../../assets/fonts/bricolage-grotesque-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="../../styles.css">
@@ -29,8 +29,8 @@
 <a class="brand" href="#" aria-label="Malachi home"><img src="../../assets/logo-mark.svg" width="28" height="28" alt=""><span>malachi</span></a>
 <nav class="top-nav" aria-label="Primary">
 <a class="hide-sm" href="introduction.html">Docs</a>
-<a class="hide-sm" href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">Benchmarks</a>
-<a href="https://github.com/HectorIFC/malachi">GitHub</a>
+<a class="hide-sm" href="https://github.com/malachi-hq/malachi/blob/main/benchmark/README.md">Benchmarks</a>
+<a href="https://github.com/malachi-hq/malachi">GitHub</a>
 </nav>
 </header>
 <main id="main">
@@ -58,8 +58,8 @@
 <p class="lead">Clients speak topics, keys and opaque cursors, never partitions or offsets, so Malachi can split, merge and restripe its storage underneath without breaking them.</p>
 <div class="actions">
 <a class="btn btn-primary" href="introduction.html">Read the docs</a>
-<a class="btn" href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">Benchmarks</a>
-<a class="btn" href="https://github.com/HectorIFC/malachi">GitHub</a>
+<a class="btn" href="https://github.com/malachi-hq/malachi/blob/main/benchmark/README.md">Benchmarks</a>
+<a class="btn" href="https://github.com/malachi-hq/malachi">GitHub</a>
 </div>
 </div>
 </section>
@@ -72,7 +72,7 @@
 <li class="g g-raft"><svg viewBox="0 0 120 40" aria-hidden="true"><line class="k" x1="30" y1="28" x2="60" y2="10"></line><line class="k" x1="60" y1="10" x2="90" y2="28"></line><line class="k" x1="30" y1="28" x2="90" y2="28"></line><circle class="n n1" cx="60" cy="10" r="6"></circle><circle class="n n2" cx="30" cy="28" r="6"></circle><circle class="n n3" cx="90" cy="28" r="6"></circle></svg><h3>Metadata agreed by Raft.</h3><p>Topic, range and segment metadata lives in Raft groups on <code>ra</code>, inside each node. Records stay out of Raft: the primary ships them to its followers in batches.</p></li>
 </ul>
 <div class="g-foot">
-<a class="btn" href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">See the benchmarks and how they are measured</a>
+<a class="btn" href="https://github.com/malachi-hq/malachi/blob/main/benchmark/README.md">See the benchmarks and how they are measured</a>
 </div>
 </section>
 <section class="thesis block-gap" id="thesis" aria-labelledby="thesis-title">
@@ -241,8 +241,8 @@ docker run \
   hectorcardoso/malachi:latest</code></pre>
 </div>
 <div class="actions">
-<a class="btn btn-primary" href="https://github.com/HectorIFC/malachi">Open the repository</a>
-<a class="btn" href="https://github.com/HectorIFC/malachi/blob/main/docs/ARCHITECTURE.md">Read the architecture</a>
+<a class="btn btn-primary" href="https://github.com/malachi-hq/malachi">Open the repository</a>
+<a class="btn" href="https://github.com/malachi-hq/malachi/blob/main/docs/ARCHITECTURE.md">Read the architecture</a>
 </div>
 </section>
 </main>
@@ -251,10 +251,10 @@ docker run \
 <div class="foot-brand"><span class="brand"><img src="../../assets/logo-mark.svg" width="28" height="28" alt=""><span>malachi</span></span><p class="muted small">MIT license. Not production-ready.</p></div>
 <nav class="foot-nav" aria-label="Footer">
 <a href="introduction.html">Docs</a>
-<a href="https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md">Benchmarks</a>
-<a href="https://github.com/HectorIFC/malachi">GitHub</a>
+<a href="https://github.com/malachi-hq/malachi/blob/main/benchmark/README.md">Benchmarks</a>
+<a href="https://github.com/malachi-hq/malachi">GitHub</a>
 <a href="https://hub.docker.com/r/hectorcardoso/malachi">Docker Hub</a>
-<a href="https://github.com/HectorIFC/malachi/releases">Releases</a>
+<a href="https://github.com/malachi-hq/malachi/releases">Releases</a>
 </nav>
 <fieldset class="seg js-only">
 <legend class="label">Theme</legend>

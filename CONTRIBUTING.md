@@ -13,7 +13,7 @@ learned the hard way.
 
 **Start from the [project board](https://github.com/users/HectorIFC/projects/4).** It is ordered, and
 every open issue carries a Priority and a Size, so anything in Backlog sized XS or S is a reasonable
-entry point. The [`good first issue`](https://github.com/HectorIFC/malachi/labels/good%20first%20issue)
+entry point. The [`good first issue`](https://github.com/malachi-hq/malachi/labels/good%20first%20issue)
 label exists and is worth watching, but it is not always populated: the board is the reliable list.
 
 **Read the umbrella before touching its theme.** Some areas have an issue that records the triage
@@ -21,9 +21,9 @@ behind them, including the options that were evaluated and rejected, and why:
 
 | Theme | Read first |
 | --- | --- |
-| Throughput, the path to 1M msgs/s | [#85](https://github.com/HectorIFC/malachi/issues/85), plus the `throughput` label |
-| Diskless topics on object storage | [#109](https://github.com/HectorIFC/malachi/issues/109) |
-| Security assessment | [#71](https://github.com/HectorIFC/malachi/issues/71) |
+| Throughput, the path to 1M msgs/s | [#85](https://github.com/malachi-hq/malachi/issues/85), plus the `throughput` label |
+| Diskless topics on object storage | [#109](https://github.com/malachi-hq/malachi/issues/109) |
+| Security assessment | [#71](https://github.com/malachi-hq/malachi/issues/71) |
 
 This is not ceremony. #85 lists 14 throughput techniques that were evaluated and **not** adopted, each
 with its reason (O_DIRECT conflicts with the BEAM deployment model; acking from page cache weakens the
@@ -84,10 +84,10 @@ which tests fail without the change, and how many.
 **A performance decision carries its benchmark, and "no difference" is a result.** Say what you will
 measure, on which harness, with how many repetitions, and what noise floor makes a difference real,
 *before* you run it. Otherwise the measurement confirms whatever was already believed. Issue
-[#82](https://github.com/HectorIFC/malachi/issues/82) is the worked example, and it cuts both ways.
+[#82](https://github.com/malachi-hq/malachi/issues/82) is the worked example, and it cuts both ways.
 Switching `fsync` to `fdatasync` was implemented and measured against an A-A control: the median
 per-flush latency moved by less than the control's own variance, the change was not merged, and that
-measurement is what showed that [#83](https://github.com/HectorIFC/malachi/issues/83) had to land
+measurement is what showed that [#83](https://github.com/malachi-hq/malachi/issues/83) had to land
 before #82 could be answered. Re-measured on preallocated segments, the median still tied while the
 p99 halved (381us to 182us), so the issue stayed open with a sharper question instead of being closed
 on its first answer. "No difference" held for the statistic that was measured, and said nothing about

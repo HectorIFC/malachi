@@ -160,7 +160,7 @@ jobs:
             
             ### 📦 Installation
             ```bash
-            git clone https://github.com/HectorIFC/malachi.git
+            git clone https://github.com/malachi-hq/malachi.git
             cd malachi
             git checkout v${{ steps.version.outputs.NEW_VERSION }}
             ```
@@ -233,7 +233,7 @@ jobs:
             org.opencontainers.image.description=High-performance message system
             org.opencontainers.image.version=${{ needs.release.outputs.new_version }}
             org.opencontainers.image.vendor=HectorIFC
-            org.opencontainers.image.source=https://github.com/HectorIFC/malachi
+            org.opencontainers.image.source=https://github.com/malachi-hq/malachi
             org.opencontainers.image.licenses=MIT
           build-args: |
             APP_VERSION=${{ needs.release.outputs.new_version }}

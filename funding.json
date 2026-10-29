@@ -17,10 +17,10 @@
       "name": "Malachi",
       "description": "A message broker written in Elixir on the BEAM, with a Raft control plane (ra) and a web dashboard.",
       "webpageUrl": {
-        "url": "https://hectorifc.github.io/malachi/"
+        "url": "https://malachi-hq.github.io/malachi/"
       },
       "repositoryUrl": {
-        "url": "https://github.com/HectorIFC/malachi"
+        "url": "https://github.com/malachi-hq/malachi"
       },
       "licenses": ["spdx:MIT"],
       "tags": ["message-broker", "elixir", "erlang", "beam", "raft"]

@@ -115,7 +115,7 @@ node loadtest.js --scenario produce --connections 20 --duration 10 --batch 10 \
 
 The [Node.js load test results](../generated/loadtest-node-results.md) page renders exactly this
 document, from `benchmark/published/loadtest-node.json`, and so does the headline of the
-[benchmark dashboard](https://hectorifc.github.io/malachi/benchmarks/).
+[benchmark dashboard](https://malachi-hq.github.io/malachi/benchmarks/).
 
 ## How the published ceiling is measured
 

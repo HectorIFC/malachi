@@ -26,7 +26,7 @@ all abort the setup rather than install something unverified.
 
 It used to pipe a remote setup script straight into `sudo bash`, which handed anyone controlling that URL
 (or holding a TLS-stripping network position) root on a contributor's laptop. That is
-[issue #69](https://github.com/HectorIFC/malachi/issues/69). The safe form is longer than the unsafe one, so
+[issue #69](https://github.com/malachi-hq/malachi/issues/69). The safe form is longer than the unsafe one, so
 CI runs `scripts/check-no-pipe-to-shell.sh` to keep it from being tidied back.
 
 ### Bumping the pinned version

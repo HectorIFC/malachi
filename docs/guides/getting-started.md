@@ -8,7 +8,7 @@ Requires Elixir `~> 1.19` / OTP 26+.
 ## Run the broker
 
 ```bash
-git clone https://github.com/HectorIFC/malachi.git
+git clone https://github.com/malachi-hq/malachi.git
 cd malachi
 mix deps.get
 iex -S mix        # TCP on 4040, dashboard on 4041

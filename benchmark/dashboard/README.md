@@ -28,7 +28,7 @@ A file that is missing, unreadable or half-written leaves a note in its own sect
 render, since a page that goes blank tells a reader less than one that says which part it could not load.
 
 The Pages workflow publishes this directory at
-`https://hectorifc.github.io/malachi/benchmarks/`.
+`https://malachi-hq.github.io/malachi/benchmarks/`.
 
 ## Preview locally
 

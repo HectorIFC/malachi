@@ -19,12 +19,12 @@ Malachi listens on 4040 and the dashboard on 4041.
 
 ## Docs
 
-- [Repository](https://github.com/HectorIFC/malachi): source, README, MIT license
-- [Docs](https://github.com/HectorIFC/malachi/tree/main/docs)
-- [Architecture](https://github.com/HectorIFC/malachi/blob/main/docs/ARCHITECTURE.md): ranges, segments, replication, Raft control plane
-- [Benchmarks](https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md): how they are measured
+- [Repository](https://github.com/malachi-hq/malachi): source, README, MIT license
+- [Docs](https://github.com/malachi-hq/malachi/tree/main/docs)
+- [Architecture](https://github.com/malachi-hq/malachi/blob/main/docs/ARCHITECTURE.md): ranges, segments, replication, Raft control plane
+- [Benchmarks](https://github.com/malachi-hq/malachi/blob/main/benchmark/README.md): how they are measured
 
 ## Optional
 
-- [Releases](https://github.com/HectorIFC/malachi/releases)
+- [Releases](https://github.com/malachi-hq/malachi/releases)
 - [Docker Hub](https://hub.docker.com/r/hectorcardoso/malachi)

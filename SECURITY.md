@@ -6,7 +6,7 @@
 
 ### Reporting Process
 
-1. **Private report (preferred):** Use [GitHub private vulnerability reporting](https://github.com/HectorIFC/malachi/security/advisories/new), which keeps the report private until a fix is ready
+1. **Private report (preferred):** Use [GitHub private vulnerability reporting](https://github.com/malachi-hq/malachi/security/advisories/new), which keeps the report private until a fix is ready
 2. **Email:** Send details to `hectorwilliancardoso@gmail.com`
 3. **Response Time:** We aim to respond within 48 hours
 4. **Disclosure:** We follow coordinated disclosure practices
@@ -153,7 +153,7 @@ Current assessments:
 
 Security advisories are published at:
 
-- **GitHub Security Advisories:** [https://github.com/HectorIFC/malachi/security/advisories](https://github.com/HectorIFC/malachi/security/advisories)
+- **GitHub Security Advisories:** [https://github.com/malachi-hq/malachi/security/advisories](https://github.com/malachi-hq/malachi/security/advisories)
 - **OSV.dev:** advisories published as GitHub Security Advisories are indexed by [OSV.dev](https://osv.dev/), the open vulnerability database that dependency scanners read
 
 ## Compliance
@@ -166,4 +166,4 @@ Malachi implements controls aligned with:
 ## Contact
 
 - **Security:** hectorwilliancardoso@gmail.com
-- **GitHub:** [https://github.com/HectorIFC/malachi](https://github.com/HectorIFC/malachi)
+- **GitHub:** [https://github.com/malachi-hq/malachi](https://github.com/malachi-hq/malachi)
