@@ -713,6 +713,27 @@ defmodule Malachi.LoadtestTest do
       end)
     end
 
+    # `not_primary` and `sealed` refuse an append the broker stored nothing of because a roll placed its
+    # range's next segment on another node: the producer sends it again as routing, so a run over a normal
+    # roll records no error, and a prepopulate over one does not fail its setup.
+    for reason <- ["not_primary", "sealed"] do
+      test "an append refused #{reason} is sent again as routing: no error, every record acknowledged" do
+        with_stream_server(%{27 => {:after, 1, {:refuse_append, unquote(reason)}, :default}}, fn port, stub ->
+          r = run(scenario: :produce, connections: 1, batch: 2, port: port, topic: "t")
+          assert StreamStub.refused(stub) == 1, "the stub refused nothing, so this case proves nothing"
+          assert r.errors == 0 and r.error_reasons == %{}
+          assert r.redirects > 0
+          assert r.ops > 0 and r.records == r.ops * 2
+        end)
+
+        with_stream_server(%{27 => {:after, 1, {:refuse_append, unquote(reason)}, :default}}, fn port, stub ->
+          r = run(scenario: :fetch, connections: 1, batch: 2, prepopulate: 4, port: port, topic: "t")
+          assert StreamStub.refused(stub) == 1
+          assert r.errors == 0
+        end)
+      end
+    end
+
     test "what happens in the warmup is not counted, acknowledgements and refusals alike" do
       # appends refused for the first 300 ms of a 1 s warmup (counted from the stream's open, which comes
       # just before it), acknowledged from then on

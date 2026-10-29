@@ -15,10 +15,14 @@
  *     named it, or 'connection_lost' for an append in flight when its connection dropped, which may or may
  *     not have landed.
  *
- * Events are queued (`takeEvents`) and, with an `onEvent` option, handed to it as well. A record is never
- * retried here: the caller sees every outcome and decides. What is retried is routing. A stream told
- * `moved` takes no more appends; the appends it had in flight are still answered on it, and the records
- * not yet sent go to the stream the routes now name. An open refused `moved`, `stale_routes`, `not_owner`
+ * Events are queued (`takeEvents`) and, with an `onEvent` option, handed to it as well. A record the broker
+ * may have stored is never retried here: the caller sees every such outcome and decides. What is retried is
+ * routing. A stream told `moved` takes no more appends; the appends it had in flight are still answered on
+ * it, and the records not yet sent go to the stream the routes now name. An append the broker refused
+ * `not_primary` or `sealed` is routing too, with no event: the broker answers those only for an append it
+ * stored nothing of, so once the stream drains its records go back to the front of their range's buffer, in
+ * the order they were sent, and out on the stream the routes name next, the range counted as redirected
+ * (`Links.redirected`). An open refused `moved`, `stale_routes`, `not_owner`
  * or `migrating` reads the routes again and opens where they say, backing off once it has been redirected
  * 5 times in a row; routes that name a range's primary with no address are a redirect too, read again
  * after a backoff, and the range's records wait in its buffer meanwhile rather than fail.
@@ -43,6 +47,9 @@ const WINDOW_BYTES = 16777216;
 const OPEN_TIMEOUT_MS = 30000;
 // The errors with which a broker ends a stream at the sequence the producer broke it at.
 const SEQUENCE_BREAKS = new Set(['sequence_gap', 'sequence_repeat']);
+// The errors with which a broker refuses an append it stored nothing of because the range is written
+// elsewhere now: routing, sent again, not a failure (see the comment at the top).
+const ROUTING_REFUSALS = new Set(['not_primary', 'sealed']);
 
 const monoUs = () => Number(process.hrtime.bigint() / 1000n);
 const laneKey = (topic, range) => `${topic}\u0000${range}`;
@@ -208,8 +215,8 @@ class Producer {
 
   // Drops every record not yet sent (buffered, or waiting on an open), with no event for them, and sends
   // nothing from now on: for a caller done handing records over that wants only the outcomes of the appends
-  // already in flight. An append answered `unknown_stream` after this never reached the broker and is
-  // dropped the same way, rather than sent again.
+  // already in flight. An append answered `unknown_stream`, or refused as routing (`not_primary`, `sealed`),
+  // after this stored nothing and is dropped the same way, with no event, rather than sent again.
   stopSending() {
     return this._run(() => {
       for (const lane of this.lanes.values()) {
@@ -511,8 +518,11 @@ class Producer {
       windowAppends: resp.window_appends,
       windowBytes: resp.window_bytes,
       open: true,
-      // appends answered `unknown_stream`, not yet told apart from the ones still to be acknowledged
+      // appends answered `unknown_stream`, or refused as routing (`rerouted`), not yet told apart from the
+      // ones still to be acknowledged
       rejected: 0,
+      // the sequences refused as routing (ROUTING_REFUSALS): they stay in flight until the stream drains
+      rerouted: new Set(),
     });
     // the lane moved on meanwhile (a drop, a stop): the stream is still the broker's, so it is kept to answer
     // nothing and closed with its connection
@@ -598,15 +608,25 @@ class Producer {
   }
 
   // Every append below `acked_sequence` has been answered: the ones named in `errors` failed with their
-  // reason, the rest landed. A sequence break ends the stream (lib/malachi/wire.ex): a gap names an append
-  // that failed now, at or above `acked_sequence`; a repeat names a second copy, and the original's own
-  // answer still comes, so it fails nothing.
+  // reason, the ones refused as routing (ROUTING_REFUSALS) wait in flight to be sent again, the rest
+  // landed. A sequence break ends the stream (lib/malachi/wire.ex): a gap names an append that failed now,
+  // at or above `acked_sequence`; a repeat names a second copy, and the original's own answer still comes,
+  // so it fails nothing. A routing refusal stored nothing: the append stays in flight, counted with the
+  // refused ones, and the stream takes no more appends (its `moved` push came first, or comes next), so it
+  // goes out again once the stream drains (`_settle`).
   _acked(stream, ack) {
-    const ends = ack.errors.some((e) => SEQUENCE_BREAKS.has(e.reason));
-    const errors = new Map(ack.errors.filter((e) => e.reason !== 'sequence_repeat').map((e) => [e.sequence, e.reason]));
+    const rerouted = ack.errors.filter((e) => ROUTING_REFUSALS.has(e.reason)).map((e) => e.sequence);
+    for (const seq of rerouted) stream.rerouted.add(seq);
+    stream.rejected += rerouted.length;
+    const ends = rerouted.length > 0 || ack.errors.some((e) => SEQUENCE_BREAKS.has(e.reason));
+    const errors = new Map(
+      ack.errors
+        .filter((e) => e.reason !== 'sequence_repeat' && !ROUTING_REFUSALS.has(e.reason))
+        .map((e) => [e.sequence, e.reason]),
+    );
     const nowUs = monoUs();
     const gone = [...stream.inflight.entries()]
-      .filter(([seq]) => seq < ack.acked_sequence || errors.has(seq))
+      .filter(([seq]) => !stream.rerouted.has(seq) && (seq < ack.acked_sequence || errors.has(seq)))
       .sort(([a], [b]) => a - b);
     const events = gone.map(([seq, sent]) =>
       errors.has(seq)
@@ -619,7 +639,8 @@ class Producer {
     }
     stream.windowAppends = ack.window_appends;
     stream.windowBytes = ack.window_bytes;
-    // the range opens a new stream once this one drains (`_settle`); its routes have not changed
+    // the range opens a new stream once this one drains (`_settle`): on a sequence break its routes have not
+    // changed, on a routing refusal they are read again (`_settle`)
     if (ends) this._retire(stream);
     else if (!stream.open && stream.inflight.size === 0) this.streams.delete(stream);
     this._settle(stream);
@@ -629,7 +650,10 @@ class Producer {
 
   // Once a stopped stream's refusals account for every append it still has in flight, those appends are the
   // refused ones: their records go back to the front of the range's buffer, in the order they were sent, and
-  // the stream is dropped, which lets the range open its next one.
+  // the stream is dropped, which lets the range open its next one. A stream some of whose appends were
+  // refused as routing counts its range as redirected, which bounds how often a range is sent back
+  // (`Links.redirected`): counted here, once the stream no longer holds the topic, so the backoff it may set
+  // is not cleared by the hold (`_flush`).
   _settle(stream) {
     if (stream.open || stream.rejected === 0 || stream.inflight.size !== stream.rejected) return;
     this.streams.delete(stream);
@@ -638,6 +662,7 @@ class Producer {
     const lane = this.lanes.get(stream.lane) || newLane(topic, range);
     this.lanes.set(stream.lane, lane);
     for (const [, sent] of [...stream.inflight.entries()].sort(([a], [b]) => b - a)) this._unsend(lane, sent.entries);
+    if (stream.rerouted.size > 0) this.links.redirected(topic, lane, monoMs());
   }
 
   // Whether `topic` is changing shape, so none of its ranges opens a stream or sends an append: a stream

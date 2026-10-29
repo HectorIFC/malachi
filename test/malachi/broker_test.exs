@@ -192,6 +192,68 @@ defmodule Malachi.BrokerTest do
     end
   end
 
+  describe "produce_primaries/3 (where a producer stream's append would be planned)" do
+    test "a range with no segment has it opened, and its primary named, with nothing reserved" do
+      {broker, root} = broker_with_topic()
+      records = [record("a", "k"), record("b", "k")]
+
+      assert {broker, {:ok, %{^root => :primary}}} = Broker.produce_primaries(broker, "events", records)
+      assert {:ok, {^root, 0}, :primary} = broker |> Broker.stream_segment(root) |> elem(1)
+
+      # the plan goes into that segment, from the range's first offset: no offset was taken
+      assert {_broker, {:ok, %{^root => {0, 1}}, [%{segment_id: {^root, 0}, primary: :primary}]}} =
+               Broker.produce_plan(broker, "events", records)
+    end
+
+    test "a range with an active segment names that segment's primary and opens nothing", %{store: store} do
+      {broker, root} = broker_with_topic("events", 4, brokers: [:a, :b])
+      {broker, {:ok, _}} = produce_only(broker, store, "events", [record("a", "k")])
+      [%{replica_set: [primary | _]}] = segments(broker, root)
+
+      assert {after_check, {:ok, %{^root => ^primary}}} =
+               Broker.produce_primaries(broker, "events", [record("b", "k")])
+
+      assert segments(after_check, root) == segments(broker, root)
+      assert {_broker, {:ok, %{^root => {1, 1}}}} = produce_only(after_check, store, "events", [record("b", "k")])
+    end
+
+    test "records of a retired range are named by the children their keys route to" do
+      {broker, root} = broker_with_topic()
+      {broker, {:ok, left, right}} = Broker.split_range(broker, root)
+      records = for index <- 0..29, do: record("v#{index}", "k#{index}")
+
+      assert {_broker, {:ok, primaries}} = Broker.produce_primaries(broker, "events", records)
+      assert primaries == %{left => :primary, right => :primary}
+    end
+
+    test "no records name no range, and open nothing" do
+      {broker, root} = broker_with_topic()
+
+      assert {broker, {:ok, primaries}} = Broker.produce_primaries(broker, "events", [])
+      assert primaries == %{}
+      assert segments(broker, root) == []
+    end
+
+    test "fails as the plan does: a topic that does not exist, a segment that cannot be placed" do
+      assert {_broker, {:error, :no_such_topic}} = Broker.produce_primaries(open_broker(), "nope", [record("a", "k")])
+
+      {broker, root} =
+        broker_with_topic("events", 4,
+          brokers: [:a1, :b1],
+          replication_factor: 2,
+          spread_by: "rack",
+          broker_attributes: %{a1: %{"rack" => "a"}, b1: %{"rack" => "a"}},
+          min_domains: 2,
+          placement_policy: :hard
+        )
+
+      assert {broker, {:error, {:insufficient_domains, 1, 2}}} =
+               Broker.produce_primaries(broker, "events", [record("a", "k")])
+
+      assert segments(broker, root) == []
+    end
+  end
+
   describe "min_domains hard policy (failure-domain hardening)" do
     # three brokers over only two racks (a, b)
     @racks %{a1: %{"rack" => "a"}, a2: %{"rack" => "a"}, b1: %{"rack" => "b"}}

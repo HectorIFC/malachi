@@ -23,7 +23,7 @@ defmodule ProducerJsTest do
 
   test "the producer cases against a broker of its own", ctx do
     assert {output, 0} = System.cmd(ctx.node, [@selftest], stderr_to_stdout: true)
-    assert output =~ "passed 29 producer cases"
+    assert output =~ "passed 33 producer cases"
   end
 
   test "against the server, across a split: every value acknowledged is read back, once", ctx do

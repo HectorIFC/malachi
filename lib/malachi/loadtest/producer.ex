@@ -15,11 +15,15 @@ defmodule Malachi.Loadtest.Producer do
       or `"connection_lost"` for an append in flight when its connection dropped, which may or may not
       have landed.
 
-  A record is never retried here: the caller sees every outcome and decides (the chaos checker resends,
-  the load generator counts). What is retried is routing. A stream told `moved` (its segment sealed by a
-  roll or a failover, or its range split or merged) takes no more appends; the appends it had in flight
-  are still answered on it, and the records not yet sent go to the stream the routes now name, read again
-  over a metadata connection opened only when it is first needed. An open refused `moved`, `stale_routes`,
+  A record the broker may have stored is never retried here: the caller sees every such outcome and decides
+  (the chaos checker resends, the load generator counts). What is retried is routing. A stream told `moved`
+  (its segment sealed by a roll or a failover, or its range split or merged) takes no more appends; the
+  appends it had in flight are still answered on it, and the records not yet sent go to the stream the
+  routes now name, read again over a metadata connection opened only when it is first needed. An append
+  the broker refused `not_primary` or `sealed` is routing too, with no event: the broker answers those only
+  for an append it stored nothing of (`Malachi.BrokerServer.send_stream_produce/6`), so once the stream
+  drains its records go back to the front of their range's buffer, in the order they were sent, and out on
+  the stream the routes name next, the range counted as redirected (`Malachi.Loadtest.Links.redirected/4`). An open refused `moved`, `stale_routes`,
   `not_owner` or `migrating` reads the routes again and opens where they say, backing off once it has
   been redirected 5 times in a row; routes that name a range's primary with no address are a redirect too,
   read again after a backoff (`Malachi.Loadtest.Links.unadvertised/4`), and the range's records wait in
@@ -76,6 +80,9 @@ defmodule Malachi.Loadtest.Producer do
 
   # The errors with which a broker ends a stream at the sequence the producer broke it at.
   @sequence_breaks ["sequence_gap", "sequence_repeat"]
+  # The errors with which a broker refuses an append it stored nothing of because the range is written
+  # elsewhere now: routing, sent again, not a failure (see the moduledoc).
+  @routing_refusals ["not_primary", "sealed"]
 
   @enforce_keys [:router, :conn_opts]
   defstruct [
@@ -304,8 +311,9 @@ defmodule Malachi.Loadtest.Producer do
   @doc """
   Drops every record not yet sent (buffered, or waiting on an open), with no event for them, and sends
   nothing from now on: for a caller that is done handing records over and wants only the outcomes of the
-  appends already in flight (`in_flight?/1`, `await/3`). An append answered `unknown_stream` after this
-  never reached the broker and is dropped the same way, rather than sent again.
+  appends already in flight (`in_flight?/1`, `await/3`). An append answered `unknown_stream`, or refused as
+  routing (`not_primary`, `sealed`), after this stored nothing and is dropped the same way, with no event,
+  rather than sent again.
   """
   @spec stop_sending(t()) :: t()
   def stop_sending(%__MODULE__{} = p) do
@@ -642,8 +650,11 @@ defmodule Malachi.Loadtest.Producer do
       window_appends: resp.window_appends,
       window_bytes: resp.window_bytes,
       open?: true,
-      # appends answered `unknown_stream`, not yet told apart from the ones still to be acknowledged
-      rejected: 0
+      # appends answered `unknown_stream`, or refused as routing (`rerouted`), not yet told apart from the
+      # ones still to be acknowledged
+      rejected: 0,
+      # the sequences refused as routing (`@routing_refusals`): they stay in flight until the stream drains
+      rerouted: MapSet.new()
     }
 
     lane = %{Map.fetch!(p.lanes, key) | stream: {:open, {address, resp.stream_id}}, redirects: 0}
@@ -723,17 +734,26 @@ defmodule Malachi.Loadtest.Producer do
 
   # Once a stopped stream's refusals account for every append it still has in flight, those appends are
   # the refused ones: their records go back to the front of the range's buffer, in the order they were
-  # sent, and the stream is dropped, which lets the range open its next one.
+  # sent, and the stream is dropped, which lets the range open its next one. A stream some of whose appends
+  # were refused as routing counts its range as redirected, which bounds how often a range is sent back
+  # (`Malachi.Loadtest.Links.redirected/4`): counted here, once the stream no longer holds the topic, so
+  # the backoff it may set is not cleared by the hold (`flush_open_lane/4`).
   defp settle(p, stream_key) do
     case Map.fetch(p.streams, stream_key) do
-      {:ok, %{open?: false, rejected: rejected, inflight: inflight, lane: key}}
+      {:ok, %{open?: false, rejected: rejected, inflight: inflight, lane: key} = stream}
       when rejected > 0 and map_size(inflight) == rejected ->
         p = %{p | streams: Map.delete(p.streams, stream_key)}
-        if p.stopped, do: p, else: unsend_all(p, key, inflight)
+        if p.stopped, do: p, else: p |> unsend_all(key, inflight) |> count_rerouted(key, stream)
 
       _open_or_still_answering ->
         p
     end
+  end
+
+  defp count_rerouted(p, key, %{rerouted: rerouted}) do
+    if MapSet.size(rerouted) == 0,
+      do: p,
+      else: Links.redirected(p, key, Map.fetch!(p.lanes, key), mono_ms())
   end
 
   defp unsend_all(p, key, inflight) do
@@ -807,18 +827,21 @@ defmodule Malachi.Loadtest.Producer do
   end
 
   # Every append below `acked_sequence` has been answered: the ones named in `errors` failed with their
-  # reason, the rest landed.
+  # reason, the ones refused as routing (`@routing_refusals`) wait in flight to be sent again, the rest landed.
   defp acked(p, events, stream_key, stream, ack) do
     # A sequence break ends the stream (`Malachi.Wire`): the appends before it are still answered, and the
     # ones after it are refused `unknown_stream` (`refused/5`). A gap names an append that failed now, at or
     # above `acked_sequence`; a repeat names a second copy, and the original's own answer still comes, so it
     # fails nothing.
     ends? = Enum.any?(ack.errors, &(&1.reason in @sequence_breaks))
+    {new_rerouted, errors} = ack_errors(ack.errors)
+    rerouted = MapSet.union(stream.rerouted, MapSet.new(new_rerouted))
 
-    errors =
-      for %{reason: reason} = error <- ack.errors, reason != "sequence_repeat", into: %{}, do: {error.sequence, reason}
+    {answered, inflight} =
+      Map.split_with(stream.inflight, fn {seq, _sent} ->
+        seq < ack.acked_sequence and not MapSet.member?(rerouted, seq)
+      end)
 
-    {answered, inflight} = Map.split_with(stream.inflight, fn {seq, _sent} -> seq < ack.acked_sequence end)
     {ended, inflight} = Map.split_with(inflight, fn {seq, _sent} -> Map.has_key?(errors, seq) end)
     now_us = mono_us()
 
@@ -839,10 +862,14 @@ defmodule Malachi.Loadtest.Producer do
       | inflight: inflight,
         inflight_bytes: stream.inflight_bytes - Enum.reduce(gone, 0, fn {_seq, sent}, acc -> acc + sent.size end),
         window_appends: ack.window_appends,
-        window_bytes: ack.window_bytes
+        window_bytes: ack.window_bytes,
+        rejected: stream.rejected + length(new_rerouted),
+        rerouted: rerouted
     }
 
-    # the range opens a new stream once this one drains (`settle/2`); its routes have not changed
+    # the range opens a new stream once this one drains (`settle/2`): on a sequence break its routes have not
+    # changed, on a routing refusal they are read again (`count_rerouted/3`)
+    ends? = ends? or new_rerouted != []
     p = if ends?, do: retire(p, stream.lane, stream_key, stream), else: p
     stream = if ends?, do: %{stream | open?: false}, else: stream
 
@@ -854,6 +881,19 @@ defmodule Malachi.Loadtest.Producer do
       end
 
     {settle(%{p | streams: streams}, stream_key), events ++ new_events}
+  end
+
+  # An ack's errors, as the sequences refused as routing and the failures by sequence. A routing refusal
+  # stored nothing: the append stays in flight, counted with the refused ones, and the stream takes no more
+  # appends (its `moved` push came first, or comes next), so it goes out again once the stream drains
+  # (`settle/2`). A `sequence_repeat` fails nothing (see `acked/5`).
+  defp ack_errors(errors) do
+    {routing, others} = Enum.split_with(errors, &(&1.reason in @routing_refusals))
+
+    failures =
+      for %{reason: reason} = error <- others, reason != "sequence_repeat", into: %{}, do: {error.sequence, reason}
+
+    {Enum.map(routing, & &1.sequence), failures}
   end
 
   # A connection to a broker dropped: its appends in flight may or may not have landed, its streams and

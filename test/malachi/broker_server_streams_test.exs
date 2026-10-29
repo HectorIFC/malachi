@@ -9,6 +9,8 @@ defmodule Malachi.BrokerServerStreamsTest do
   alias Malachi.BrokerServer
   alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
+  alias Malachi.Test.PollingHelper
+  alias Malachi.Test.ReadBack
 
   @moduletag :tmp_dir
 
@@ -44,6 +46,14 @@ defmodule Malachi.BrokerServerStreamsTest do
 
     {{:reply, reply}, :label, _reqids} = :gen_server.receive_response(reqids, 5_000, true)
     reply
+  end
+
+  # A key of `range_id`'s slice of the topic's keyspace.
+  defp key_in(server, {topic, _seq} = range_id) do
+    %{key_start: low, key_end: high} =
+      server |> BrokerServer.metadata() |> Malachi.Metadata.ranges_of_topic(topic) |> Enum.find(&(&1.id == range_id))
+
+    Enum.find_value(1..10_000, &(:erlang.phash2("k#{&1}", 16) in low..(high - 1)//1 && "k#{&1}"))
   end
 
   defmodule HeldPrimary do
@@ -241,6 +251,90 @@ defmodule Malachi.BrokerServerStreamsTest do
       assert :sys.get_state(server).range_inflight == %{}
     end
 
+    test "an append into a segment another node leads is refused, with nothing dispatched", %{tmp_dir: dir} do
+      remote = {Malachi.LogReplication, :remote@nowhere}
+      {server, root} = with_topic(dir, brokers: [remote])
+
+      # answered at once: a dispatch to the remote primary would only be answered by the 6 s safety timer
+      assert {{:error, :not_primary}, _scale} = append(server, root, [Record.new("a", key: "k")])
+      assert :sys.get_state(server).range_inflight == %{}
+      # the range's segment was placed, as opening a stream places it, and a producer is sent there
+      assert {:moved, :elsewhere, [{^root, {{^root, 0}, ^remote}}]} = BrokerServer.open_stream(server, root)
+    end
+
+    test "an append on a retired range is written when its records go to one child, refused when to two",
+         %{tmp_dir: dir} do
+      {server, root} = with_topic(dir)
+      {:ok, left, right} = BrokerServer.split_range(server, root)
+      {in_left, in_right} = {key_in(server, left), key_in(server, right)}
+
+      assert {{:ok, %{^left => {0, 0}}}, _scale} = append(server, root, [Record.new("one", key: in_left)])
+
+      # as two dispatches, one could be refused while the other landed: refused whole, nothing stored
+      assert {{:error, :not_primary}, _scale} =
+               append(server, root, [Record.new("l", key: in_left), Record.new("r", key: in_right)])
+
+      assert :sys.get_state(server).range_inflight == %{}
+      assert ReadBack.values(server, "events") |> Enum.sort() == ["one"]
+    end
+
+    test "an append its own roll's fence refused is not planned again into a successor led elsewhere",
+         %{tmp_dir: dir} do
+      primary = :"bss_held_#{System.unique_integer([:positive])}"
+      {:ok, held} = HeldPrimary.start(primary, self())
+      on_exit(fn -> Process.exit(held, :kill) end)
+      remote = {Malachi.LogReplication, :remote@nowhere}
+      {:ok, live} = Agent.start_link(fn -> [primary] end)
+      one_record = Record.encoded_size(Record.new("v0", key: "k"))
+
+      {server, root} =
+        with_topic(dir,
+          brokers: [primary],
+          live_brokers: fn -> Agent.get(live, & &1) end,
+          brokers_refresh_interval: 20,
+          segment_max_bytes: one_record
+        )
+
+      {:ok, token, _segment, _broker} = BrokerServer.open_stream(server, root)
+
+      send_append = fn records, label ->
+        BrokerServer.send_stream_produce(
+          server,
+          root,
+          records,
+          label,
+          :gen_server.reqids_new(),
+          :otel_ctx.get_current()
+        )
+      end
+
+      # the first append fills the segment, and its answer sends the roll's fence, held unanswered
+      first = send_append.([Record.new("v0", key: "k")], :first)
+      assert_receive {:held, {:replicate_async, _seg, _set, _base, _records, {^server, tag}, _ctx}}
+      send(server, {:replicate_result, tag, {:ok, elem(tag, 1).last}})
+      {{:reply, {{:ok, _}, _scale}}, :first, _} = :gen_server.receive_response(first, 5_000, true)
+      assert_receive {:held, {:seal_async, _segment, base, {^server, fence}}}
+
+      # the next one goes out behind that fence, and from now on new segments are placed on another node
+      refused = send_append.([Record.new("a", key: "k")], :refused)
+      assert_receive {:held, {:replicate_async, _seg, _set, _base, _records, {^server, refused_tag}, _ctx}}
+      Agent.update(live, fn _ -> [remote] end)
+      :ok = PollingHelper.wait_until!(fn -> :sys.get_state(server).broker.brokers == [remote] end)
+
+      sealed_at = base + 1
+      send(server, {:replicate_result, refused_tag, {:error, {:sealed, sealed_at}}})
+      send(server, {:seal_result, fence, {:ok, sealed_at, one_record}})
+
+      # failed with the refusal it got, at once, rather than dispatched to the successor's remote primary
+      assert {{:reply, {{:error, {:sealed, ^sealed_at}}, _scale}}, :refused, _} =
+               :gen_server.receive_response(refused, 5_000, true)
+
+      refute_received {:held, {:replicate_async, _seg, _set, _base, _records, _tag, _ctx}}
+      assert :sys.get_state(server).range_inflight == %{}
+      assert_receive {:stream_moved, ^token, _reason, _targets}
+      assert {:moved, :elsewhere, [{^root, {_successor, ^remote}}]} = BrokerServer.open_stream(server, root)
+    end
+
     test "a range's records in flight go back to none once its appends are answered", %{tmp_dir: dir} do
       {server, root} = with_topic(dir, stream_inflight_soft: 0, stream_inflight_hard: 1)
 
@@ -254,7 +348,6 @@ defmodule Malachi.BrokerServerStreamsTest do
     alias Malachi.Broker
     alias Malachi.Broker.ReadView
     alias Malachi.BrokerServer.ConsumeIndex
-    alias Malachi.Test.PollingHelper
 
     # The consume stream's wake for `token`, with its view.
     defp wake(token) do

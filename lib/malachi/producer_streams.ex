@@ -13,7 +13,10 @@ defmodule Malachi.ProducerStreams do
   failover, or a split or merge retired it) or the broker itself went down, the stream is answered with a
   `moved` push naming where its range's data goes now, and closed: it takes no more appends, but the
   appends already in flight are still answered, so a producer learns which of them landed before it
-  resends anything.
+  resends anything. A broker writes an append as one append into one segment it leads, or not at all: one
+  in flight when the range moved on to a segment led by another node, or to several ranges, fails with
+  `not_primary` (or `sealed`, when the seal refused it after it was sent), and nothing of it is stored, so
+  the producer sends it again where the move says (`Malachi.Loadtest.Producer` does, as routing).
 
   The connection reads its socket only while every open stream has room in its window, so a producer that
   outruns its grant is held back by TCP rather than buffered here.

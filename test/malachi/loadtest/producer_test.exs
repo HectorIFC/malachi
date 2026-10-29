@@ -503,6 +503,73 @@ defmodule Malachi.Loadtest.ProducerTest do
     assert length(StreamStub.appends(stub)) == 2
   end
 
+  # `not_primary` and `sealed` are the broker's answers to an append it stored nothing of because its range
+  # is written elsewhere now (a roll placed the successor on another node): routing, sent again on a new
+  # stream, never a failure.
+  for reason <- ["not_primary", "sealed"] do
+    test "an append refused #{reason} goes out again on the next stream, acknowledged once, with no failure" do
+      # the first append is refused, every later one taken
+      stub = start_stub(%{27 => {:after, 1, {:refuse_append, unquote(reason)}, :default}})
+      {:ok, p} = stub |> stub_router() |> Producer.new(stub_opts(stub), max_inflight: 4) |> Producer.prepare("t", 2_000)
+
+      {p, []} = Producer.produce(p, "t", entries(["a"]), now())
+      {p, events, :idle} = Producer.await(p, 5_000)
+      {p, []} = Producer.produce(p, "t", entries(["b"]), now())
+      {p, more, :idle} = Producer.await(p, 5_000)
+
+      assert acked(events ++ more) == ["a", "b"]
+      assert failed(events ++ more) == []
+      # sent twice, on the first stream and then on the one opened after it, and the stream counted redirected
+      assert [{1, 0, ["a"]}, {2, 0, ["a"]}, {2, 1, ["b"]}] = StreamStub.appends(stub)
+      assert StreamStub.opened(stub) == 2
+      assert Producer.stats(p).redirects == 1
+    end
+  end
+
+  test "routing refusals on several appends in flight resend them in the order they were sent, after the move" do
+    stub = start_stub(%{27 => {:after, 3, {:refuse_append, "not_primary"}, :default}})
+    {:ok, p} = stub |> stub_router() |> Producer.new(stub_opts(stub), max_inflight: 4) |> Producer.prepare("t", 2_000)
+
+    StreamStub.set_appends(stub, :silent)
+    p = Enum.reduce(["a", "b", "c"], p, &(&2 |> Producer.produce("t", entries([&1]), now()) |> elem(0)))
+    [{_stream_key, %{corr: corr}}] = Map.to_list(p.streams)
+    PollingHelper.wait_until!(fn -> length(StreamStub.appends(stub)) == 3 end)
+
+    # the broker's move first, then each append refused, as a broker sends them
+    StreamStub.set_appends(stub, :ack)
+    StreamStub.push(stub, moved_frame(corr, 1))
+
+    for seq <- 0..2 do
+      push = %{
+        stream_id: 1,
+        acked_sequence: seq + 1,
+        window_appends: 64,
+        window_bytes: 16_777_216,
+        errors: [%{sequence: seq, reason: "not_primary"}]
+      }
+
+      StreamStub.push(stub, Wire.encode_ok(corr, IO.iodata_to_binary(Wire.encode_push(:append_ack, push))))
+    end
+
+    {_p, events, :idle} = Producer.await(p, 5_000)
+
+    assert acked(events) == ["a", "b", "c"]
+    assert failed(events) == []
+    assert [{2, 0, ["a"]}, {2, 1, ["b"]}, {2, 2, ["c"]}] = Enum.drop(StreamStub.appends(stub), 3)
+  end
+
+  test "an append refused for a reason that is not routing still fails, and is not sent again" do
+    stub = start_stub(%{27 => {:after, 1, {:refuse_append, "no_quorum"}, :default}})
+    {:ok, p} = stub |> stub_router() |> Producer.new(stub_opts(stub)) |> Producer.prepare("t", 2_000)
+
+    {p, []} = Producer.produce(p, "t", entries(["a"]), now())
+    {_p, events, :idle} = Producer.await(p, 5_000)
+
+    assert failed(events) == [{"a", "no_quorum"}]
+    assert acked(events) == []
+    assert [{1, 0, ["a"]}] = StreamStub.appends(stub)
+  end
+
   test "a topic whose routes cannot be read is not asked again until its backoff ends", ctx do
     p = producer(ctx)
     missing = "missing_#{System.unique_integer([:positive])}"

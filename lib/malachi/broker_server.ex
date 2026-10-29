@@ -233,6 +233,14 @@ defmodule Malachi.BrokerServer do
   `reqids` (`:gen_server.send_request/4`); the broker's span of it is a child of the span in `ctx`. Its
   answer, `{produce_reply, scale}` with `scale` the share of the stream's window the range's load leaves,
   arrives as a message `:gen_server.check_response/3` reads.
+
+  The append is written as one append into one segment this node leads, or not at all. One that would go
+  to a segment led by another node (the range's segment sealed and its successor was placed elsewhere, or a
+  failover moved it), or whose records go to more than one range (a split or merge retired the range), is
+  answered `{:error, :not_primary}` before anything of it is planned, and `{:error, {:sealed,
+  end_offset}}` when the seal refused it after it was sent and its successor is led elsewhere. Either
+  answer means nothing of the append was stored, and the stream is told where its range went
+  (`{:stream_moved, ...}`).
   """
   @spec send_stream_produce(
           GenServer.server(),
@@ -246,7 +254,14 @@ defmodule Malachi.BrokerServer do
   def send_stream_produce(server, range_id, records, label, reqids, ctx),
     do: :gen_server.send_request(server, {:stream_produce, range_id, records, ctx}, label, reqids)
 
-  @doc "Routes, replicates and commits records; returns `{:ok, placements}` or an error."
+  @doc """
+  Routes, replicates and commits records; returns `{:ok, placements}` or an error. The in-process produce
+  of a whole topic: from any node, each range's records are planned into its active segment wherever that
+  segment is led, unlike a producer stream's append (`send_stream_produce/6`), which is refused with
+  `:not_primary` when it cannot be written as one append into one segment its node leads. A record written
+  through a node that does not lead its segment is readable where the range is read once its segment seals
+  or that node answers a later produce on the range (`Malachi.Broker.durable_end/2`).
+  """
   @spec produce(GenServer.server(), Malachi.Metadata.topic_name(), [Malachi.Log.Record.t()]) ::
           {:ok, %{Malachi.Metadata.range_id() => {non_neg_integer(), non_neg_integer()}}}
           | {:error, term()}
@@ -651,12 +666,14 @@ defmodule Malachi.BrokerServer do
     end)
   end
 
-  # An append on a producer stream: the produce of one range, refused whole when a key falls outside it,
-  # answered with the produce's own reply and how much of its window the range's load leaves.
+  # An append on a producer stream: the produce of one range, refused whole when a key falls outside it or
+  # when a segment it would be planned into is led by another node (`lead_append/3`), answered with the
+  # produce's own reply and how much of its window the range's load leaves.
   def handle_call({:stream_produce, range_id, records, ctx}, from, state) do
     {topic, _seq} = range_id
 
-    if Broker.keys_in_range?(state.broker, range_id, records) do
+    with {:keys, true} <- {:keys, Broker.keys_in_range?(state.broker, range_id, records)},
+         {:ok, state} <- lead_append(state, topic, records) do
       case handle_call({:produce, topic, records, ctx}, {:stream, from, range_id}, state) do
         {:reply, reply, state} ->
           reply_produce({:stream, from, range_id}, reply, state)
@@ -666,7 +683,8 @@ defmodule Malachi.BrokerServer do
           noreply
       end
     else
-      {:reply, {{:error, :key_outside_range}, stream_load(state, range_id)}, state}
+      {:keys, false} -> {:reply, {{:error, :key_outside_range}, stream_load(state, range_id)}, state}
+      {:error, reason, state} -> {:reply, {{:error, reason}, stream_load(state, range_id)}, state}
     end
   end
 
@@ -849,8 +867,9 @@ defmodule Malachi.BrokerServer do
             # The range's primary serializes appends and assigns the REAL offsets (the NorthGuard
             # invariant). When several broker frontends interleave on one range, the primary-assigned
             # end can differ from this frontend's precomputed one; the frontend ADOPTS the primary's
-            # truth (placements and local counter follow it) instead of failing the produce. That is
-            # what lets any node accept a produce for any range with no client-side routing.
+            # truth (placements and local counter follow it) instead of failing the produce. Only the
+            # in-process `produce/3` plans into a segment another node leads, so only it interleaves:
+            # a producer stream's append is planned only where its frontend leads (`lead_append/3`).
             {state, pending} = adopt_result(state, pending, dispatch, actual)
 
             if pending.remaining == 1 do
@@ -1309,14 +1328,16 @@ defmodule Malachi.BrokerServer do
   # frontend's roll overtaking its own produce, not a writer racing a seal it has not seen, so it is not
   # failed back to the client: it waits for the fence's answer if that is still on its way, and is planned
   # again at once if the answer already landed (the primary sends the answer before the refusal, so that
-  # is the common order). Only once: a dispatch that is itself a second attempt fails as before.
+  # is the common order). Only once: a dispatch that is itself a second attempt fails as before. A producer
+  # stream's dispatch is planned again only into segments this node leads, and otherwise fails as a second
+  # attempt does (`replan_dispatch/5`).
   defp sealed_dispatch(state, ref, pending, %{behind_fence: true} = dispatch, end_offset) do
     %{range_id: range_id, segment_id: segment_id} = dispatch
 
     if Broker.awaiting_fence?(state.broker, range_id, segment_id, now_ms(), @roll_fence_retry_ms) do
       park_on_fence(state, range_id, {:async, ref, dispatch, end_offset})
     else
-      replan_dispatch(state, ref, pending, dispatch)
+      replan_dispatch(state, ref, pending, dispatch, end_offset)
     end
   end
 
@@ -1363,7 +1384,7 @@ defmodule Malachi.BrokerServer do
     case {Map.get(state.async_produces, ref), mode} do
       # Already finished: another of its dispatches failed, or its safety timer fired.
       {nil, _mode} -> state
-      {pending, :replan} -> replan_dispatch(state, ref, pending, dispatch)
+      {pending, :replan} -> replan_dispatch(state, ref, pending, dispatch, end_offset)
       {pending, :refuse} -> finish_async_produce(state, ref, pending, {:error, {:sealed, end_offset}})
     end
   end
@@ -1381,27 +1402,70 @@ defmodule Malachi.BrokerServer do
 
   # Plans one refused dispatch's records again, as a produce of their own folded into the one they belong to:
   # the refused dispatch is replaced by whatever the new plan owes (one dispatch into the successor, or more
-  # if the range split meanwhile), and its placement by the new ones.
-  defp replan_dispatch(state, ref, pending, dispatch) do
+  # if the range split meanwhile), and its placement by the new ones. A producer stream's records are
+  # planned again only into one segment this node leads (`lead_append/3`): otherwise the produce, whose one
+  # dispatch this was, fails with the refusal that dispatch got (`{:sealed,
+  # end_offset}`), as a second attempt does, and the stream's producer, told where the range went by the
+  # sweep, sends it again there.
+  defp replan_dispatch(state, ref, pending, dispatch, end_offset) do
     {records, parts} = Map.pop!(pending.parts, dispatch)
     pending = %{pending | parts: parts}
 
-    case Broker.produce_plan(state.broker, pending.topic, records) do
-      {broker, {:ok, placements, dispatches}} ->
+    with {:ok, state} <- lead_replan(state, pending, records),
+         {broker, {:ok, placements, dispatches}} <- Broker.produce_plan(state.broker, pending.topic, records) do
+      state = %{state | broker: broker}
+      {_parts, tags} = dispatch_async(state, ref, dispatches, false)
+      {state, pending} = owe_dispatches(state, pending, tags)
+
+      pending = %{
+        pending
+        | placements: pending.placements |> Map.delete(dispatch.range_id) |> Map.merge(placements),
+          remaining: pending.remaining - 1 + length(dispatches)
+      }
+
+      %{state | async_produces: Map.put(state.async_produces, ref, pending)}
+    else
+      {:error, :not_primary, state} -> finish_async_produce(state, ref, pending, {:error, {:sealed, end_offset}})
+      {:error, reason, state} -> finish_async_produce(state, ref, pending, {:error, reason})
+      {broker, {:error, _reason} = error} -> finish_async_produce(%{state | broker: broker}, ref, pending, error)
+    end
+  end
+
+  # Only a producer stream's produce is held to the segments this node leads; `produce/3` plans anywhere.
+  defp lead_replan(state, %{from: {:stream, _from, _range_id}, topic: topic}, records),
+    do: lead_append(state, topic, records)
+
+  defp lead_replan(state, _pending, _records), do: {:ok, state}
+
+  # Whether a producer stream's append can be written as one append into one segment this node leads: the
+  # condition a stream is opened under (`with_local_range/3`), `local_ref?/1` on the segment's primary. A
+  # range with no active segment has it opened now (`Malachi.Broker.produce_primaries/3`), as the plan would
+  # open it, so an append that arrives after its segment sealed places the successor. Otherwise nothing is
+  # planned and the append is refused with `:not_primary`:
+  #
+  #   * its segment is led elsewhere. A frontend that dispatched there would answer the append and raise the
+  #     read horizon in its own memory (`Malachi.Broker.mark_durable/2`), which the primary that serves the
+  #     range's reads (`with_consume_range/3`) never learns, so the acknowledged record would stay
+  #     unreadable there until the segment sealed or that primary answered a later produce on the range;
+  #   * its records go to more than one range (a split or merge retired the stream's range, and its keys now
+  #     belong to several). Planned, it would be several dispatches, and one of them refused while another
+  #     landed would answer the append with an error over records that were stored. Held to one range, every
+  #     refusal of a stream append (`:not_primary`, or the `{:sealed, end_offset}` of its one dispatch)
+  #     means nothing of it was stored, which is what lets a producer send it again as routing.
+  #
+  # The streams held here are swept, so one whose segment the range has moved past is told where it went
+  # now (`{:stream_moved, ...}`) and its producer opens again where the move says and sends the append there.
+  defp lead_append(state, topic, records) do
+    case Broker.produce_primaries(state.broker, topic, records) do
+      {broker, {:ok, primaries}} ->
         state = %{state | broker: broker}
-        {_parts, tags} = dispatch_async(state, ref, dispatches, false)
-        {state, pending} = owe_dispatches(state, pending, tags)
 
-        pending = %{
-          pending
-          | placements: pending.placements |> Map.delete(dispatch.range_id) |> Map.merge(placements),
-            remaining: pending.remaining - 1 + length(dispatches)
-        }
+        if map_size(primaries) <= 1 and Enum.all?(Map.values(primaries), &local_ref?/1),
+          do: {:ok, state},
+          else: {:error, :not_primary, sweep_streams(state)}
 
-        %{state | async_produces: Map.put(state.async_produces, ref, pending)}
-
-      {broker, {:error, _reason} = error} ->
-        finish_async_produce(%{state | broker: broker}, ref, pending, error)
+      {broker, {:error, reason}} ->
+        {:error, reason, %{state | broker: broker}}
     end
   end
 

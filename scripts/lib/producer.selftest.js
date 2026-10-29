@@ -223,6 +223,72 @@ check('after stopSending, buffered records are dropped and an append answered un
   }),
 );
 
+// `not_primary` and `sealed` are the broker's answers to an append it stored nothing of because its range is
+// written elsewhere now (a roll placed the successor on another node): routing, sent again on a new stream,
+// never a failure.
+for (const reason of ['not_primary', 'sealed']) {
+  check(`an append refused ${reason} goes out again on the next stream, acknowledged once, with no failure`, () =>
+    withBroker(async (broker, make) => {
+      broker.appendPolicy = () => 'silent';
+      const p = make({ maxInflight: 4 });
+      await p.produce('t', entries(['a']));
+      await untilTrue(() => broker.appends.length === 1);
+      const first = broker.appends[0].stream;
+      broker.appendPolicy = () => 'ack';
+      broker.ack(first, 1, [{ sequence: 0, reason }]);
+      assert.strictEqual(await p.wait(2000), 'idle');
+      await p.produce('t', entries(['b']));
+      assert.strictEqual(await p.wait(2000), 'idle');
+      const events = p.takeEvents();
+      assert.deepStrictEqual(tags(events, 'acked'), ['a', 'b']);
+      assert.deepStrictEqual(tags(events, 'failed'), []);
+      // sent twice, on the first stream and then on the one opened after it, and the stream counted redirected
+      assert.deepStrictEqual(broker.appends.map((a) => [a.stream === first, a.sequence, a.values]), [
+        [true, 0, ['a']],
+        [false, 0, ['a']],
+        [false, 1, ['b']],
+      ]);
+      assert.strictEqual(p.statsNow().redirects, 1);
+    }),
+  );
+}
+
+check('routing refusals on several appends in flight resend them in the order they were sent, after the move', () =>
+  withBroker(async (broker, make) => {
+    broker.appendPolicy = () => 'silent';
+    const p = make({ maxInflight: 4 });
+    for (const v of ['a', 'b', 'c']) await p.produce('t', entries([v]));
+    await untilTrue(() => broker.appends.length === 3);
+    const first = broker.appends[0].stream;
+    // the broker's move first, then each append refused, as a broker sends them
+    broker.moved(first);
+    broker.appendPolicy = () => 'ack';
+    for (const sequence of [0, 1, 2]) broker.ack(first, sequence + 1, [{ sequence, reason: 'not_primary' }]);
+    assert.strictEqual(await p.wait(2000), 'idle');
+    const events = p.takeEvents();
+    assert.deepStrictEqual(tags(events, 'acked'), ['a', 'b', 'c']);
+    assert.deepStrictEqual(tags(events, 'failed'), []);
+    const later = broker.appends.filter((a) => a.stream !== first).flatMap((a) => a.values);
+    assert.deepStrictEqual(later, ['a', 'b', 'c']);
+  }),
+);
+
+check('an append refused for a reason that is not routing still fails, and is not sent again', () =>
+  withBroker(async (broker, make) => {
+    broker.appendPolicy = () => 'silent';
+    const p = make();
+    await p.produce('t', entries(['a']));
+    await untilTrue(() => broker.appends.length === 1);
+    broker.ack(broker.appends[0].stream, 1, [{ sequence: 0, reason: 'no_quorum' }]);
+    await untilTrue(() => !p.inFlight());
+    const events = p.takeEvents();
+    assert.deepStrictEqual(tags(events, 'failed'), ['a']);
+    assert.deepStrictEqual(tags(events, 'acked'), []);
+    assert.ok(events.every((e) => e.kind !== 'failed' || e.reason === 'no_quorum'));
+    assert.deepStrictEqual(appended(broker), ['a']);
+  }),
+);
+
 check('a refusal that names no append fails every append in flight on the stream', () =>
   withBroker(async (broker, make) => {
     broker.appendPolicy = () => 'silent';

@@ -191,6 +191,79 @@ defmodule Malachi.ProducerStreamsMultinodeTest do
     assert stored == Enum.sort(stored), "the log is out of order: #{inspect(stored)}"
   end
 
+  # Every node of the test now places new segments on `ref` alone (replication factor 1, clamped to the one
+  # broker), once its broker has taken the narrowed set in (its own refresh, read from its state here).
+  defp place_on(ctx, ref) do
+    for node <- ctx.nodes do
+      :ok = :erpc.call(node, StreamCluster, :put_live, [[ref]])
+
+      :ok =
+        PollingHelper.wait_until!(fn -> :sys.get_state({@broker, node}).broker.brokers == [ref] end, timeout: 5_000)
+    end
+
+    :ok
+  end
+
+  # Waits until `node`'s view of the range holds `count` segments, the last `state` and led by `primary`
+  # (`nil` for any), every one before it sealed.
+  defp await_segments(ctx, node, count, state, primary \\ nil) do
+    PollingHelper.wait_until!(
+      fn ->
+        segments = node |> StreamCluster.metadata_on() |> Metadata.segments_of_range(ctx.root)
+
+        with true <- length(segments) == count,
+             %{state: ^state, replica_set: [leader | _]} <- Enum.max_by(segments, & &1.start_offset) do
+          Enum.count(segments, &(&1.state == :sealed)) == count - if(state == :active, do: 1, else: 0) and
+            (primary == nil or leader == primary)
+        else
+          _not_yet -> false
+        end
+      end,
+      timeout: 10_000
+    )
+  end
+
+  defp acked!(stream, range_id, index), do: assert({:acked, _stream, _moved} = append(stream, range_id, index))
+
+  test "an append after a roll placed the successor on another node is readable there, with no produce after it",
+       ctx do
+    [p, f | _] = ctx.nodes
+    {p_ref, f_ref} = {{@repl, p}, {@repl, f}}
+
+    # the first segment on p, written through p, so p knows the range's read horizon from its own answers
+    # and never asks the replicas for it again
+    :ok = place_on(ctx, p_ref)
+    first = open(ctx.root, p)
+    assert first.node == p
+    for index <- 0..2, do: acked!(first, ctx.root, index)
+    :ok = await_segments(ctx, f, 1, :sealed)
+
+    # the second on f, through a stream f holds: the frontend whose segment the next roll seals
+    :ok = place_on(ctx, f_ref)
+    second = open(ctx.root, f)
+    assert second.node == f
+    for index <- 3..5, do: acked!(second, ctx.root, index)
+    :ok = await_segments(ctx, f, 2, :sealed)
+
+    # the successor of f's segment goes to p: the next append through f's stream lands in a segment p leads
+    :ok = place_on(ctx, p_ref)
+
+    case append(second, ctx.root, 6) do
+      {:acked, _stream, _moved} ->
+        :ok
+
+      # refused rather than written through f: the producer opens where the range went and sends it again
+      {:failed, _stream, _moved} ->
+        third = open(ctx.root, f)
+        assert third.node == p
+        acked!(third, ctx.root, 6)
+    end
+
+    # p serves the range's reads once its view names the successor it leads
+    :ok = await_segments(ctx, p, 3, :active, p_ref)
+    assert ReadBack.values({@broker, p}, "events") == Enum.map(0..6, &value/1)
+  end
+
   # The stream to append on: the one held, or one opened now, recording where each stream opened after the
   # failover.
   defp reopen(nil, ctx, excluded, failover, opened_after) do

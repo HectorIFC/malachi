@@ -296,17 +296,46 @@ defmodule Malachi.Broker do
   @spec produce_plan(t(), Metadata.topic_name(), [Record.t()]) ::
           {t(), {:ok, placements(), [dispatch()]} | {:error, term()}}
   def produce_plan(%__MODULE__{} = broker, topic, records) when is_list(records) do
+    case group_by_range(broker, topic, records) do
+      {:error, _reason} = error -> {broker, error}
+      {:ok, grouped} -> plan_groups(broker, grouped)
+    end
+  end
+
+  @doc """
+  The primary of the active segment `produce_plan/3` would plan each range's share of `records` into, by
+  range: the range's active segment, opened now (placed and registered) for a range that has none,
+  exactly as `produce_plan/3` would open it, with no offset reserved and no byte counted. The segments it
+  opens stay open in the returned broker, as `stream_segment/2` leaves the one it opens. A producer
+  stream asks it before planning an append (`Malachi.BrokerServer`), so that an append is planned only
+  into segments its frontend leads. Fails as `produce_plan/3` does before it plans anything: `:no_such_topic`,
+  `{:unroutable, key}`, or the reason a segment could not be opened (the segments opened before that one
+  stay open).
+  """
+  @spec produce_primaries(t(), Metadata.topic_name(), [Record.t()]) ::
+          {t(), {:ok, %{Metadata.range_id() => term()}} | {:error, term()}}
+  def produce_primaries(%__MODULE__{} = broker, topic, records) when is_list(records) do
+    case group_by_range(broker, topic, records) do
+      {:error, _reason} = error -> {broker, error}
+      {:ok, grouped} -> grouped |> Map.keys() |> Enum.reduce_while({broker, {:ok, %{}}}, &primary_into/2)
+    end
+  end
+
+  defp primary_into(range_id, {broker, {:ok, primaries}}) do
+    case ensure_segment(broker, range_id) do
+      {:ok, broker, segment} -> {:cont, {broker, {:ok, Map.put(primaries, range_id, primary(segment))}}}
+      {:error, reason} -> {:halt, {broker, {:error, reason}}}
+    end
+  end
+
+  # `records` grouped by the active range of `topic` that owns each one's key, each group in reverse order.
+  defp group_by_range(broker, topic, records) do
     case DSRSM.get_topic(broker.dsrsm, topic) do
       nil ->
-        {broker, {:error, :no_such_topic}}
+        {:error, :no_such_topic}
 
       topic_meta ->
-        active_ranges = DSRSM.active_ranges_of_topic(broker.dsrsm, topic)
-
-        case group_by_owning_range(records, active_ranges, topic_meta.keyspace_size) do
-          {:error, _reason} = error -> {broker, error}
-          {:ok, grouped} -> plan_groups(broker, grouped)
-        end
+        group_by_owning_range(records, DSRSM.active_ranges_of_topic(broker.dsrsm, topic), topic_meta.keyspace_size)
     end
   end
 
@@ -423,7 +452,11 @@ defmodule Malachi.Broker do
   The offset below which `range_id`'s records are durable, as this frontend knows it: the produces it
   answered as stored (`mark_durable/2`), the end a replication quorum held when it restarted
   (`seed_durable/3`), and the end of every sealed segment of the range. So records another node's frontend
-  wrote become readable here once their segment seals. After this frontend restarts, the records of an active
+  wrote into a segment this node leads become readable here once their segment seals, or once this frontend
+  answers a later produce on the range (its placement raises the horizon past them). Only the in-process
+  `Malachi.BrokerServer.produce/3` writes through a node that does not lead the segment: a producer stream's
+  append is planned only into segments its frontend leads, so every record a stream wrote was answered by
+  the node that serves the range's reads. After this frontend restarts, the records of an active
   segment it leads become readable once a quorum of the segment's replicas answers the recovery (the first
   reconcile, at boot); while fewer answer, with the next produce it answers there, a later pass, or the seal.
   Never past the range's end.
