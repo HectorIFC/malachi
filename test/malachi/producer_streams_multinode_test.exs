@@ -16,14 +16,15 @@ defmodule Malachi.ProducerStreamsMultinodeTest do
 
   alias Malachi.BrokerServer
   alias Malachi.Cluster.HealCoordinator
-  alias Malachi.Cluster.ReplicationServer
   alias Malachi.Log.Record
+  alias Malachi.Metadata
+  alias Malachi.Test.PollingHelper
   alias Malachi.Test.RaPeers
   alias Malachi.Test.ReadBack
   alias Malachi.Test.StreamCluster
 
-  @broker :stream_mn_broker
-  @repl :stream_mn_repl
+  @broker StreamCluster.broker()
+  @repl StreamCluster.repl()
   @appends 40
 
   setup_all do
@@ -31,53 +32,7 @@ defmodule Malachi.ProducerStreamsMultinodeTest do
   end
 
   setup do
-    peers = Enum.map(1..3, fn _ -> RaPeers.start(nil) end)
-    on_exit(fn -> Enum.each(peers, &RaPeers.stop/1) end)
-    nodes = Enum.map(peers, & &1.node)
-    refs = Enum.map(nodes, &{@repl, &1})
-    cluster = :"stream_mn_#{System.unique_integer([:positive])}"
-
-    for node <- nodes do
-      {:ok, _apps} = :erpc.call(node, :application, :ensure_all_started, [:telemetry])
-      :ok = :erpc.call(node, Logger, :configure, [[level: :none]])
-      :ok = :erpc.call(node, StreamCluster, :put_live, [refs])
-      :ok = :erpc.call(node, StreamCluster, :start_task_supervisor, [])
-      directory = Path.join(System.tmp_dir!(), "stream_mn_#{node}")
-      on_exit(fn -> File.rm_rf!(directory) end)
-
-      {:ok, _repl} =
-        :erpc.call(node, GenServer, :start, [
-          ReplicationServer,
-          [name: @repl, directory: Path.join(directory, "repl")],
-          [name: @repl]
-        ])
-    end
-
-    for node <- nodes do
-      directory = Path.join(System.tmp_dir!(), "stream_mn_#{node}")
-
-      opts = [
-        brokers: refs,
-        replication_factor: 2,
-        metadata_cluster: cluster,
-        metadata_nodes: nodes,
-        live_brokers: &StreamCluster.live_brokers/0,
-        policy_fun: &StreamCluster.no_policy/1,
-        segment_max_bytes: 3 * Record.encoded_size(Record.new("r00", key: "k"))
-      ]
-
-      {:ok, _broker} =
-        :erpc.call(
-          node,
-          GenServer,
-          :start,
-          [BrokerServer, {Path.join(directory, "broker"), opts}, [name: @broker]],
-          30_000
-        )
-    end
-
-    {:ok, root} = BrokerServer.create_topic({@broker, hd(nodes)}, "events", 4)
-    %{nodes: nodes, refs: refs, root: root}
+    StreamCluster.start()
   end
 
   # Opens a stream on `range_id`, starting at `node` and following the broker to the node that leads the
@@ -131,14 +86,9 @@ defmodule Malachi.ProducerStreamsMultinodeTest do
 
   defp value(index), do: "r" <> String.pad_leading(Integer.to_string(index), 2, "0")
 
+  # Kills the replication server leading the range's active segment and heals the cluster around it.
   defp fail_primary(ctx) do
-    [segment] =
-      Enum.filter(
-        Malachi.Metadata.segments_of_range(StreamCluster.metadata_on(hd(ctx.nodes)), ctx.root),
-        &(&1.state == :active)
-      )
-
-    {@repl, primary_node} = hd(segment.replica_set)
+    {@repl, primary_node} = hd(active_segment(ctx).replica_set)
     survivors = Enum.reject(ctx.refs, &(&1 == {@repl, primary_node}))
 
     :erpc.call(primary_node, Process, :exit, [:erpc.call(primary_node, Process, :whereis, [@repl]), :kill])
@@ -160,20 +110,45 @@ defmodule Malachi.ProducerStreamsMultinodeTest do
     {primary_node, healer}
   end
 
-  defp read_until(node, acked, remaining_ms) do
-    stored = read_all(node)
+  # The range's one active segment, as the first node sees it. A roll whose seal has landed leaves the range
+  # with none until an append or an open places the successor (`Malachi.Broker.stream_segment/2`), and no
+  # append comes while the failover is being set up, so a stream is opened (and closed) to place it, as the
+  # producer's next reopening would. The first node's metadata may trail the control plane's, so it is read
+  # until it shows exactly one.
+  defp active_segment(ctx) do
+    if active_segments(ctx) == [] do
+      stream = open(ctx.root, hd(ctx.nodes))
+      :ok = BrokerServer.close_stream({@broker, stream.node}, stream.token)
+    end
 
-    if acked -- stored == [] or remaining_ms <= 0,
-      do: stored,
-      else: Process.sleep(200) && read_until(node, acked, remaining_ms - 200)
+    :ok = PollingHelper.wait_until!(fn -> match?([_], active_segments(ctx)) end, timeout: 10_000)
+    [segment] = active_segments(ctx)
+    segment
   end
 
-  # What `node` reads back now: nothing yet while the failover leaves the range unreadable, which the
-  # loop above waits out.
-  defp read_all(node) do
-    case ReadBack.values({@broker, node}, "events") do
-      {:error, _reason} -> []
-      values -> values
+  defp active_segments(ctx) do
+    ctx.nodes
+    |> hd()
+    |> StreamCluster.metadata_on()
+    |> Metadata.segments_of_range(ctx.root)
+    |> Enum.filter(&(&1.state == :active))
+  end
+
+  # What `node` reads back, read again every 200 ms while a read is refused (`ReadBack` answers an error
+  # while the failover leaves the range unreadable) or misses an acknowledged record, until the wait runs
+  # out. A read still refused then fails the test with its reason: a refusal is never read as an empty log.
+  defp read_until(node, acked, remaining_ms) do
+    read = ReadBack.values({@broker, node}, "events")
+
+    cond do
+      match?({:error, _reason}, read) and remaining_ms <= 0 ->
+        flunk("the log on #{node} could not be read: #{inspect(read)}")
+
+      not match?({:error, _reason}, read) and (acked -- read == [] or remaining_ms <= 0) ->
+        read
+
+      true ->
+        Process.sleep(200) && read_until(node, acked, remaining_ms - 200)
     end
   end
 
@@ -193,8 +168,6 @@ defmodule Malachi.ProducerStreamsMultinodeTest do
     {failed_node, healer} = failover
     sent = Enum.map(0..(@appends - 1), &value/1)
     acked_values = acked |> Enum.reverse() |> Enum.map(&value/1)
-    # A broker's read horizon takes in another broker's writes on its next reconcile, so the log is read
-    # until every acknowledged record is visible or the wait runs out.
     stored = read_until(healer, acked_values, 10_000)
 
     assert Enum.count(moves, &(&1 == :sealed)) >= 3, "the segments did not roll under the stream: #{inspect(moves)}"

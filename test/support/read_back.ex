@@ -9,10 +9,16 @@ defmodule Malachi.Test.ReadBack do
   filters an ancestor's records by the slice the range reads), so across splits each record is read once,
   by the range that holds its key now.
 
-  A range is read where its primary is, as `fetch_range` is served: a broker that answers `moved` to
-  another one is asked there, and the page is read on that broker's node, as a connection there reads it.
+  A range is read where its primary is, as `fetch_range` is served: a broker that answers `moved` names
+  the segment's primary replication server, and the range is asked again of the broker under the same
+  name on that server's node, whose page is read on that node, as a connection there reads it. The read
+  of one range follows at most 3 moves and then answers `{:error, {:moved, :too_many_hops}}`, so brokers
+  that keep pointing at each other (or at themselves) end the read with an error rather than an endless
+  recursion or an empty list.
+
   A topic whose metadata this broker cannot see yet answers `{:error, :metadata_unavailable}`, never an
-  empty list, as `fetch_range` refuses it.
+  empty list, as `fetch_range` refuses it. A server that is not a broker (`{:error, :unknown_call}`)
+  raises: that is a bug in the caller, never an empty range.
   """
 
   alias Malachi.BrokerServer
@@ -23,6 +29,8 @@ defmodule Malachi.Test.ReadBack do
 
   @page 1_000
   @max_bytes 64 * 1_048_576
+  # The moves the read of one range follows before it gives up.
+  @max_hops 3
 
   @doc """
   The records of `topic` on `server`, range by range in the order of their key blocks, each range's in the
@@ -37,7 +45,7 @@ defmodule Malachi.Test.ReadBack do
   end
 
   defp read_into(server, range, acc) do
-    case read_range(server, range.id, :earliest, []) do
+    case read_range(server, range.id, :earliest, [], @max_hops) do
       {:ok, records} -> {:cont, acc ++ records}
       {:error, _reason} = error -> {:halt, error}
     end
@@ -48,6 +56,7 @@ defmodule Malachi.Test.ReadBack do
   defp no_ranges(server, topic) do
     case BrokerServer.fetch_range(server, {topic, 0}, :earliest, 0) do
       {:error, :metadata_unavailable} = error -> error
+      {:error, :unknown_call} -> not_a_broker!(server)
       _absent -> []
     end
   end
@@ -58,7 +67,7 @@ defmodule Malachi.Test.ReadBack do
   """
   @spec range_records(GenServer.server(), Metadata.range_id(), term()) :: [Record.t()] | {:error, term()}
   def range_records(server, range_id, start) do
-    case read_range(server, range_id, start, []) do
+    case read_range(server, range_id, start, [], @max_hops) do
       {:ok, records} -> records
       {:error, _reason} = error -> error
     end
@@ -73,7 +82,7 @@ defmodule Malachi.Test.ReadBack do
     end
   end
 
-  defp read_range(server, range_id, start, acc) do
+  defp read_range(server, range_id, start, acc, hops) do
     with {:ok, position, view, reporter} <- BrokerServer.fetch_range(server, range_id, start, 0),
          {:ok, page, _count} <- read_page(server, [view, range_id, position, @page, @max_bytes, reporter]) do
       {:ok, entries} = Batch.decode(page.batch, max_inflated_bytes: @max_bytes, layout: :positioned)
@@ -81,18 +90,46 @@ defmodule Malachi.Test.ReadBack do
 
       if entries == [] or page.next == position,
         do: {:ok, acc ++ mine},
-        else: read_range(server, range_id, {:position, page.next}, acc ++ mine)
+        else: read_range(server, range_id, {:position, page.next}, acc ++ mine, hops)
     else
-      {:moved, :elsewhere, [{^range_id, {_segment, primary}}]} when primary != server ->
-        read_range(primary, range_id, start, acc)
+      {:moved, :elsewhere, [{^range_id, {_segment, _primary}}]} when hops == 0 ->
+        {:error, {:moved, :too_many_hops}}
+
+      {:moved, :elsewhere, [{^range_id, {_segment, primary}}]} ->
+        read_range(broker_beside(server, primary), range_id, start, acc, hops - 1)
 
       {:moved, reason, _targets} ->
         {:error, {:moved, reason}}
+
+      {:error, :unknown_call} ->
+        not_a_broker!(server)
 
       {:error, _reason} = error ->
         error
     end
   end
+
+  # A move names the primary of the range's segment, which is a replication server (`{name, node}`, or a
+  # pid), not a broker: the range is read through the broker on that server's node, under the name of the
+  # broker that answered the move.
+  defp broker_beside(server, primary), do: {broker_name(server), node_of(primary)}
+
+  defp broker_name({name, _node}) when is_atom(name), do: name
+  defp broker_name(name) when is_atom(name), do: name
+
+  defp broker_name(pid) when is_pid(pid) do
+    case :erpc.call(node(pid), Process, :info, [pid, :registered_name]) do
+      {:registered_name, name} -> name
+      _unnamed -> raise ArgumentError, "a move cannot be followed from #{inspect(pid)}: it has no registered name"
+    end
+  end
+
+  defp node_of({_name, node}) when is_atom(node), do: node
+  defp node_of(pid) when is_pid(pid), do: node(pid)
+  defp node_of(name) when is_atom(name), do: node()
+
+  defp not_a_broker!(server),
+    do: raise(ArgumentError, "#{inspect(server)} answered :unknown_call to fetch_range: it is not a broker")
 
   # The page read where the broker that answered lives: its segments are read through that node's
   # replication servers.
