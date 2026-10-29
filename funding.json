@@ -1,5 +1,5 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://fundingjson.org/schema/v1.1.0.json",
   "version": "v1.1.0",
   "entity": {
     "type": "individual",
@@ -22,7 +22,7 @@
       "repositoryUrl": {
         "url": "https://github.com/HectorIFC/malachi"
       },
-      "licenses": ["MIT"],
+      "licenses": ["spdx:MIT"],
       "tags": ["message-broker", "elixir", "erlang", "beam", "raft"]
     }
   ],

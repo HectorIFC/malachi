@@ -126,7 +126,12 @@ defmodule FundingManifestTest do
 
       assert project["repositoryUrl"]["url"] == config[:source_url]
       assert project["webpageUrl"]["url"] == config[:site_url] <> "/"
-      assert project["licenses"] == config[:package][:licenses]
+      # The schema writes a standard license as its SPDX identifier with the "spdx:" prefix (its examples use spdx:MIT).
+      assert project["licenses"] == Enum.map(config[:package][:licenses], &("spdx:" <> &1))
+    end
+
+    test "names the v1.1.0 schema it follows, as the schema's own examples do" do
+      assert manifest()["$schema"] == "https://fundingjson.org/schema/v1.1.0.json"
     end
 
     test "the entity e-mail is the one SECURITY.md publishes for reports" do

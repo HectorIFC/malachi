@@ -83,6 +83,20 @@ defmodule WorkflowHardeningTest do
       refute text =~ "pull_request_target"
     end
 
+    test "runs on a push to main and on the weekly schedule, so removing either trigger fails here", %{text: text} do
+      assert text =~ ~r/^  push:\n    branches: \[main\]$/m
+      assert text =~ "cron: '30 1 * * 1'"
+    end
+
+    test "pins every action in the job by a full commit SHA, with its version in a comment", %{text: text} do
+      uses_lines = text |> String.split("\n") |> Enum.filter(&String.contains?(&1, "uses:"))
+      assert uses_lines != []
+
+      for line <- uses_lines do
+        assert line =~ ~r/@[0-9a-f]{40} # v\d+\.\d+\.\d+$/, "not pinned by SHA: #{String.trim(line)}"
+      end
+    end
+
     test "grants no permission beyond read at the top level", %{text: text} do
       assert text =~ ~r/^permissions: read-all$/m
     end
@@ -111,7 +125,7 @@ defmodule WorkflowHardeningTest do
     end
 
     test "does not keep credentials after checkout", %{text: text} do
-      assert text =~ ~r/uses: actions\/checkout@v\d\n\s+with:\n\s+persist-credentials: false/
+      assert text =~ ~r/uses: actions\/checkout@[0-9a-f]{40} # v\d+\.\d+\.\d+\n\s+with:\n\s+persist-credentials: false/
     end
 
     test "is the only workflow besides Pages that holds id-token" do
