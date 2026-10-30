@@ -85,7 +85,7 @@ defmodule WorkflowHardeningTest do
 
     test "runs on a push to main and on the weekly schedule, so removing either trigger fails here", %{text: text} do
       assert text =~ ~r/^  push:\n    branches: \[main\]$/m
-      assert text =~ "cron: '30 1 * * 1'"
+      assert text =~ ~r/^  schedule:\n(?:    #[^\n]*\n)*    - cron: '30 1 \* \* 1'$/m
     end
 
     test "pins every action in the job by a full commit SHA, with its version in a comment", %{text: text} do
@@ -93,7 +93,8 @@ defmodule WorkflowHardeningTest do
       assert uses_lines != []
 
       for line <- uses_lines do
-        assert line =~ ~r/@[0-9a-f]{40} # v\d+\.\d+\.\d+$/, "not pinned by SHA: #{String.trim(line)}"
+        assert line =~ ~r/^\s*(- )?uses: [^@\s]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/,
+               "not pinned by SHA: #{String.trim(line)}"
       end
     end
 
