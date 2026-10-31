@@ -8,9 +8,9 @@ point: the broker can split a topic's storage and restripe it across nodes under
 client without breaking it, because the client never held a coordinate that could go stale. The
 control plane is replicated by quorum (Raft, via `ra`).
 
-[Documentation](https://hectorifc.github.io/malachi/) &middot;
-[Source](https://github.com/HectorIFC/malachi) &middot;
-[Benchmarks and chaos results](https://hectorifc.github.io/malachi/loadtest-node-results.html)
+[Documentation](https://malachi-hq.github.io/malachi/) &middot;
+[Source](https://github.com/malachi-hq/malachi) &middot;
+[Benchmarks and chaos results](https://malachi-hq.github.io/malachi/loadtest-node-results.html)
 
 ## Introduction
 
@@ -115,7 +115,7 @@ fresh `/data` would leave the broker unable to write into its own volume.
 
 ## Configuration
 
-The full list is in the [documentation](https://hectorifc.github.io/malachi/). These are the ones
+The full list is in the [documentation](https://malachi-hq.github.io/malachi/). These are the ones
 worth knowing before the first run:
 
 | Variable | Default | What it does |
@@ -138,7 +138,7 @@ Malachi exports both halves of its own observability natively, and the repositor
 stack that wires them up for you:
 
 ```bash
-git clone https://github.com/HectorIFC/malachi.git && cd malachi
+git clone https://github.com/malachi-hq/malachi.git && cd malachi
 docker compose up -d
 ```
 
@@ -194,4 +194,4 @@ Note that `/metrics` is authenticated and is not a health probe.
 ## License
 
 MIT. Source, issues and the full documentation live at
-[github.com/HectorIFC/malachi](https://github.com/HectorIFC/malachi).
+[github.com/malachi-hq/malachi](https://github.com/malachi-hq/malachi).

@@ -37,6 +37,10 @@ jobs:
     timeout-minutes: 75
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       # The full history and its tags: OLD is a release tag, resolved and exported by git.
       - name: 📥 Checkout code
         uses: actions/checkout@v4
@@ -86,6 +90,10 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       # The full history, because publishing decides between two results by which commit is newer.
       - name: 📥 Checkout code
         uses: actions/checkout@v4

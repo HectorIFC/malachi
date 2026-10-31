@@ -20,6 +20,10 @@ jobs:
     name: Sobelow Security Scan
     runs-on: ubuntu-latest
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v4
 
       - name: Set up Elixir
@@ -69,6 +73,10 @@ jobs:
     name: Dependency Vulnerability Audit
     runs-on: ubuntu-latest
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v4
 
       - name: Set up Elixir
@@ -111,6 +119,10 @@ jobs:
     name: Secret Scanning (Gitleaks)
     runs-on: ubuntu-latest
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -119,11 +131,16 @@ jobs:
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   trivy-scan:
     name: Trivy Security Scanner
     runs-on: ubuntu-latest
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v4
 
       - name: Run Trivy vulnerability scanner (filesystem)
@@ -177,6 +194,10 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
@@ -211,6 +232,10 @@ jobs:
     name: Shell Hygiene
     runs-on: ubuntu-latest
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - uses: actions/checkout@v4
 
       # Cheap and specific on purpose: it asks one question, "does any entrypoint download something and
@@ -229,6 +254,10 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: Summary
         run: |
           {

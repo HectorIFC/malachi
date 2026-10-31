@@ -59,7 +59,7 @@ mix run benchmark/storage_viability.exs
 mix run benchmark/dashboard_security_benchmark.exs
 ```
 
-See [benchmark/README.md](https://github.com/HectorIFC/malachi/blob/main/benchmark/README.md) for details.
+See [benchmark/README.md](https://github.com/malachi-hq/malachi/blob/main/benchmark/README.md) for details.
 
 ## Pre-Commit Hooks Setup
 

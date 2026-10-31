@@ -30,7 +30,7 @@ ARG APP_VERSION
 LABEL org.opencontainers.image.title="Malachi" \
       org.opencontainers.image.description="High-performance message system" \
       org.opencontainers.image.version="${APP_VERSION}" \
-      org.opencontainers.image.source="https://github.com/HectorIFC/malachi" \
+      org.opencontainers.image.source="https://github.com/malachi-hq/malachi" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="HectorIFC"
 

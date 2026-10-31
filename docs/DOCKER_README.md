@@ -1,9 +1,9 @@
 # Malachi
 
-[![GitHub](https://img.shields.io/github/v/release/HectorIFC/malachi?label=GitHub)](https://github.com/HectorIFC/malachi)
+[![GitHub](https://img.shields.io/github/v/release/HectorIFC/malachi?label=GitHub)](https://github.com/malachi-hq/malachi)
 [![Docker Pulls](https://img.shields.io/docker/pulls/hectorcardoso/malachi)](https://hub.docker.com/r/hectorcardoso/malachi)
 [![Docker Image Size](https://img.shields.io/docker/image-size/hectorcardoso/malachi/latest)](https://hub.docker.com/r/hectorcardoso/malachi)
-[![License](https://img.shields.io/github/license/HectorIFC/malachi)](https://github.com/HectorIFC/malachi/blob/main/LICENSE)
+[![License](https://img.shields.io/github/license/HectorIFC/malachi)](https://github.com/malachi-hq/malachi/blob/main/LICENSE)
 
 **Malachi** is an open-source, 100% Elixir reimplementation of LinkedIn's **NorthGuard** log-storage architecture: a CP, horizontally-scalable **log broker**. Clients speak topics, keys, and opaque cursors, never partitions or offsets, so the broker can split and restripe its storage underneath without breaking them. The control plane is replicated by quorum (Raft via `ra`).
 
@@ -116,7 +116,7 @@ docker run \
 
 In production these must be absolute paths: a relative value is rejected at boot, because it would resolve
 against the working directory and put durable data back on ephemeral storage. The bundled
-[`docker-compose.yml`](https://github.com/HectorIFC/malachi/blob/main/docker-compose.yml) and the
+[`docker-compose.yml`](https://github.com/malachi-hq/malachi/blob/main/docker-compose.yml) and the
 Kubernetes manifest use these same paths.
 
 ### TLS Configuration
@@ -278,12 +278,12 @@ Clients do not hand-write frames.
 
 Use one of the supported clients instead:
 
-- the reference **Node CLI** in [`scripts/`](https://github.com/HectorIFC/malachi/tree/main/scripts)
+- the reference **Node CLI** in [`scripts/`](https://github.com/malachi-hq/malachi/tree/main/scripts)
   (`producer.js`, `consumer.js`, `subscriber.js`), which reads `MALACHI_HOST`, `MALACHI_PORT`,
   `MALACHI_USER`, `MALACHI_PASS`, `MALACHI_TOPIC`;
 - the in-process Elixir API (`Malachi.LogApi`) for embedded use.
 
-See the [guides](https://hectorifc.github.io/malachi) for producing, consuming, consumer groups, and
+See the [guides](https://malachi-hq.github.io/malachi) for producing, consuming, consumer groups, and
 streaming with backpressure.
 
 ---
@@ -383,12 +383,12 @@ make docker-test-all
 
 ## Source Code
 
-- **GitHub**: [https://github.com/HectorIFC/malachi](https://github.com/HectorIFC/malachi)
-- **Issues**: [https://github.com/HectorIFC/malachi/issues](https://github.com/HectorIFC/malachi/issues)
-- **Documentation**: [https://hectorifc.github.io/malachi](https://hectorifc.github.io/malachi)
+- **GitHub**: [https://github.com/malachi-hq/malachi](https://github.com/malachi-hq/malachi)
+- **Issues**: [https://github.com/malachi-hq/malachi/issues](https://github.com/malachi-hq/malachi/issues)
+- **Documentation**: [https://malachi-hq.github.io/malachi](https://malachi-hq.github.io/malachi)
 
 ---
 
 ## License
 
-MIT License - see [LICENSE](https://github.com/HectorIFC/malachi/blob/main/LICENSE) for details.
+MIT License - see [LICENSE](https://github.com/malachi-hq/malachi/blob/main/LICENSE) for details.

@@ -199,7 +199,7 @@ them are covered by the guarantee:
   after a restart. A frontend that has not yet seen the split is refused, seats itself at the fenced
   edge, and retries against the successor. The head is found in the **control plane**, not in the
   splitting node's own cache, so the fence does not depend on that node having produced to the range and
-  an operator can split from any node ([#41](https://github.com/HectorIFC/malachi/issues/41)).
+  an operator can split from any node ([#41](https://github.com/malachi-hq/malachi/issues/41)).
 
   What the fence does **not** claim. It closes the segment's **primary**, which is enough because an
   append is only accepted by the head of the replica set, and once the segment is sealed no failover can

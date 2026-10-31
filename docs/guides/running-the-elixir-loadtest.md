@@ -137,7 +137,7 @@ mix malachi.loadtest --scenario produce --connections 20 --duration 10 --batch 1
 
 The [Elixir load test results](../generated/loadtest-elixir-results.md) page renders exactly this
 document, from `benchmark/published/loadtest-elixir.json`, as does the Elixir section of the
-[benchmark dashboard](https://hectorifc.github.io/malachi/benchmarks/).
+[benchmark dashboard](https://malachi-hq.github.io/malachi/benchmarks/).
 
 That file is written by CI, not by hand: the Publish results workflow measures it on every push to
 main and commits the result, so an edit of your own would be overwritten by the next merge. A pull

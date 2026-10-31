@@ -52,6 +52,10 @@ jobs:
       MALACHI_CONNECTION_LIMIT_ENABLED: 'false'
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: 📥 Checkout code
         uses: actions/checkout@v4
         # This job runs repository code (deps and the generators). Nothing here does authenticated
@@ -132,6 +136,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - name: 📥 Checkout code
         uses: actions/checkout@v4
         with:
@@ -185,6 +193,10 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - name: 🛡️ Harden the runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       # The full history, because publishing decides between two results by which commit is newer
       # (scripts/publish-results.sh), and that is an ancestry question a shallow clone cannot answer.
       - name: 📥 Checkout code

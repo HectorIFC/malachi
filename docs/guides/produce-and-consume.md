@@ -179,7 +179,7 @@ Both are transient and both mean retry, not fail:
 > Treating them as fatal is like seeing a "back in 5 minutes" sign and concluding the store closed forever.
 
 The bundled scripts handle both: `:migrating` through the `withRetry` helper in
-[`scripts/lib/cli.js`](https://github.com/HectorIFC/malachi/blob/main/scripts/lib/cli.js), and
+[`scripts/lib/cli.js`](https://github.com/malachi-hq/malachi/blob/main/scripts/lib/cli.js), and
 `:not_owner` with a back-off around the fetch. Each prints a grey `~` per attempt, so you can watch a
 split or a failover happen live. A client that treats either as fatal will appear to fail at random under
 an otherwise healthy resharding.

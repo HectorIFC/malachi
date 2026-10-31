@@ -82,7 +82,7 @@ read-only and compares, per segment, what every copy holds:
   not start where the previous ended) is damaged whatever the other copies say.
 
 It does not require the files themselves to be identical, and it used to. Healthy copies differ as
-files on every run ([#152](https://github.com/HectorIFC/malachi/issues/152)). Only a fenced copy, usually
+files on every run ([#152](https://github.com/malachi-hq/malachi/issues/152)). Only a fenced copy, usually
 the primary's, has its preallocated tail trimmed, so a follower's last file keeps its blank tail. And each
 node rolls its internal files at its own sync points. The report calls that `benign`. That recovery zeroes
 a torn write inside the preallocated region, instead of truncating it, is pinned by the store's own tests.
@@ -95,7 +95,7 @@ sizes and md5s, the records and bytes that verify, a digest of the valid records
 the nodes that disagree. A disagreement in record counts is named by its direction, because the two
 directions are different defects: `behind` is a copy short of what the segment holds, which is data this
 replica lost or has not caught up on, while `ahead` is a copy holding records its segment's seal excludes
-([#175](https://github.com/HectorIFC/malachi/issues/175)). `record_count_split` is the case where the
+([#175](https://github.com/malachi-hq/malachi/issues/175)). `record_count_split` is the case where the
 named copies differ both ways at once, or where a two-copy tie leaves nothing to compare against. When
 the control plane's sealed length is known it is what the direction is measured from, not what the peers
 happen to hold. It also keeps the evidence under `tmp/chaos/evidence/<time>-<commit>/`, in a
@@ -161,7 +161,7 @@ came back believing the environment and orphaned the metadata the reshard had mo
 > **Currently red, and not because of the ring.** The two shared closing invariants below (acked-write
 > survival and the post-chaos produce) fail on this drill today: a sharded control plane returns from a
 > full-cluster restart healthy but unable to serve metadata writes. That is
-> [#136](https://github.com/HectorIFC/malachi/issues/136), which reproduces on `main`, reproduces with
+> [#136](https://github.com/malachi-hq/malachi/issues/136), which reproduces on `main`, reproduces with
 > no reshard involved, and does not reproduce on an unsharded cluster. The two events above, which are
 > what this drill certifies, pass.
 
@@ -180,7 +180,7 @@ on `main`, that is the newest release whose code differs (a release that only ch
 skipped); when your tree changes the code, it is the newest release. The oldest it accepts is 0.14.2
 for an unsharded run (the first release with every gate the canary exercises and every control-plane
 group this tree starts) and 0.16.1 for a sharded one (see below), although no release runs sharded before
-the first one that carries the fix for [#136](https://github.com/HectorIFC/malachi/issues/136). The run prints which release it took and why, and records it.
+the first one that carries the fix for [#136](https://github.com/malachi-hq/malachi/issues/136). The run prints which release it took and why, and records it.
 
 **NEW** is your working tree with `test/support/upgrade_canary.patch` applied, which gives it what no release has yet: a capability and a cluster flag (`upgrade_canary`), a metadata
 command at the next machine version, a replication message older builds do not know, and a data format
@@ -208,7 +208,7 @@ every swap:
 
 The control plane is sharded (four vnodes, split to five) only when OLD itself brings a restarted node's
 vnode members back, which releases before the fix for
-[#136](https://github.com/HectorIFC/malachi/issues/136) do not: rolled back onto such a release, a sharded
+[#136](https://github.com/malachi-hq/malachi/issues/136) do not: rolled back onto such a release, a sharded
 cluster loses each vnode's quorum at its second node, whatever the drill does. On an older OLD the drill runs
 unsharded and splits nothing. The run prints which one it chose and why, and records it.
 
@@ -245,7 +245,7 @@ The file is written **before** the harness exits, including when it failed, beca
 exactly the run whose record is worth keeping. Unset the variable and nothing is written.
 
 The [Chaos certification results](../generated/chaos-results.md) page renders exactly this document,
-from `benchmark/published/chaos-node.json`, and the [benchmark dashboard](https://hectorifc.github.io/malachi/benchmarks/) shows
+from `benchmark/published/chaos-node.json`, and the [benchmark dashboard](https://malachi-hq.github.io/malachi/benchmarks/) shows
 the same run beside the two load tests.
 
 CI keeps that file current: the Publish results workflow runs the node-fault drill on every push to

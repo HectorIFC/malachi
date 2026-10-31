@@ -224,7 +224,7 @@ replication factor:
 - **RF 1.** There is no other copy to seal on, so the range stops taking writes until an operator
   acts. That is deliberate: the alternative was writing new records over ones that may have been
   acknowledged. Rolling a single-copy segment on without that risk is tracked in
-  [#210](https://github.com/HectorIFC/malachi/issues/210).
+  [#210](https://github.com/malachi-hq/malachi/issues/210).
 
 To recover a blocked range by hand, on the node that reported the damage:
 
